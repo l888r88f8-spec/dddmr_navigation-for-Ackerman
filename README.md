@@ -2,7 +2,9 @@
 
 ## Ackermann Demo Video
 
-[Watch the Ackermann navigation demo video](./src/dddmr_p2p_move_base/video.mp4)
+<p align='center'>
+    <img src="./video.gif" alt="Ackermann navigation demo" width="780"/>
+</p>
 
 ## 🚀 Big update!
 We’ve just integrated a Gazebo models using Unitree-go2 with the DDDMR Navigation Stack, unlocking true 3D navigation for simulation and testing. Using the latest quadruped robots go2 combined with our advanced stack, you can explore navigation capabilities that go far beyond traditional 2D navigation frameworks.
