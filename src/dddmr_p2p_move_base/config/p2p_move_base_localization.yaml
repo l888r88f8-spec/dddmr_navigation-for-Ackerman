@@ -137,9 +137,9 @@ local_planner:
     # initial heading-alignment phase and let the path follower turn while moving.
     heading_align_angle: 3.2
     prune_plane_timeout: 3.0 # 裁剪超时
-    xy_goal_tolerance: 0.45
+    xy_goal_tolerance: 1.0
     # Likewise, do not require an in-place final heading alignment at the goal.
-    yaw_goal_tolerance: 3.2
+    yaw_goal_tolerance: 15.0
     controller_frequency: 10.0
     # 碰撞约束
     cuboid:
