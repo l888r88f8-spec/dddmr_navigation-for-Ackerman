@@ -29,6 +29,9 @@
 * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #include <mpc_critics/collision_model.h>
+#include <algorithm>
+#include <cmath>
+#include <limits>
 
 PLUGINLIB_EXPORT_CLASS(mpc_critics::CollisionModel, mpc_critics::ScoringModel)
 
@@ -46,15 +49,30 @@ void CollisionModel::onInitialize(){
   node_->get_parameter(name_ + ".weight", weight_);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "weight: %.2f", weight_);
 
+  node_->declare_parameter(name_ + ".search_radius", rclcpp::ParameterValue(1.0));
+  node_->get_parameter(name_ + ".search_radius", search_radius_);
+  RCLCPP_INFO(node_->get_logger().get_child(name_), "search_radius: %.2f", search_radius_);
+
+  node_->declare_parameter(name_ + ".clearance_penalty_distance", rclcpp::ParameterValue(0.0));
+  node_->get_parameter(name_ + ".clearance_penalty_distance", clearance_penalty_distance_);
+  RCLCPP_INFO(node_->get_logger().get_child(name_), "clearance_penalty_distance: %.2f", clearance_penalty_distance_);
+
+  node_->declare_parameter(name_ + ".clearance_weight", rclcpp::ParameterValue(0.0));
+  node_->get_parameter(name_ + ".clearance_weight", clearance_weight_);
+  RCLCPP_INFO(node_->get_logger().get_child(name_), "clearance_weight: %.2f", clearance_weight_);
+
 }
 
 double CollisionModel::scoreTrajectory(base_trajectory::Trajectory &traj){
   
-  if(shared_data_->pcl_perception_->points.size()<5){
+  if(!shared_data_->pcl_perception_ || shared_data_->pcl_perception_->points.size()<5 ||
+      !shared_data_->pcl_perception_kdtree_){
     return 0.0;
   }
   
 
+
+  double minimum_clearance = std::numeric_limits<double>::infinity();
 
   for(unsigned int i=0;i<traj.getPointsSize();i++){
 
@@ -118,8 +136,7 @@ double CollisionModel::scoreTrajectory(base_trajectory::Trajectory &traj){
     dy.x/=(2.*half_y);dy.y/=(2.*half_y);dy.z/=(2.*half_y);
     dz.x/=(2.*half_z);dz.y/=(2.*half_z);dz.z/=(2.*half_z);
 
-    //@The robot is not possible to be larger than 2 meters?
-    shared_data_->pcl_perception_kdtree_->radiusSearch(pcl_traj_pose, 1.0, id, sqdist);
+    shared_data_->pcl_perception_kdtree_->radiusSearch(pcl_traj_pose, search_radius_, id, sqdist);
   
     for(auto pit=id.begin();pit!=id.end();pit++){
       auto pct_point = shared_data_->pcl_perception_->points[(*pit)];
@@ -138,12 +155,25 @@ double CollisionModel::scoreTrajectory(base_trajectory::Trajectory &traj){
         return -1.0;
       }
       else{
-        //@implement obstacle distance as rating?
-        //traj.cost_ += obstacle_distance;
+        double clearance_x = std::max(0.0, x_value - half_x);
+        double clearance_y = std::max(0.0, y_value - half_y);
+        double clearance_z = std::max(0.0, z_value - half_z);
+        double clearance = std::sqrt(clearance_x * clearance_x +
+                                     clearance_y * clearance_y +
+                                     clearance_z * clearance_z);
+        minimum_clearance = std::min(minimum_clearance, clearance);
       }
     }
   }
-  //@ there is obstacle, but the collision is passed, therefore return 0.0
+
+  if(clearance_weight_ > 0.0 &&
+     clearance_penalty_distance_ > 0.0 &&
+     std::isfinite(minimum_clearance) &&
+     minimum_clearance < clearance_penalty_distance_)
+  {
+    return (clearance_penalty_distance_ - minimum_clearance) * clearance_weight_;
+  }
+
   return 0.0;
 }
 

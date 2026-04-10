@@ -3,8 +3,8 @@
 
   <node pkg="mcl_3dl" exec="pcl_publisher" output="screen" respawn="false">
     <param from="$(find-pkg-share global_planner)/config/path_planning_on_static_layer.yaml" />
-    <param name="map_dir" value="$(find-pkg-share global_planner)/data/map.pcd" />
-    <param name="ground_dir" value="$(find-pkg-share global_planner)/data/ground.pcd" />
+    <param name="map_dir" value="/home/robot/map/LOAM/GlobalMap.pcd" />
+    <param name="ground_dir" value="/home/robot/map/LOAM/GlobalMap.pcd" />
   </node>
 
   <!--name argument is not required, because it will overwrite all node name in the exec-->

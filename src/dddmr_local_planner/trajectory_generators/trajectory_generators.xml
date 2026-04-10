@@ -5,6 +5,10 @@
       <description>TBW</description>
     </class>
 
+    <class type="trajectory_generators::AckermannSimpleTrajectoryGeneratorTheory"  base_class_type="trajectory_generators::TrajectoryGeneratorTheory">
+      <description>TBW</description>
+    </class>
+
     <class type="trajectory_generators::DDRotateInplaceTheory"  base_class_type="trajectory_generators::TrajectoryGeneratorTheory">
       <description>TBW</description>
     </class>
@@ -15,4 +19,3 @@
 
   </library>
 </class_libraries>
-

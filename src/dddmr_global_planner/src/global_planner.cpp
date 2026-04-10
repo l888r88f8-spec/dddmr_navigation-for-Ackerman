@@ -393,6 +393,10 @@ void GlobalPlanner::getROSPath(std::vector<unsigned int>& path_id, nav_msgs::msg
 bool GlobalPlanner::getStartGoalID(const geometry_msgs::msg::PoseStamped& start, const geometry_msgs::msg::PoseStamped& goal,
                                     unsigned int& start_id, unsigned int& goal_id){
 
+  const double search_radius = 1.0;
+  const double fallback_vertical_radius = 0.5;
+  const double fallback_max_nearest_distance = 3.0;
+
   //@Get goal ID
   std::vector<int> pointIdxRadiusSearch_goal;
   std::vector<float> pointRadiusSquaredDistance_goal;
@@ -404,28 +408,40 @@ bool GlobalPlanner::getStartGoalID(const geometry_msgs::msg::PoseStamped& start,
   //@Compute nearest pc as goal
   //@TODO: add an edge between goal and nearest pc
   
-  if(kdtree_ground_->radiusSearch (pcl_goal, 0.5, pointIdxRadiusSearch_goal, pointRadiusSquaredDistance_goal)<1){
-    RCLCPP_WARN(this->get_logger(), "Goal is not found.");
+  if(kdtree_ground_->radiusSearch (pcl_goal, search_radius, pointIdxRadiusSearch_goal, pointRadiusSquaredDistance_goal)<1){
+    RCLCPP_WARN(this->get_logger(), "Goal is not found within %.2f m.", search_radius);
+    bool fallback_search = false;
+
     RCLCPP_WARN(this->get_logger(), "Using vertical search to find a goal on the ground.");
-    bool second_search = false;
-    if(graph_ready_){
-      for(double z=goal.pose.position.z; z>-10;z-=0.1){
-        pointIdxRadiusSearch_goal.clear();
-        pointRadiusSquaredDistance_goal.clear();
-        pcl_goal.z = z;
-        if(kdtree_ground_->radiusSearch(pcl_goal, 0.3, pointIdxRadiusSearch_goal, pointRadiusSquaredDistance_goal,0)>0)
-        {
-          second_search = true;
-          break;
+    for(double z=goal.pose.position.z; z>-10;z-=0.1){
+      pointIdxRadiusSearch_goal.clear();
+      pointRadiusSquaredDistance_goal.clear();
+      pcl_goal.z = z;
+      if(kdtree_ground_->radiusSearch(pcl_goal, fallback_vertical_radius, pointIdxRadiusSearch_goal, pointRadiusSquaredDistance_goal,0)>0)
+      {
+        fallback_search = true;
+        break;
+      }
+    }
+
+    if(!fallback_search){
+      pointIdxRadiusSearch_goal.clear();
+      pointRadiusSquaredDistance_goal.clear();
+      if(kdtree_ground_->nearestKSearch(pcl_goal, 1, pointIdxRadiusSearch_goal, pointRadiusSquaredDistance_goal) > 0){
+        double nearest_distance = sqrt(pointRadiusSquaredDistance_goal[0]);
+        if(nearest_distance <= fallback_max_nearest_distance){
+          fallback_search = true;
+          RCLCPP_WARN(this->get_logger(), "Falling back to nearest goal point on the ground at %.2f m.", nearest_distance);
+        }
+        else{
+          RCLCPP_WARN(this->get_logger(), "Nearest goal point on the ground is too far away: %.2f m.", nearest_distance);
         }
       }
-      if(!second_search)
-        return false;
     }
-    else{
+
+    if(!fallback_search){
       return false;
     }
-    return false;
   }
   
   if(enable_detail_log_){
@@ -450,9 +466,39 @@ bool GlobalPlanner::getStartGoalID(const geometry_msgs::msg::PoseStamped& start,
   pcl_start.y = start.pose.position.y;
   pcl_start.z = start.pose.position.z;
 
-  if(kdtree_ground_->radiusSearch (pcl_start, 0.5, pointIdxRadiusSearch_start, pointRadiusSquaredDistance_start)<1){
-    RCLCPP_WARN(this->get_logger(), "Start is not found.");
-    return false;
+  if(kdtree_ground_->radiusSearch (pcl_start, search_radius, pointIdxRadiusSearch_start, pointRadiusSquaredDistance_start)<1){
+    RCLCPP_WARN(this->get_logger(), "Start is not found within %.2f m.", search_radius);
+    bool fallback_search = false;
+
+    for(double z=start.pose.position.z; z>-10;z-=0.1){
+      pointIdxRadiusSearch_start.clear();
+      pointRadiusSquaredDistance_start.clear();
+      pcl_start.z = z;
+      if(kdtree_ground_->radiusSearch(pcl_start, fallback_vertical_radius, pointIdxRadiusSearch_start, pointRadiusSquaredDistance_start,0)>0)
+      {
+        fallback_search = true;
+        break;
+      }
+    }
+
+    if(!fallback_search){
+      pointIdxRadiusSearch_start.clear();
+      pointRadiusSquaredDistance_start.clear();
+      if(kdtree_ground_->nearestKSearch(pcl_start, 1, pointIdxRadiusSearch_start, pointRadiusSquaredDistance_start) > 0){
+        double nearest_distance = sqrt(pointRadiusSquaredDistance_start[0]);
+        if(nearest_distance <= fallback_max_nearest_distance){
+          fallback_search = true;
+          RCLCPP_WARN(this->get_logger(), "Falling back to nearest start point on the ground at %.2f m.", nearest_distance);
+        }
+        else{
+          RCLCPP_WARN(this->get_logger(), "Nearest start point on the ground is too far away: %.2f m.", nearest_distance);
+        }
+      }
+    }
+
+    if(!fallback_search){
+      return false;
+    }
   }
   
   if(enable_detail_log_){
@@ -517,6 +563,8 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlan(const geometry_msgs::msg::PoseSta
   std::vector<unsigned int> smoothed_path;
   std::vector<unsigned int> smoothed_path_2nd;
   nav_msgs::msg::Path ros_path;
+  ros_path.header.frame_id = global_frame_;
+  ros_path.header.stamp = clock_->now();
 
   if(getStartGoalID(start, goal, start_id, goal_id)){
     if(!use_pre_graph_)

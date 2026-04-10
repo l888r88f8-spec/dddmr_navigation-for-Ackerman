@@ -1,13 +1,17 @@
 p2p_move_base:
   ros__parameters:
     controller_frequency: 10.0
-    planner_patience: 10.0
+    planner_patience: 10.0 # 等待全局规划超时时间s
     oscillation_distance: 5.0
     oscillation_angle: 1.0
     oscillation_patience: 15.0
     controller_patience: 10.0
-    no_plan_retry_num: 10
+    no_plan_retry_num: 10 # 规划失败重试次数
     waiting_patience: 10.0
+    drive_trajectory_generator_name: "ackermann_simple"
+    rotate_trajectory_generator_name: "differential_drive_rotate_shortest_angle"
+    # Ackermann platforms cannot recover with an in-place rotate behavior.
+    recovery_behavior_name: ""
 global_plan_manager:
   ros__parameters:
     global_planner_action_name: "get_dwa_plan"
@@ -24,7 +28,7 @@ mcl_ip:
         ground_scan_index: 7
         vertical_angle_bottom: -15.0          # degrees
         vertical_angle_top: 15.0            # degrees
-        scan_period: 0.1                   # seconds
+        scan_period: 0.05                   # seconds
 
 
     imageProjection:
@@ -41,10 +45,10 @@ mcl_fa:
         edge_threshold: 0.1
         surf_threshold: 0.1
         nearest_feature_search_distance: 3.0
-        
+
 sub_maps:
   ros__parameters:
-    pose_graph_dir: "/root/dddmr_bags/benanli_detention_basin_pg"
+    pose_graph_dir: "/home/robot/nav26_ws/src/dddmr_navigation/src/dddmr_p2p_move_base/map"
     sub_map_search_radius: 50.0
     sub_map_warmup_trigger_distance: 20.0
     complete_map_voxel_size: 0.4
@@ -122,26 +126,32 @@ mcl_3dl:
 
 local_planner:
   ros__parameters:
-    odom_topic: odom
-    forward_prune: 3.0
+    odom_topic: lio_sam/localization/odometry
+    # Ackermann rollout uses sim_time=2.0 and max_vel_x=3.0, so a 3 m prune
+    # horizon makes the critics prefer short / slow trajectories. Keep the
+    # local target farther ahead so faster valid rollouts are not penalized.
+    forward_prune: 8.0
     backward_prune: 1.0
     heading_tracking_distance: 0.5
-    heading_align_angle: 0.5
-    prune_plane_timeout: 3.0
-    xy_goal_tolerance: 0.3
-    yaw_goal_tolerance: 0.3
+    # Ackermann platforms cannot rotate in place, so we skip the
+    # initial heading-alignment phase and let the path follower turn while moving.
+    heading_align_angle: 3.2
+    prune_plane_timeout: 3.0 # 裁剪超时
+    xy_goal_tolerance: 0.45
+    # Likewise, do not require an in-place final heading alignment at the goal.
+    yaw_goal_tolerance: 3.2
     controller_frequency: 10.0
-    
+    # 碰撞约束
     cuboid:
-      flb: [0.42, 0.36, 0.0] #front left buttom
-      frb: [0.42, -0.36, 0.0]
-      flt: [0.42, 0.36, 0.6] #front left top
-      frt: [0.42, -0.36, 0.6]
-      blb: [-0.35, 0.36, 0.0] #back left buttom
-      brb: [-0.35, -0.36, 0.0]
-      blt: [-0.35, 0.36, 0.6]
-      brt: [-0.35, -0.36, 0.6]
-
+      flb: [0.50, 0.32, -0.32] #front left buttom
+      frb: [0.50, -0.32, -0.32]
+      flt: [0.50, 0.32, 0.55] #front left top
+      frt: [0.50, -0.32, 0.55]
+      blb: [-0.38, 0.32, -0.32] #back left buttom
+      brb: [-0.38, -0.32, -0.32]
+      blt: [-0.38, 0.32, 0.55]
+      brt: [-0.38, -0.32, 0.55]
+# 恢复行为
 recovery_behaviors:
   ros__parameters:
     plugins: ["rotate_inplace"]
@@ -150,89 +160,102 @@ recovery_behaviors:
       frequency: 10.0
       tolerance: 0.3
       trajectory_generator_name: "differential_drive_rotate_inplace"
-
+# 轨迹生成
 trajectory_generators:
   ros__parameters:
-    plugins: ["differential_drive_simple", "differential_drive_rotate_inplace", "differential_drive_rotate_shortest_angle"]
+    plugins: ["ackermann_simple", "differential_drive_rotate_inplace", "differential_drive_rotate_shortest_angle"]
     differential_drive_rotate_shortest_angle:
       plugin: "trajectory_generators::DDRotateInplaceTheory"
       controller_frequency: 10.0
       rotation_speed: 0.5
       cuboid:
-        flb: [0.42, 0.36, 0.0] #front left buttom
-        frb: [0.42, -0.36, 0.0]
-        flt: [0.42, 0.36, 0.6] #front left top
-        frt: [0.42, -0.36, 0.6]
-        blb: [-0.35, 0.36, 0.0] #back left buttom
-        brb: [-0.35, -0.36, 0.0]
-        blt: [-0.35, 0.36, 0.6]
-        brt: [-0.35, -0.36, 0.6]
+        flb: [0.50, 0.32, -0.32] #front left buttom
+        frb: [0.50, -0.32, -0.32]
+        flt: [0.50, 0.32, 0.55] #front left top
+        frt: [0.50, -0.32, 0.55]
+        blb: [-0.38, 0.32, -0.32] #back left buttom
+        brb: [-0.38, -0.32, -0.32]
+        blt: [-0.38, 0.32, 0.55]
+        brt: [-0.38, -0.32, 0.55]
 
     differential_drive_rotate_inplace:
       plugin: "trajectory_generators::DDRotateInplaceTheory"
       controller_frequency: 10.0
       rotation_speed: 0.5
       cuboid:
-        flb: [0.42, 0.36, 0.0] #front left buttom
-        frb: [0.42, -0.36, 0.0]
-        flt: [0.42, 0.36, 0.6] #front left top
-        frt: [0.42, -0.36, 0.6]
-        blb: [-0.35, 0.36, 0.0] #back left buttom
-        brb: [-0.35, -0.36, 0.0]
-        blt: [-0.35, 0.36, 0.6]
-        brt: [-0.35, -0.36, 0.6]
+        flb: [0.50, 0.32, -0.32] #front left buttom
+        frb: [0.50, -0.32, -0.32]
+        flt: [0.50, 0.32, 0.55] #front left top
+        frt: [0.50, -0.32, 0.55]
+        blb: [-0.38, 0.32, -0.32] #back left buttom
+        brb: [-0.38, -0.32, -0.32]
+        blt: [-0.38, 0.32, 0.55]
+        brt: [-0.38, -0.32, 0.55]
     
-    differential_drive_simple:
-      plugin: "trajectory_generators::DDSimpleTrajectoryGeneratorTheory"
-      max_vel_x: 1.0
-      min_vel_x: 0.1 #0.1 This value should not be negative, because we want to customize backward behavior
-      max_vel_theta: 0.6
-      min_vel_theta: 0.15
-      acc_lim_x: 1.0
-      acc_lim_theta: 3.0
+    ackermann_simple:
+      plugin: "trajectory_generators::AckermannSimpleTrajectoryGeneratorTheory"
+      max_vel_x: 3.0
+      min_vel_x: 0.10 # Allow the car to settle more gently near the goal.
+      max_vel_theta: 5.0
+      min_vel_theta: 0.0
+      acc_lim_x: 6.0
+      acc_lim_theta: 20.0
       deceleration_ratio: 2.0
       max_motor_shaft_rpm: 3000.0
       wheel_diameter: 0.16
       gear_ratio: 1.0
       robot_radius: 0.25
+      wheelbase: 0.549185
+      max_steer: 0.69
       
       controller_frequency: 10.0
       sim_time: 2.0
-      linear_x_sample: 5.0
-      angular_z_sample: 10.0
+      linear_x_sample: 12.0
+      angular_z_sample: 31.0
       sim_granularity: 0.05
       angular_sim_granularity: 0.025
 
       cuboid:
-        flb: [0.42, 0.36, 0.0] #front left buttom
-        frb: [0.42, -0.36, 0.0]
-        flt: [0.42, 0.36, 0.6] #front left top
-        frt: [0.42, -0.36, 0.6]
-        blb: [-0.35, 0.36, 0.0] #back left buttom
-        brb: [-0.35, -0.36, 0.0]
-        blt: [-0.35, 0.36, 0.6]
-        brt: [-0.35, -0.36, 0.6]
-
+        flb: [0.50, 0.32, -0.32] #front left buttom
+        frb: [0.50, -0.32, -0.32]
+        flt: [0.50, 0.32, 0.55] #front left top
+        frt: [0.50, -0.32, 0.55]
+        blb: [-0.38, 0.32, -0.32] #back left buttom
+        brb: [-0.38, -0.32, -0.32]
+        blt: [-0.38, 0.32, 0.55]
+        brt: [-0.38, -0.32, 0.55]
+# 代价模型
 mpc_critics:
   ros__parameters:
-    plugins: ["collision", "stick_path", "pure_pursuit", "toward_global_plan", "collision_rotate", "collision_rotate_shortest", "prefer_rotate_shortest"]
+    plugins: ["collision", "prefer_forward_speed", "stick_path", "pure_pursuit", "toward_global_plan", "collision_rotate", "collision_rotate_shortest", "prefer_rotate_shortest"]
     collision:
       plugin: "mpc_critics::CollisionModel"
-      trajectory_generator: differential_drive_simple
+      trajectory_generator: ackermann_simple
       weight: 1.0
+      search_radius: 3.0
+      clearance_penalty_distance: 1.5
+      clearance_weight: 4.0
+    prefer_forward_speed:
+      plugin: "mpc_critics::PreferForwardSpeedModel"
+      trajectory_generator: ackermann_simple
+      weight: 1.0
+      target_speed: 2.2
+      goal_slowdown_distance: 2.0
+      goal_slowdown_min_speed: 0.0
     stick_path:
       plugin: "mpc_critics::StickPathModel"
-      trajectory_generator: differential_drive_simple
-      weight: 0.1
+      trajectory_generator: ackermann_simple
+      weight: 0.05
     pure_pursuit:
       plugin: "mpc_critics::PurePursuitModel"
-      trajectory_generator: differential_drive_simple
+      trajectory_generator: ackermann_simple
+      weight: 0.35
       translation_weight: 1.0
-      orientation_weight: 0.01
+      orientation_weight: 0.0
     toward_global_plan:
       plugin: "mpc_critics::TowardGlobalPlanModel"
-      trajectory_generator: differential_drive_simple
-      weight: 1.0
+      trajectory_generator: ackermann_simple
+      weight: 0.5
     collision_rotate:
       plugin: "mpc_critics::CollisionModel"
       trajectory_generator: differential_drive_rotate_inplace
@@ -253,33 +276,31 @@ perception_3d_local:
     max_obstacle_distance: 9999.0
     inscribed_radius: 0.5
     inflation_descending_rate: 2.0
-    inflation_radius: 1.5
+    inflation_radius: 1.5 # 膨胀系数
     sensors_collected_frequency: 10.0
-    plugins: ["map", "path_blocked_strategy", "lidar"]
+    plugins: ["map", "lidar"]
     map:
       plugin: "perception_3d::StaticLayer"
       is_local_planner: true
       mapping_mode: false
       map_topic: "mapcloud"
       ground_topic: "mapground"
-    path_blocked_strategy:
-      plugin: "perception_3d::PathBlockedStrategy"
-      check_radius: 0.3
     lidar:
       plugin: "perception_3d::MultiLayerSpinningLidar"
       is_local_planner: true
-      topic: "segmented_cloud_pure"
+      topic: "lio_sam/localization/cloud_nonground"
       pub_gbl_marking_for_visualization: false
       vertical_FOV_top: 15.0
       vertical_FOV_bottom: -15.0
-      scan_effective_positive_start: 30.0
-      scan_effective_positive_end: 180.0
-      scan_effective_negative_start: -30.0
-      scan_effective_negative_end: -180.0
-      resolution: 0.05
+      scan_effective_positive_start: 90.0
+      scan_effective_positive_end: 150.0
+      scan_effective_negative_start: 90.0
+      scan_effective_negative_end: 30.0
+      xy_resolution: 0.05
       height_resolution: 0.05
+      min_obstacle_height: -0.30
       marking_height: 2.0
-      perception_window_size: 3.0 #the window for marking/clearing in meter, we dont casting to maximum range of the sensor even it is gbl map
+      perception_window_size: 8.0 # keep the sensed local obstacle window aligned with the longer Ackermann rollout horizon
       segmentation_ignore_ratio: 0.5 #f a segmentation match static pc with this ratio, we ignore it. ex: a wall
       expected_sensor_time: 0.2
 
@@ -292,7 +313,7 @@ perception_3d_global:
     inflation_descending_rate: 2.0
     inflation_radius: 1.5
     sensors_collected_frequency: 10.0
-    plugins: ["map", "lidar"]
+    plugins: ["map"]
     dgraph_publish_frequency: 1.0
     map:
       plugin: "perception_3d::StaticLayer"
@@ -316,7 +337,7 @@ perception_3d_global:
     lidar:
       plugin: "perception_3d::MultiLayerSpinningLidar"
       is_local_planner: false
-      topic: "segmented_cloud_pure"
+      topic: "lidar_points"
       pub_gbl_marking_for_visualization: true
       vertical_FOV_top: 15.0
       vertical_FOV_bottom: -15.0

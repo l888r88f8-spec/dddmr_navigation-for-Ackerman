@@ -33,11 +33,11 @@
 namespace mpc_critics
 {
 
-class CollisionModel: public ScoringModel{
+class PreferForwardSpeedModel: public ScoringModel{
 
   public:
     
-    CollisionModel();
+    PreferForwardSpeedModel();
     virtual double scoreTrajectory(base_trajectory::Trajectory &traj);
 
   protected:
@@ -45,10 +45,9 @@ class CollisionModel: public ScoringModel{
     virtual void onInitialize();
 
   private:
-
-    double search_radius_;
-    double clearance_penalty_distance_;
-    double clearance_weight_;
+    double target_speed_;
+    double goal_slowdown_distance_;
+    double goal_slowdown_min_speed_;
 };
 
 }//end of name space

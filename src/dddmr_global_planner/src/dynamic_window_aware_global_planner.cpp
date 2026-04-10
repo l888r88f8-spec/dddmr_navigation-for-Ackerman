@@ -182,14 +182,24 @@ void DWA_GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoal
   }
   else{
     auto result = std::make_shared<dddmr_sys_core::action::GetPlan::Result>();
-    result->path = global_dwa_path_;
+    if(global_dwa_path_.poses.empty()){
+      result->path = global_path_;
+      pub_path_->publish(global_path_);
+    }
+    else{
+      result->path = global_dwa_path_;
+      pub_path_->publish(global_dwa_path_);
+    }
     goal_handle->succeed(result);
-    pub_path_->publish(global_dwa_path_);
   }
   
 }
 
 void DWA_GlobalPlanner::determineDWAPlan(){
+
+  if(global_path_.poses.empty() || pcl_global_path_->points.empty()){
+    return;
+  }
 
   geometry_msgs::msg::PoseStamped start;
   perception_3d_ros_->getGlobalPose(start);
@@ -279,7 +289,20 @@ void DWA_GlobalPlanner::determineDWAPlan(){
   dwa_goal.pose.position.z = pcl_global_path_->points[dwa_pivot].z;
   
   nav_msgs::msg::Path dwa_path = global_planner_->makeROSPlan(start, dwa_goal);
-  for(size_t i=dwa_pivot; i<pcl_global_path_->points.size(); i++){
+  dwa_path.header.frame_id = global_frame_;
+  dwa_path.header.stamp = clock_->now();
+
+  if(dwa_path.poses.empty()){
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 5000, "Failed to refresh DWA path from current pose, keep the previous valid path.");
+    return;
+  }
+
+  size_t safe_pivot = static_cast<size_t>(dwa_pivot);
+  if(safe_pivot >= global_path_.poses.size()){
+    safe_pivot = global_path_.poses.size() - 1;
+  }
+
+  for(size_t i=safe_pivot; i<global_path_.poses.size(); i++){
     dwa_path.poses.push_back(global_path_.poses[i]);
   }
   dwa_path.poses.push_back(global_path_.poses.back());

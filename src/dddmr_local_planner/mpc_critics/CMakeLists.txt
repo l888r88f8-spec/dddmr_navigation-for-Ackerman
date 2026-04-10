@@ -96,6 +96,7 @@ add_library(critics SHARED
   models/pure_pursuit_model.cpp
   models/collision_model.cpp
   models/collision_min_max_model.cpp
+  models/prefer_forward_speed_model.cpp
   models/shortest_angle_model.cpp
   models/stick_path_model.cpp
   models/toward_global_plan_model.cpp

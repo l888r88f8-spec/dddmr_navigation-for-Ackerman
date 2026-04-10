@@ -147,7 +147,16 @@ void StaticLayer::cbMap(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 {
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
   /*transform to point cloud library format first so we can leverage PCL*/
-  pcl::fromROSMsg(*msg, *pcl_map_);  
+  pcl::PointCloud<pcl::PointXYZI>::Ptr incoming_map(new pcl::PointCloud<pcl::PointXYZI>);
+  pcl::fromROSMsg(*msg, *incoming_map);
+
+  if(incoming_map->points.empty()){
+    RCLCPP_WARN_THROTTLE(node_->get_logger().get_child(name_), *node_->get_clock(), 5000,
+      "%s received an empty map cloud, keep the previous valid map.", name_.c_str());
+    return;
+  }
+
+  pcl_map_ = incoming_map;
 
   if(shared_data_->static_map_size_!=pcl_map_->points.size()){
     new_map_ = true;
@@ -163,7 +172,16 @@ void StaticLayer::cbGround(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 {
 
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
-  pcl::fromROSMsg(*msg, *pcl_ground_);  
+  pcl::PointCloud<pcl::PointXYZI>::Ptr incoming_ground(new pcl::PointCloud<pcl::PointXYZI>);
+  pcl::fromROSMsg(*msg, *incoming_ground);
+
+  if(incoming_ground->points.empty()){
+    RCLCPP_WARN_THROTTLE(node_->get_logger().get_child(name_), *node_->get_clock(), 5000,
+      "%s received an empty ground cloud, keep the previous valid ground.", name_.c_str());
+    return;
+  }
+
+  pcl_ground_ = incoming_ground;
 
   if(shared_data_->static_ground_size_!=pcl_ground_->points.size()){
     new_ground_ = true;

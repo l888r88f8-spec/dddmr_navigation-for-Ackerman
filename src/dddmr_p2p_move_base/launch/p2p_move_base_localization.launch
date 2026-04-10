@@ -1,31 +1,48 @@
 <launch>
+  <let name="use_sim" value="true"/>
+  <set_env name="RCUTILS_COLORIZED_OUTPUT" value="1"/>
   
-  <node pkg="lego_loam_bor" exec="mcl_feature" output="screen" respawn="false">
+  <!-- <node pkg="lego_loam_bor" exec="mcl_feature" output="screen" respawn="false">
     <param from="$(find-pkg-share p2p_move_base)/config/p2p_move_base_localization.yaml" />
     <remap from="/lslidar_point_cloud" to="/lslidar_point_cloud"/>
     <remap from="/odom" to="/odom"/>
-  </node>
+  </node> -->
 
   <!--- TF -->
-  <node pkg="tf2_ros" exec="static_transform_publisher" name="sensor2baselink"  args="0.3 0 0.38 -3.1415926535 0.0 0 base_link laser_link" />
+  <!-- Provided by LIO-SAM (odom -> hesai_lidar and base_link -> hesai_lidar). -->
+  <!-- <node pkg="tf2_ros" exec="static_transform_publisher" name="sensor2baselink"  args="0.3 0 0.38 -3.1415926535 0.0 0 base_link hesai_lidar" /> -->
 
-  <node pkg="mcl_3dl" exec="mcl_3dl" output="screen" respawn="false">
-    <param from="$(find-pkg-share p2p_move_base)/config/p2p_move_base_localization.yaml" />
+  <node pkg="mcl_3dl" exec="pcl_publisher" output="screen" respawn="false" emulate_tty="true">
+    <param from="$(find-pkg-share mcl_3dl)/config/pcl_publisher.yaml" />
+    <param name="map_dir" value="/home/robot/map/map.pcd" />
+    <param name="ground_dir" value="/home/robot/map/ground.pcd" />
+    <param name="use_sim_time" value="$(var use_sim)"/>
   </node>
   
   <!--name argument is not required, because it will overwrite all node name in the exec-->
-  <node pkg="global_planner" exec="global_planner_node" output="screen" respawn="false">
+  <node pkg="global_planner" exec="global_planner_node" output="screen" respawn="false" emulate_tty="true">
     <param from="$(find-pkg-share p2p_move_base)/config/p2p_move_base_localization.yaml" />
+    <param name="use_sim_time" value="$(var use_sim)"/>
   </node>
 
   <!--name argument is not required, because it will overwrite all node name in the exec-->
-  <node pkg="p2p_move_base" exec="p2p_move_base_node" output="screen" respawn="false">
+  <node pkg="p2p_move_base" exec="p2p_move_base_node" output="screen" respawn="false" emulate_tty="true">
     <param from="$(find-pkg-share p2p_move_base)/config/p2p_move_base_localization.yaml" />
+    <param name="use_sim_time" value="$(var use_sim)"/>
+    <remap from="/odom" to="/lio_sam/localization/odometry" />
   </node>
-  <node pkg="p2p_move_base" exec="clicked2goal.py" output="screen" respawn="false"/>
-  
 
+  <node pkg="p2p_move_base" exec="clicked2goal.py" output="screen" respawn="false" emulate_tty="true">
+    <param name="use_sim_time" value="$(var use_sim)"/>
+  </node>
+  
   <let name="rviz_config" value="$(find-pkg-share p2p_move_base)/rviz/p2p_move_base_localization.rviz"/>
-  <node name="rviz2" pkg="rviz2" exec="rviz2" args="-d $(var rviz_config)"/>
+  
+  <node name="rviz2" pkg="rviz2" exec="rviz2" args="-d $(var rviz_config)" emulate_tty="true">
+    <param name="use_sim_time" value="$(var use_sim)"/>
+  </node>
+
+  <!--- out: cmd_vel(geometry_msgs/msg/Twist)
+             cmd_vel_stamped(geometry_msgs/msg/TwistStamped) -->
 
 </launch>

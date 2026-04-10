@@ -70,6 +70,7 @@ Collect marked pcl from all plugins.
 */
 
 void StackedPerception::doClear_then_Mark(){
+  std::unique_lock<mutex_t> lock(*access_);
 
   /*
   Say we want a velodyne plus realsense, we want realsense to clear what velodyne saw or vise versa.
@@ -126,6 +127,8 @@ double StackedPerception::get_min_dGraphValue(const unsigned int index){
 }
 
 void StackedPerception::aggregateObservations(){
+  std::unique_lock<mutex_t> lock(*access_);
+  std::unique_lock<std::recursive_mutex> sensor_lock(shared_data_->ground_kdtree_cb_mutex_);
 
   shared_data_->aggregate_observation_.reset(new pcl::PointCloud<pcl::PointXYZI>);
 

@@ -110,7 +110,7 @@ double PurePursuitModel::scoreTrajectory(base_trajectory::Trajectory &traj){
   */
   //RCLCPP_INFO(node_->get_logger().get_child(name_), "trans: %f,%f,%f", tf_pose_difference.transform.translation.x, tf_pose_difference.transform.translation.y, tf_pose_difference.transform.translation.z);
   //@ normalized translation vs rotation
-  return (translation_weight_*distance + orientation_weight_*y);
+  return (translation_weight_*distance + orientation_weight_*y) * weight_;
 }
 
 }//end of name space

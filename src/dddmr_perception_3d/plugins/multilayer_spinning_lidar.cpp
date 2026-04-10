@@ -117,6 +117,10 @@ void MultiLayerSpinningLidar::onInitialize()
   node_->get_parameter(name_ + ".marking_height", marking_height_);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "marking_height: %.2f", marking_height_);
 
+  node_->declare_parameter(name_ + ".min_obstacle_height", rclcpp::ParameterValue(0.0));
+  node_->get_parameter(name_ + ".min_obstacle_height", min_obstacle_height_);
+  RCLCPP_INFO(node_->get_logger().get_child(name_), "min_obstacle_height: %.2f", min_obstacle_height_);
+
   node_->declare_parameter(name_ + ".perception_window_size", rclcpp::ParameterValue(0.0));
   node_->get_parameter(name_ + ".perception_window_size", perception_window_size_);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "perception_window_size: %.2f", perception_window_size_);
@@ -247,7 +251,7 @@ void MultiLayerSpinningLidar::cbSensor(const sensor_msgs::msg::PointCloud2::Shar
   pass.filter (*pcl_msg);
   pass.setInputCloud (pcl_msg);
   pass.setFilterFieldName ("z");
-  pass.setFilterLimits (0.0, marking_height_);
+  pass.setFilterLimits (min_obstacle_height_, marking_height_);
   pass.filter (*pcl_msg);
 
   pcl::VoxelGrid<pcl::PointXYZ> sor;
@@ -257,6 +261,21 @@ void MultiLayerSpinningLidar::cbSensor(const sensor_msgs::msg::PointCloud2::Shar
 
   //@Protect Mark/Clear functions
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
+
+  if(pcl_msg->points.empty()){
+    pcl_msg_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl_msg_gbl_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    sensor_current_observation_->clear();
+    last_observation_time_ = clock_->now();
+
+    if(pub_current_observation_->get_subscription_count()>0){
+      sensor_msgs::msg::PointCloud2 ros_pc2_msg;
+      pcl_msg_->header.frame_id = is_local_planner_ ? gbl_utils_->getGblFrame() : gbl_utils_->getRobotFrame();
+      pcl::toROSMsg(*pcl_msg_, ros_pc2_msg);
+      pub_current_observation_->publish(ros_pc2_msg);
+    }
+    return;
+  }
 
   pcl_msg_.reset(new pcl::PointCloud<pcl::PointXYZ>);
   pcl_msg_ = pcl_msg;
@@ -273,7 +292,7 @@ void MultiLayerSpinningLidar::cbSensor(const sensor_msgs::msg::PointCloud2::Shar
 
   if(pub_current_observation_->get_subscription_count()>0){
     sensor_msgs::msg::PointCloud2 ros_pc2_msg;
-    pcl_msg_->header.frame_id = gbl_utils_->getRobotFrame();
+    pcl_msg_->header.frame_id = is_local_planner_ ? gbl_utils_->getGblFrame() : gbl_utils_->getRobotFrame();
     pcl::toROSMsg(*pcl_msg_, ros_pc2_msg);
     pub_current_observation_->publish(ros_pc2_msg);
   }

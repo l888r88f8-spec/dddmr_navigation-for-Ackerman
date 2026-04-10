@@ -58,8 +58,11 @@ void PathBlockedStrategy::selfMark(){
   //@initial opinion as pass
   opinion_ = perception_3d::PASS;
 
+  const auto aggregate_observation = shared_data_->aggregate_observation_;
+  const auto prune_plan_size = shared_data_->pcl_prune_plan_.points.size();
+
   //@ there is no obstacle, so return ratio 0
-  if(shared_data_->aggregate_observation_->points.size()<= 5 || shared_data_->pcl_prune_plan_.points.size()<=0){
+  if(!aggregate_observation || aggregate_observation->points.size() <= 5 || prune_plan_size == 0){
     prune_plan_blocked_ratio_ = 0.0;
   }
   //@this method will return percent of point of pruneplan which conflict with obstacle  
@@ -67,7 +70,7 @@ void PathBlockedStrategy::selfMark(){
     
     pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr pcl_perception_kdtree;
     pcl_perception_kdtree.reset(new pcl::KdTreeFLANN<pcl::PointXYZI>());
-    pcl_perception_kdtree->setInputCloud(shared_data_->aggregate_observation_);        
+    pcl_perception_kdtree->setInputCloud(aggregate_observation);
     
     std::vector<int> pointIdxRadiusSearch;
     std::vector<float> pointRadiusSquaredDistance;
@@ -88,7 +91,7 @@ void PathBlockedStrategy::selfMark(){
         prune_plan_point_blocked.push_back(temp_point);
       }
     }
-    prune_plan_orignal_size = shared_data_->pcl_prune_plan_.points.size();
+    prune_plan_orignal_size = prune_plan_size;
     prune_plan_blocked_size = prune_plan_point_blocked.size();
     prune_plan_blocked_ratio_ = (prune_plan_blocked_size) / (prune_plan_orignal_size)*100.0;
   }

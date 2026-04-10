@@ -50,7 +50,8 @@ void CollisionMinMaxModel::onInitialize(){
 
 double CollisionMinMaxModel::scoreTrajectory(base_trajectory::Trajectory &traj){
   
-  if(shared_data_->pcl_perception_->points.size()<5){
+  if(!shared_data_->pcl_perception_ || shared_data_->pcl_perception_->points.size()<5 ||
+      !shared_data_->pcl_perception_kdtree_){
     return 0.0;
   }
   

@@ -23,7 +23,7 @@ find_package(pcl_conversions REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_geometry REQUIRED)
 
-find_package(PCL 1.15 REQUIRED QUIET)
+find_package(PCL REQUIRED QUIET)
 find_package(OpenCV REQUIRED)
 
 set(dependencies

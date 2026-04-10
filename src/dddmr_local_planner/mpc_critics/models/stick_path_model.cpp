@@ -73,7 +73,7 @@ double StickPathModel::scoreTrajectory(base_trajectory::Trajectory &traj){
   }
   normalized_distance /= shared_data_->pcl_prune_plan_->points.size();
   //RCLCPP_INFO(this->get_logger(), "Normalized_distance: %f",normalized_distance);
-  return normalized_distance;
+  return normalized_distance * weight_;
 }
 
 }//end of name space

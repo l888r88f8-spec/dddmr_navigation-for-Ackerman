@@ -152,6 +152,7 @@ class MultiLayerSpinningLidar: public Sensor{
     double scan_effective_positive_start_, scan_effective_positive_end_;
     double scan_effective_negative_start_, scan_effective_negative_end_;
     double resolution_, height_resolution_;
+    double min_obstacle_height_;
     double marking_height_;
     double perception_window_size_; 
     double segmentation_ignore_ratio_;

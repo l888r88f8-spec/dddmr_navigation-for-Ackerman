@@ -30,6 +30,8 @@
 */
 #include <local_planner/local_planner.h>
 
+#include <cmath>
+
 namespace local_planner {
 
 Local_Planner::Local_Planner(const std::string& name): Node(name)
@@ -456,10 +458,27 @@ void Local_Planner::getBestTrajectory(std::string traj_gen_name, base_trajectory
   for(auto traj_it=trajectories_->begin();traj_it!=trajectories_->end();traj_it++){
 
     mpc_critics_ros_->scoreTrajectory(traj_gen_name, (*traj_it));
-    
-    if((*traj_it).cost_>=0 && (*traj_it).cost_<=minimum_cost){
-      best_traj = (*traj_it);
-      minimum_cost = (*traj_it).cost_;
+
+    if((*traj_it).cost_>=0){
+      constexpr double kCostTieEpsilon = 1e-6;
+      bool strictly_better = (*traj_it).cost_ + kCostTieEpsilon < minimum_cost;
+      bool cost_tie = std::fabs((*traj_it).cost_ - minimum_cost) <= kCostTieEpsilon;
+      bool straighter_tie_break =
+        best_traj.cost_ >= 0 &&
+        std::fabs((*traj_it).thetav_) + kCostTieEpsilon < std::fabs(best_traj.thetav_);
+      bool faster_tie_break =
+        best_traj.cost_ >= 0 &&
+        std::fabs(std::fabs((*traj_it).thetav_) - std::fabs(best_traj.thetav_)) <= kCostTieEpsilon &&
+        (*traj_it).xv_ > best_traj.xv_ + kCostTieEpsilon;
+
+      // Trajectory samples are iterated from negative yaw rate to positive yaw
+      // rate. Using <= here makes equal-cost ties drift toward the last sample,
+      // which biases the robot to the left. Prefer straighter, then faster
+      // trajectories when the critic score is effectively tied.
+      if(strictly_better || (cost_tie && (straighter_tie_break || faster_tie_break))){
+        best_traj = (*traj_it);
+        minimum_cost = (*traj_it).cost_;
+      }
     }
 
     if((*traj_it).cost_>=0){
@@ -467,6 +486,33 @@ void Local_Planner::getBestTrajectory(std::string traj_gen_name, base_trajectory
     }
 
   }
+
+  if(best_traj.cost_ < 0 && !trajectories_->empty()){
+    size_t rejected_collision = 0;
+    size_t rejected_pure_pursuit = 0;
+    size_t rejected_toward_global_plan = 0;
+    size_t rejected_other = 0;
+
+    for(const auto& traj : *trajectories_){
+      if(traj.cost_ == -1.0){
+        rejected_collision++;
+      }
+      else if(traj.cost_ == -4.0){
+        rejected_pure_pursuit++;
+      }
+      else if(traj.cost_ == -12.0){
+        rejected_toward_global_plan++;
+      }
+      else if(traj.cost_ < 0.0){
+        rejected_other++;
+      }
+    }
+
+    RCLCPP_WARN_THROTTLE(this->get_logger().get_child(name_), *clock_, 2000,
+      "Trajectory rejection summary: collision=%zu, pure_pursuit=%zu, toward_global_plan=%zu, other=%zu, total=%zu",
+      rejected_collision, rejected_pure_pursuit, rejected_toward_global_plan, rejected_other, trajectories_->size());
+  }
+
   accepted_pose_arr.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
   accepted_pose_arr.header.stamp = clock_->now();
   pub_accepted_trajectory_pose_array_->publish(accepted_pose_arr);

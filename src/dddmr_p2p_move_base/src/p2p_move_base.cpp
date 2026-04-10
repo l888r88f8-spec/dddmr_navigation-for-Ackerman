@@ -103,6 +103,23 @@ void P2PMoveBase::initial(const std::shared_ptr<local_planner::Local_Planner>& l
       this,
       "recovery_behaviors", recovery_behaviors_client_group_);
 
+  this->declare_parameter("drive_trajectory_generator_name", rclcpp::ParameterValue("differential_drive_simple"));
+  this->get_parameter("drive_trajectory_generator_name", drive_trajectory_generator_name_);
+  RCLCPP_INFO(this->get_logger(), "drive_trajectory_generator_name: %s", drive_trajectory_generator_name_.c_str());
+
+  this->declare_parameter("rotate_trajectory_generator_name", rclcpp::ParameterValue("differential_drive_rotate_shortest_angle"));
+  this->get_parameter("rotate_trajectory_generator_name", rotate_trajectory_generator_name_);
+  RCLCPP_INFO(this->get_logger(), "rotate_trajectory_generator_name: %s", rotate_trajectory_generator_name_.c_str());
+
+  this->declare_parameter("recovery_behavior_name", rclcpp::ParameterValue("rotate_inplace"));
+  this->get_parameter("recovery_behavior_name", recovery_behavior_name_);
+  if(recovery_behavior_name_.empty()){
+    RCLCPP_WARN(this->get_logger(), "recovery_behavior_name is empty, recovery behavior is disabled.");
+  }
+  else{
+    RCLCPP_INFO(this->get_logger(), "recovery_behavior_name: %s", recovery_behavior_name_.c_str());
+  }
+
   //@Create action server
   action_server_p2p_move_base_ = rclcpp_action::create_server<dddmr_sys_core::action::PToPMoveBase>(
     this,
@@ -330,7 +347,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
         }
         
         base_trajectory::Trajectory best_traj;
-        dddmr_sys_core::PlannerState PS = LP_->computeVelocityCommand("differential_drive_rotate_shortest_angle", best_traj);
+        dddmr_sys_core::PlannerState PS = LP_->computeVelocityCommand(rotate_trajectory_generator_name_, best_traj);
 
         if(PS == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
           FSM_->last_valid_control_ = clock_->now();
@@ -407,7 +424,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
         }
         
         base_trajectory::Trajectory best_traj;
-        dddmr_sys_core::PlannerState PS = LP_->computeVelocityCommand("differential_drive_rotate_shortest_angle", best_traj);
+        dddmr_sys_core::PlannerState PS = LP_->computeVelocityCommand(rotate_trajectory_generator_name_, best_traj);
 
         if(PS == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
           FSM_->last_valid_control_ = clock_->now();
@@ -484,7 +501,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       }
 
       base_trajectory::Trajectory best_traj;
-      dddmr_sys_core::PlannerState PS = LP_->computeVelocityCommand("differential_drive_simple", best_traj);
+      dddmr_sys_core::PlannerState PS = LP_->computeVelocityCommand(drive_trajectory_generator_name_, best_traj);
 
       if(PS == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
         FSM_->last_valid_control_ = clock_->now();
@@ -599,7 +616,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
         LP_->setPlan(plan);
       }
       base_trajectory::Trajectory best_traj;
-      dddmr_sys_core::PlannerState PS = LP_->computeVelocityCommand("differential_drive_simple", best_traj);
+      dddmr_sys_core::PlannerState PS = LP_->computeVelocityCommand(drive_trajectory_generator_name_, best_traj);
 
       if(PS == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
         FSM_->last_valid_control_ = clock_->now();
@@ -659,8 +676,16 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
 
 void P2PMoveBase::startRecoveryBehaviors(){
 
+  if(recovery_behavior_name_.empty()){
+    RCLCPP_WARN(this->get_logger(), "Skip recovery because recovery behavior is disabled.");
+    is_recoverying_ = false;
+    is_recoverying_succeed_ = true;
+    publishZeroVelocity();
+    return;
+  }
+
   auto goal_msg = dddmr_sys_core::action::RecoveryBehaviors::Goal();
-  goal_msg.behavior_name = "rotate_inplace";
+  goal_msg.behavior_name = recovery_behavior_name_;
 
   auto send_goal_options = rclcpp_action::Client<dddmr_sys_core::action::RecoveryBehaviors>::SendGoalOptions();
   
@@ -670,6 +695,7 @@ void P2PMoveBase::startRecoveryBehaviors(){
     std::bind(&P2PMoveBase::recovery_behaviors_client_result_callback, this, std::placeholders::_1);
   
   is_recoverying_ = true;
+  is_recoverying_succeed_ = false;
   recovery_behaviors_client_ptr_->async_send_goal(goal_msg, send_goal_options);
 }
 
