@@ -289,7 +289,7 @@ perception_3d_local:
     lidar:
       plugin: "perception_3d::MultiLayerSpinningLidar"
       is_local_planner: true
-      topic: "lio_sam/localization/cloud_nonground"          # 局部避障使用的实时去地点云
+      topic: "lio_sam/cloud_nonground"          # 局部避障使用的实时去地点云
       pub_gbl_marking_for_visualization: false
       vertical_FOV_top: 15.0
       vertical_FOV_bottom: -15.0
