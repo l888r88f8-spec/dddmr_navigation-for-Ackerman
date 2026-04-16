@@ -114,7 +114,7 @@ class P2PMoveBase : public rclcpp::Node {
     bool is_recoverying_;
     bool is_recoverying_succeed_;
     std::string recovery_behavior_name_;
-    void startRecoveryBehaviors();
+    bool startRecoveryBehaviors();
 
 
 };

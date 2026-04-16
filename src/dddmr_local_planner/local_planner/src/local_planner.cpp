@@ -366,7 +366,9 @@ void Local_Planner::updateGlobalPose(){
   robot_cuboid_.markers.clear();
   marker_edge_.header.stamp = trans_gbl2b_.header.stamp;
   robot_cuboid_.markers.push_back(marker_edge_);
-  pub_robot_cuboid_->publish(robot_cuboid_);
+  if(pub_robot_cuboid_->get_subscription_count() > 0){
+    pub_robot_cuboid_->publish(robot_cuboid_);
+  }
 }
 
 geometry_msgs::msg::TransformStamped Local_Planner::getGlobalPose(){
@@ -441,7 +443,9 @@ void Local_Planner::prunePlan(double forward_distance, double backward_distance)
   
   prune_plan_.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
   prune_plan_.header.stamp = clock_->now();
-  pub_prune_plan_->publish(prune_plan_);
+  if(pub_prune_plan_->get_subscription_count() > 0){
+    pub_prune_plan_->publish(prune_plan_);
+  }
   last_valid_prune_plan_ = clock_->now();
   //RCLCPP_DEBUG(this->get_logger().get_child(name_), "%lu",prune_plan_.poses.size());
 }
@@ -452,6 +456,10 @@ void Local_Planner::getBestTrajectory(std::string traj_gen_name, base_trajectory
   best_traj.cost_ = -1;
 
   double minimum_cost = 9999999;
+  const bool publish_accepted_trajectory =
+    pub_accepted_trajectory_pose_array_->get_subscription_count() > 0;
+  const bool publish_best_trajectory =
+    pub_best_trajectory_pose_->get_subscription_count() > 0;
   geometry_msgs::msg::PoseArray accepted_pose_arr;
   pcl::PointCloud<pcl::PointXYZ> cuboids_pcl;
 
@@ -481,7 +489,7 @@ void Local_Planner::getBestTrajectory(std::string traj_gen_name, base_trajectory
       }
     }
 
-    if((*traj_it).cost_>=0){
+    if(publish_accepted_trajectory && (*traj_it).cost_>=0){
       trajectory2posearray_cuboids((*traj_it), accepted_pose_arr, cuboids_pcl);
     }
 
@@ -513,15 +521,19 @@ void Local_Planner::getBestTrajectory(std::string traj_gen_name, base_trajectory
       rejected_collision, rejected_pure_pursuit, rejected_toward_global_plan, rejected_other, trajectories_->size());
   }
 
-  accepted_pose_arr.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
-  accepted_pose_arr.header.stamp = clock_->now();
-  pub_accepted_trajectory_pose_array_->publish(accepted_pose_arr);
+  if(publish_accepted_trajectory){
+    accepted_pose_arr.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
+    accepted_pose_arr.header.stamp = clock_->now();
+    pub_accepted_trajectory_pose_array_->publish(accepted_pose_arr);
+  }
 
-  geometry_msgs::msg::PoseArray best_pose_arr;
-  trajectory2posearray_cuboids(best_traj, best_pose_arr, cuboids_pcl);
-  best_pose_arr.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
-  best_pose_arr.header.stamp = clock_->now();
-  pub_best_trajectory_pose_->publish(best_pose_arr);
+  if(publish_best_trajectory){
+    geometry_msgs::msg::PoseArray best_pose_arr;
+    trajectory2posearray_cuboids(best_traj, best_pose_arr, cuboids_pcl);
+    best_pose_arr.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
+    best_pose_arr.header.stamp = clock_->now();
+    pub_best_trajectory_pose_->publish(best_pose_arr);
+  }
 
 }
 
@@ -552,9 +564,11 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   //@ prune plan has to come after mutex lock, because global_plan_ros_sub_ reset global plan kd tree
   prunePlan(forward_prune_, backward_prune_);
 
-  sensor_msgs::msg::PointCloud2 ros2_aggregate_onservation;
-  pcl::toROSMsg(*(perception_3d_ros_->getSharedDataPtr()->aggregate_observation_), ros2_aggregate_onservation);
-  pub_aggregate_observation_->publish(ros2_aggregate_onservation);
+  if(pub_aggregate_observation_->get_subscription_count() > 0){
+    sensor_msgs::msg::PointCloud2 ros2_aggregate_onservation;
+    pcl::toROSMsg(*(perception_3d_ros_->getSharedDataPtr()->aggregate_observation_), ros2_aggregate_onservation);
+    pub_aggregate_observation_->publish(ros2_aggregate_onservation);
+  }
   if((clock_->now()-trans_gbl2b_.header.stamp).seconds() > 2.0){
     RCLCPP_ERROR(this->get_logger().get_child(name_), "TF out of date in local planner, the local planner wont go further.");
     return dddmr_sys_core::TF_FAIL;
@@ -580,6 +594,8 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
 
   trajectory_generators_ros_->initializeTheories_wi_Shared_data();
 
+  const bool publish_all_trajectories =
+    pub_trajectory_pose_array_->get_subscription_count() > 0;
   geometry_msgs::msg::PoseArray pose_arr;
   pcl::PointCloud<pcl::PointXYZ> cuboids_pcl;
 
@@ -597,7 +613,9 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
     if(trajectory_generators_ros_->nextTrajectory(traj_gen_name, a_traj)){
       //@ collected all trajectories here, for later scoring
       trajectories_->push_back(a_traj);
-      trajectory2posearray_cuboids(a_traj, pose_arr, cuboids_pcl);
+      if(publish_all_trajectories){
+        trajectory2posearray_cuboids(a_traj, pose_arr, cuboids_pcl);
+      }
     }
 
   }
@@ -607,12 +625,14 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   start_t = start.tv_sec + double(start.tv_usec) / 1e6;
   end_t = end.tv_sec + double(end.tv_usec) / 1e6;
   t_diff = end_t - start_t;
-  RCLCPP_WARN(this->get_logger(), "Map update time: %.9f", t_diff);
+  RCLCPP_DEBUG(this->get_logger(), "Trajectory generation time: %.9f", t_diff);
   #endif
 
-  pose_arr.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
-  pose_arr.header.stamp = clock_->now();
-  pub_trajectory_pose_array_->publish(pose_arr);
+  if(publish_all_trajectories){
+    pose_arr.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
+    pose_arr.header.stamp = clock_->now();
+    pub_trajectory_pose_array_->publish(pose_arr);
+  }
 
   
   //cuboids_pcl.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();

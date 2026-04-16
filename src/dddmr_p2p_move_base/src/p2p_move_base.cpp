@@ -37,6 +37,8 @@ P2PMoveBase::P2PMoveBase(std::string name): Node(name)
 {
   name_ = name;
   clock_ = this->get_clock();
+  is_recoverying_ = false;
+  is_recoverying_succeed_ = false;
 }
 
 rclcpp_action::GoalResponse P2PMoveBase::handle_goal(
@@ -323,8 +325,12 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       if((clock_->now()-FSM_->last_valid_plan_).seconds()>FSM_->planner_patience_){
         RCLCPP_WARN(this->get_logger(), "Time out to find a plan to point (%.2f, %.2f, %.2f)", 
             FSM_->current_goal_.pose.position.x, FSM_->current_goal_.pose.position.y, FSM_->current_goal_.pose.position.z);
-        startRecoveryBehaviors();
-        FSM_->setDecision("d_recovery_waitdone");
+        if(startRecoveryBehaviors()){
+          FSM_->setDecision("d_recovery_waitdone");
+        }
+        else{
+          FSM_->setDecision("d_planning");
+        }
         return false;
       }
       return false;
@@ -341,8 +347,12 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
           //@go to recovery
           auto diff = (clock_->now()-FSM_->last_oscillation_reset_).seconds();
           RCLCPP_WARN(this->get_logger(), "Oscillation time out is detected: %.2f secs for %.2f m.", diff, FSM_->getDistance(FSM_->global_pose_, FSM_->oscillation_pose_));
-          startRecoveryBehaviors();
-          FSM_->setDecision("d_recovery_waitdone");  
+          if(startRecoveryBehaviors()){
+            FSM_->setDecision("d_recovery_waitdone");
+          }
+          else{
+            FSM_->setDecision("d_planning");
+          }
           return false;
         }
         
@@ -377,8 +387,12 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
           //@ this assignment will allow at least one time planning query
           if((clock_->now() - FSM_->last_valid_control_).seconds() > FSM_->controller_patience_){
             RCLCPP_WARN(this->get_logger(), "Controller time out, go to recovery");
-            startRecoveryBehaviors();
-            FSM_->setDecision("d_recovery_waitdone");
+            if(startRecoveryBehaviors()){
+              FSM_->setDecision("d_recovery_waitdone");
+            }
+            else{
+              FSM_->setDecision("d_planning");
+            }
           }
           else{
             FSM_->last_valid_plan_ = clock_->now();
@@ -418,8 +432,12 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
           //@go to recovery
           auto diff = (clock_->now()-FSM_->last_oscillation_reset_).seconds();
           RCLCPP_WARN(this->get_logger(), "Oscillation time out is detected: %.2f secs for %.2f m.", diff, FSM_->getDistance(FSM_->global_pose_, FSM_->oscillation_pose_));
-          startRecoveryBehaviors();
-          FSM_->setDecision("d_recovery_waitdone"); 
+          if(startRecoveryBehaviors()){
+            FSM_->setDecision("d_recovery_waitdone");
+          }
+          else{
+            FSM_->setDecision("d_planning");
+          }
           return false;
         }
         
@@ -456,8 +474,12 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
           //@ this assignment will allow at least one time planning query
           if((clock_->now() - FSM_->last_valid_control_).seconds() > FSM_->controller_patience_){
             RCLCPP_WARN(this->get_logger(), "Controller time out, go to recovery");
-            startRecoveryBehaviors();
-            FSM_->setDecision("d_recovery_waitdone");
+            if(startRecoveryBehaviors()){
+              FSM_->setDecision("d_recovery_waitdone");
+            }
+            else{
+              FSM_->setDecision("d_planning");
+            }
           }
           else{
             FSM_->setDecision("d_align_goal_heading");  
@@ -495,8 +517,12 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
         //@go to recovery
         auto diff = (clock_->now()-FSM_->last_oscillation_reset_).seconds();
         RCLCPP_WARN(this->get_logger(), "Oscillation time out is detected: %.2f secs for %.2f m.", diff, FSM_->getDistance(FSM_->global_pose_, FSM_->oscillation_pose_));
-        startRecoveryBehaviors();
-        FSM_->setDecision("d_recovery_waitdone");
+        if(startRecoveryBehaviors()){
+          FSM_->setDecision("d_recovery_waitdone");
+        }
+        else{
+          FSM_->setDecision("d_planning");
+        }
         return false;
       }
 
@@ -531,8 +557,12 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
         //@ this assignment will allow at least one time planning query
         if((clock_->now() - FSM_->last_valid_control_).seconds() > FSM_->controller_patience_){
           RCLCPP_WARN(this->get_logger(), "Controller time out, go to recovery");
-          startRecoveryBehaviors();
-          FSM_->setDecision("d_recovery_waitdone");
+          if(startRecoveryBehaviors()){
+            FSM_->setDecision("d_recovery_waitdone");
+          }
+          else{
+            FSM_->setDecision("d_planning");
+          }
         }
         else{
           FSM_->last_valid_plan_ = clock_->now();
@@ -648,8 +678,12 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
         //@ this assignment will allow at least one time planning query
         if((clock_->now() - FSM_->last_valid_control_).seconds() > FSM_->controller_patience_){
           RCLCPP_WARN(this->get_logger(), "Controller time out, go to recovery");
-          startRecoveryBehaviors();
-          FSM_->setDecision("d_recovery_waitdone");
+          if(startRecoveryBehaviors()){
+            FSM_->setDecision("d_recovery_waitdone");
+          }
+          else{
+            FSM_->setDecision("d_planning");
+          }
         }
         else{
           FSM_->last_valid_plan_ = clock_->now();
@@ -674,14 +708,17 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
   return false;
 }
 
-void P2PMoveBase::startRecoveryBehaviors(){
+bool P2PMoveBase::startRecoveryBehaviors(){
 
   if(recovery_behavior_name_.empty()){
-    RCLCPP_WARN(this->get_logger(), "Skip recovery because recovery behavior is disabled.");
+    RCLCPP_WARN(this->get_logger(), "Skip recovery because recovery behavior is disabled. Fall back to replanning.");
     is_recoverying_ = false;
-    is_recoverying_succeed_ = true;
+    is_recoverying_succeed_ = false;
+    FSM_->oscillation_pose_ = FSM_->global_pose_;
+    FSM_->last_oscillation_reset_ = clock_->now();
+    FSM_->last_valid_plan_ = clock_->now();
     publishZeroVelocity();
-    return;
+    return false;
   }
 
   auto goal_msg = dddmr_sys_core::action::RecoveryBehaviors::Goal();
@@ -697,12 +734,15 @@ void P2PMoveBase::startRecoveryBehaviors(){
   is_recoverying_ = true;
   is_recoverying_succeed_ = false;
   recovery_behaviors_client_ptr_->async_send_goal(goal_msg, send_goal_options);
+  return true;
 }
 
 void P2PMoveBase::recovery_behaviors_client_goal_response_callback(const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::RecoveryBehaviors>::SharedPtr & goal_handle)
 {
   if (!goal_handle) {
     RCLCPP_ERROR(this->get_logger(), "Goal was rejected by recovery behaviors server");
+    is_recoverying_ = false;
+    is_recoverying_succeed_ = false;
   } else {
     RCLCPP_INFO(this->get_logger(), "Goal accepted by recovery behaviors server, waiting for result");
   }
