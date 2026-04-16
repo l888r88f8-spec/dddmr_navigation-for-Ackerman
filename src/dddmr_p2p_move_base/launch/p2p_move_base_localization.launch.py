@@ -36,7 +36,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'use_sim',
-            default_value='true', # false if you want to use real robot
+            default_value='false', # false if you want to use real robot
             description='Set use_sim_time for launched nodes.',
         ),
         DeclareLaunchArgument(

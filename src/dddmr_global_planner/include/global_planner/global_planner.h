@@ -128,6 +128,7 @@ class GlobalPlanner : public rclcpp::Node {
       double turning_weight_;
       bool enable_detail_log_;
       double a_star_expanding_radius_;
+      double direct_path_distance_threshold_;
       size_t static_ground_size_;
       bool use_pre_graph_;
       
@@ -166,6 +167,15 @@ class GlobalPlanner : public rclcpp::Node {
 
       bool getStartGoalID(const geometry_msgs::msg::PoseStamped& start, const geometry_msgs::msg::PoseStamped& goal, 
                           unsigned int& start_id, unsigned int& goal_id);
+
+      unsigned int getClosestIndexFromRadiusSearch(
+        const std::vector<int>& point_indices,
+        const std::vector<float>& point_squared_distances) const;
+
+      bool buildStraightLinePlan(
+        const geometry_msgs::msg::PoseStamped& start,
+        const geometry_msgs::msg::PoseStamped& goal,
+        nav_msgs::msg::Path& ros_path);
 
       void pubStaticGraph();
       void getROSPath(std::vector<unsigned int>& path_id, nav_msgs::msg::Path& ros_path);

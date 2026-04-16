@@ -11,7 +11,7 @@ Panels:
         - /mcl_euc_cluster1/Topic1
         - /GlobalMarking1/Topic1
       Splitter Ratio: 0.44416242837905884
-    Tree Height: 616
+    Tree Height: 654
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
@@ -471,16 +471,16 @@ Visualization Manager:
       Channel Name: intensity
       Class: rviz_default_plugins/PointCloud2
       Color: 255; 255; 255
-      Color Transformer: ""
+      Color Transformer: Intensity
       Decay Time: 0
       Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
-      Max Intensity: 4096
+      Max Intensity: 0
       Min Color: 0; 0; 0
       Min Intensity: 0
       Name: aggregated_pc
-      Position Transformer: ""
+      Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 3
       Size (m): 0.10000000149011612
@@ -507,7 +507,7 @@ Visualization Manager:
       Color: 255; 255; 255
       Color Transformer: Intensity
       Decay Time: 0
-      Enabled: true
+      Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 4096
@@ -528,7 +528,7 @@ Visualization Manager:
         Value: /perception_3d_local/lidar/current_observation
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -557,16 +557,16 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/XYOrbit
-      Distance: 28.611618041992188
+      Distance: 28.123329162597656
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 8.430623054504395
-        Y: 5.495504379272461
-        Z: 4.929759961669333e-05
+        X: 5.827171325683594
+        Y: -6.043831825256348
+        Z: 5.3369152738014236e-05
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
@@ -580,10 +580,10 @@ Visualization Manager:
 Window Geometry:
   Displays:
     collapsed: false
-  Height: 900
+  Height: 946
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd000000020000000000000156000002f1fc0200000004fb000000100044006900730070006c006100790073010000003b000002f1000000c700fffffffb0000001200530065006c0065006300740069006f006e000000021e000000e70000005c00fffffffb0000001e0054006f006f006c002000500072006f00700065007200740069006500730000000268000000b30000005c00fffffffb0000000a005600690065007700730000000278000000b4000000a000ffffff000000030000064000000037fc0100000001fb0000000800540069006d00650100000000000006400000025300ffffff000004e4000002f100000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000002000000000000015600000319fc0200000004fb000000100044006900730070006c006100790073010000003d00000319000000c900fffffffb0000001200530065006c0065006300740069006f006e000000021e000000e70000005c00fffffffb0000001e0054006f006f006c002000500072006f00700065007200740069006500730000000268000000b30000005c00fffffffb0000000a005600690065007700730000000278000000b4000000a400ffffff000000030000078000000039fc0100000001fb0000000800540069006d0065010000000000000780000002fb00ffffff000006240000031900000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Time:
@@ -592,6 +592,6 @@ Window Geometry:
     collapsed: false
   Views:
     collapsed: false
-  Width: 1600
-  X: 250
-  Y: 206
+  Width: 1920
+  X: 0
+  Y: 27
