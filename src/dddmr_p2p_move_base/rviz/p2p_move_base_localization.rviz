@@ -10,7 +10,7 @@ Panels:
         - /SubMap1/Topic1
         - /mcl_euc_cluster1/Topic1
         - /GlobalMarking1/Topic1
-      Splitter Ratio: 0.44416242837905884
+      Splitter Ratio: 0.5735294222831726
     Tree Height: 654
   - Class: rviz_common/Selection
     Name: Selection
@@ -238,13 +238,6 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: false
-    - Class: rviz_default_plugins/Axes
-      Enabled: true
-      Length: 1.5
-      Name: Axes
-      Radius: 0.05000000074505806
-      Reference Frame: <Fixed Frame>
-      Value: true
     - Alpha: 1
       Arrow Length: 0.30000001192092896
       Axes Length: 0.30000001192092896
@@ -301,17 +294,17 @@ Visualization Manager:
       Use rainbow: true
       Value: false
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
+      Enabled: false
       Name: Cuboid
       Namespaces:
-        edges: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /robot_cuboid
-      Value: true
+      Value: false
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path
@@ -496,40 +489,68 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
-    - Alpha: 1
-      Autocompute Intensity Bounds: true
-      Autocompute Value Bounds:
-        Max Value: 10
-        Min Value: -10
-        Value: true
-      Axis: Z
-      Channel Name: intensity
-      Class: rviz_default_plugins/PointCloud2
-      Color: 255; 255; 255
-      Color Transformer: Intensity
-      Decay Time: 0
-      Enabled: false
-      Invert Rainbow: false
-      Max Color: 255; 255; 255
-      Max Intensity: 4096
-      Min Color: 0; 0; 0
-      Min Intensity: 0
-      Name: current_observation
-      Position Transformer: XYZ
-      Selectable: true
-      Size (Pixels): 3
-      Size (m): 0.10000000149011612
-      Style: Flat Squares
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /perception_3d_local/lidar/current_observation
-      Use Fixed Frame: true
-      Use rainbow: true
-      Value: false
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Frame Timeout: 1
+      Frames:
+        All Enabled: false
+        base_link:
+          Value: true
+        fr_left_link:
+          Value: false
+        fr_right_link:
+          Value: false
+        fr_steer_left_link:
+          Value: false
+        fr_steer_right_link:
+          Value: false
+        hesai_lidar:
+          Value: false
+        imu_link:
+          Value: false
+        map:
+          Value: true
+        odom:
+          Value: false
+        re_left_link:
+          Value: false
+        re_right_link:
+          Value: false
+        sensor_rack_link:
+          Value: false
+        sensor_rack_second_layer_link:
+          Value: false
+        sensor_rack_top_layer_link:
+          Value: false
+      Marker Scale: 5
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Tree:
+        map:
+          odom:
+            base_link:
+              fr_steer_left_link:
+                fr_left_link:
+                  {}
+              fr_steer_right_link:
+                fr_right_link:
+                  {}
+              re_left_link:
+                {}
+              re_right_link:
+                {}
+              sensor_rack_link:
+                {}
+              sensor_rack_second_layer_link:
+                imu_link:
+                  {}
+              sensor_rack_top_layer_link:
+                hesai_lidar:
+                  {}
+      Update Interval: 0
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -568,16 +589,16 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/XYOrbit
-      Distance: 28.123329162597656
+      Distance: 20.794944763183594
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -0.2159590721130371
-        Y: 6.175175666809082
-        Z: 5.518480247701518e-05
+        X: 8.92940902709961
+        Y: 6.670976161956787
+        Z: 5.4232627007877454e-05
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false

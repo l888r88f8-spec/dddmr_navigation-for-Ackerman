@@ -102,6 +102,12 @@ class Local_Planner : public rclcpp::Node {
       std::string robot_frame_;
       std::string odom_topic_;
       std::string odom_topic_qos_;
+      bool debug_publish_robot_cuboid_;
+      bool debug_publish_aggregated_pc_;
+      bool debug_publish_prune_plan_;
+      bool debug_publish_accepted_trajectory_;
+      bool debug_publish_best_trajectory_;
+      bool debug_publish_all_trajectories_;
       
       /*For cuboid visualization*/
       visualization_msgs::msg::MarkerArray robot_cuboid_;

@@ -140,6 +140,13 @@ local_planner:
     # Likewise, do not require an in-place final heading alignment at the goal.
     yaw_goal_tolerance: 5.0                                  # 到达目标点的朝向容差，单位 rad；设大表示基本不要求末端转正
     controller_frequency: 15.0                               # 局部规划器内部控制频率
+    debug_publish:
+      robot_cuboid: false                                    # 调试车体包络，可视化时再打开
+      aggregated_pc: true                                   # 聚合障碍点云很重，默认关闭
+      prune_plan: false                                      # 裁剪后的局部路径，默认关闭
+      accepted_trajectory: false                             # 所有通过筛选的轨迹，默认关闭
+      best_trajectory: true                                 # 最优轨迹，默认关闭
+      all_trajectories: false                                # 全部采样轨迹最重，默认关闭
     # 碰撞约束
     cuboid:
       # 车体包络盒，决定碰撞检测范围；调大更保守，调小更贴近车体但风险更高

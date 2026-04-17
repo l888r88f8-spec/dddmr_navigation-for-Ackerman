@@ -91,6 +91,30 @@ void Local_Planner::initial(
   this->get_parameter("controller_frequency", controller_frequency_);
   RCLCPP_INFO(this->get_logger(), "controller_frequency: %.2f", controller_frequency_);
 
+  declare_parameter("debug_publish.robot_cuboid", rclcpp::ParameterValue(false));
+  this->get_parameter("debug_publish.robot_cuboid", debug_publish_robot_cuboid_);
+  RCLCPP_INFO(this->get_logger(), "debug_publish.robot_cuboid: %d", debug_publish_robot_cuboid_);
+
+  declare_parameter("debug_publish.aggregated_pc", rclcpp::ParameterValue(false));
+  this->get_parameter("debug_publish.aggregated_pc", debug_publish_aggregated_pc_);
+  RCLCPP_INFO(this->get_logger(), "debug_publish.aggregated_pc: %d", debug_publish_aggregated_pc_);
+
+  declare_parameter("debug_publish.prune_plan", rclcpp::ParameterValue(false));
+  this->get_parameter("debug_publish.prune_plan", debug_publish_prune_plan_);
+  RCLCPP_INFO(this->get_logger(), "debug_publish.prune_plan: %d", debug_publish_prune_plan_);
+
+  declare_parameter("debug_publish.accepted_trajectory", rclcpp::ParameterValue(false));
+  this->get_parameter("debug_publish.accepted_trajectory", debug_publish_accepted_trajectory_);
+  RCLCPP_INFO(this->get_logger(), "debug_publish.accepted_trajectory: %d", debug_publish_accepted_trajectory_);
+
+  declare_parameter("debug_publish.best_trajectory", rclcpp::ParameterValue(false));
+  this->get_parameter("debug_publish.best_trajectory", debug_publish_best_trajectory_);
+  RCLCPP_INFO(this->get_logger(), "debug_publish.best_trajectory: %d", debug_publish_best_trajectory_);
+
+  declare_parameter("debug_publish.all_trajectories", rclcpp::ParameterValue(false));
+  this->get_parameter("debug_publish.all_trajectories", debug_publish_all_trajectories_);
+  RCLCPP_INFO(this->get_logger(), "debug_publish.all_trajectories: %d", debug_publish_all_trajectories_);
+
 
   //@Initialize transform listener and broadcaster
   tf_listener_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -366,7 +390,7 @@ void Local_Planner::updateGlobalPose(){
   robot_cuboid_.markers.clear();
   marker_edge_.header.stamp = trans_gbl2b_.header.stamp;
   robot_cuboid_.markers.push_back(marker_edge_);
-  if(pub_robot_cuboid_->get_subscription_count() > 0){
+  if(debug_publish_robot_cuboid_ && pub_robot_cuboid_->get_subscription_count() > 0){
     pub_robot_cuboid_->publish(robot_cuboid_);
   }
 }
@@ -443,7 +467,7 @@ void Local_Planner::prunePlan(double forward_distance, double backward_distance)
   
   prune_plan_.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
   prune_plan_.header.stamp = clock_->now();
-  if(pub_prune_plan_->get_subscription_count() > 0){
+  if(debug_publish_prune_plan_ && pub_prune_plan_->get_subscription_count() > 0){
     pub_prune_plan_->publish(prune_plan_);
   }
   last_valid_prune_plan_ = clock_->now();
@@ -457,8 +481,10 @@ void Local_Planner::getBestTrajectory(std::string traj_gen_name, base_trajectory
 
   double minimum_cost = 9999999;
   const bool publish_accepted_trajectory =
+    debug_publish_accepted_trajectory_ &&
     pub_accepted_trajectory_pose_array_->get_subscription_count() > 0;
   const bool publish_best_trajectory =
+    debug_publish_best_trajectory_ &&
     pub_best_trajectory_pose_->get_subscription_count() > 0;
   geometry_msgs::msg::PoseArray accepted_pose_arr;
   pcl::PointCloud<pcl::PointXYZ> cuboids_pcl;
@@ -564,7 +590,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   //@ prune plan has to come after mutex lock, because global_plan_ros_sub_ reset global plan kd tree
   prunePlan(forward_prune_, backward_prune_);
 
-  if(pub_aggregate_observation_->get_subscription_count() > 0){
+  if(debug_publish_aggregated_pc_ && pub_aggregate_observation_->get_subscription_count() > 0){
     sensor_msgs::msg::PointCloud2 ros2_aggregate_onservation;
     pcl::toROSMsg(*(perception_3d_ros_->getSharedDataPtr()->aggregate_observation_), ros2_aggregate_onservation);
     pub_aggregate_observation_->publish(ros2_aggregate_onservation);
@@ -595,6 +621,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   trajectory_generators_ros_->initializeTheories_wi_Shared_data();
 
   const bool publish_all_trajectories =
+    debug_publish_all_trajectories_ &&
     pub_trajectory_pose_array_->get_subscription_count() > 0;
   geometry_msgs::msg::PoseArray pose_arr;
   pcl::PointCloud<pcl::PointXYZ> cuboids_pcl;
