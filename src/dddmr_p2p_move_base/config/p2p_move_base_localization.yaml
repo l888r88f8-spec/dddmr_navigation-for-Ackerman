@@ -1,6 +1,6 @@
 p2p_move_base:
   ros__parameters:
-    controller_frequency: 15.0                               # 主控制循环频率，越高控制更新越勤，但计算负载也越大
+    controller_frequency: 10.0                               # 主控制循环频率，越高控制更新越勤，但计算负载也越大
     planner_patience: 10.0                                   # 全局规划允许阻塞的最长时间
     oscillation_distance: 5.0                                # 超过该位移则认为已经脱离原地振荡
     oscillation_angle: 1.0                                   # 超过该转角则认为已经脱离原地振荡
@@ -125,7 +125,7 @@ mcl_3dl:
 
 local_planner:
   ros__parameters:
-    odom_topic: odometry/imu                                 # 局部规划使用的位姿/速度来源
+    odom_topic: /lio_sam/localization/odometry               # 局部规划使用的位姿/速度来源
     # Ackermann rollout uses sim_time=2.0 and max_vel_x=3.0, so a 3 m prune
     # horizon makes the critics prefer short / slow trajectories. Keep the
     # local target farther ahead so faster valid rollouts are not penalized.
@@ -139,7 +139,7 @@ local_planner:
     xy_goal_tolerance: 0.6                                   # 到达目标点的位置容差，单位 m
     # Likewise, do not require an in-place final heading alignment at the goal.
     yaw_goal_tolerance: 5.0                                  # 到达目标点的朝向容差，单位 rad；设大表示基本不要求末端转正
-    controller_frequency: 15.0                               # 局部规划器内部控制频率
+    controller_frequency: 10.0                               # 局部规划器内部控制频率
     # 碰撞约束
     cuboid:
       # 车体包络盒，决定碰撞检测范围；调大更保守，调小更贴近车体但风险更高
@@ -157,7 +157,7 @@ recovery_behaviors:
     plugins: ["rotate_inplace"]
     rotate_inplace:
       plugin: "recovery_behaviors::RotateInPlaceBehavior"
-      frequency: 15.0
+      frequency: 10.0
       tolerance: 0.3
       trajectory_generator_name: "ackermann_heading_rotate_inplace"
 # 轨迹生成
@@ -166,7 +166,7 @@ trajectory_generators:
     plugins: ["ackermann_simple", "ackermann_heading_rotate_inplace", "ackermann_heading_rotate_shortest"]
     ackermann_heading_rotate_shortest:
       plugin: "trajectory_generators::DDRotateInplaceTheory"
-      controller_frequency: 15.0
+      controller_frequency: 10.0
       rotation_speed: 0.5
       cuboid:
         flb: [0.50, 0.32, -0.32] #front left buttom
@@ -180,7 +180,7 @@ trajectory_generators:
 
     ackermann_heading_rotate_inplace:
       plugin: "trajectory_generators::DDRotateInplaceTheory"
-      controller_frequency: 15.0
+      controller_frequency: 10.0
       rotation_speed: 0.5
       cuboid:
         flb: [0.50, 0.32, -0.32] #front left buttom
@@ -208,8 +208,8 @@ trajectory_generators:
       wheelbase: 0.549185                                    # 轴距，决定最小转弯半径
       max_steer: 0.69                                        # 最大前轮转角，决定几何可实现的最大曲率
       
-      controller_frequency: 15.0                             # 轨迹生成采样频率
-      sim_time: 1.5                                          # 单条轨迹向前仿真的时长，越长越早开始考虑绕障/转向
+      controller_frequency: 10.0                             # 轨迹生成采样频率
+      sim_time: 2.0                                          # 单条轨迹向前仿真的时长，越长越早开始考虑绕障/转向
       linear_x_sample: 5.0                                   # 线速度采样数，越大候选更密但更耗时
       angular_z_sample: 10.0                                 # 角速度采样数，越大转向候选更密但更耗时
       sim_granularity: 0.05                                  # 线位移仿真步长

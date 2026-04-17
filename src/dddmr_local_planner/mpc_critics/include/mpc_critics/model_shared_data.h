@@ -64,56 +64,56 @@
 namespace mpc_critics
 {
 
-class ModelSharedData {
- public:
-  explicit ModelSharedData(std::shared_ptr<tf2_ros::Buffer> m_tf2Buffer)
-      : tf2Buffer_(std::move(m_tf2Buffer)) {}
+class ModelSharedData{
+  public:
 
-  std::shared_ptr<tf2_ros::Buffer> tf2Buffer() { return tf2Buffer_; }
+    ModelSharedData(std::shared_ptr<tf2_ros::Buffer> m_tf2Buffer):tf2Buffer_(m_tf2Buffer){};
+    
+    std::shared_ptr<tf2_ros::Buffer> tf2Buffer(){return tf2Buffer_;}
 
-  void updateData() {
-    global_frame_ = robot_pose_.header.frame_id;
-    base_frame_ = robot_pose_.child_frame_id;
-
-    // Critics share one perception KD-tree per control cycle.
-    pcl_perception_kdtree_.reset();
-    if (pcl_perception_ && pcl_perception_->points.size() >= 5) {
-      pcl_perception_kdtree_.reset(new pcl::KdTreeFLANN<pcl::PointXYZI>());
-      pcl_perception_kdtree_->setInputCloud(pcl_perception_);
+    void updateData(){
+      global_frame_ = robot_pose_.header.frame_id;
+      base_frame_ = robot_pose_.child_frame_id;
+      /* Critics get kd tree generated in perception_ros when calling aggregateObservations in local planner*/
+      pcl_perception_kdtree_.reset();
+      if(pcl_perception_ && pcl_perception_->points.size()>=5){
+        pcl_perception_kdtree_.reset(new pcl::KdTreeFLANN<pcl::PointXYZI>());
+        pcl_perception_kdtree_->setInputCloud(pcl_perception_);        
+      }
+      
+      pcl_prune_plan_.reset(new pcl::PointCloud<pcl::PointXYZI>);
+      for(auto i=prune_plan_.poses.begin();i!=prune_plan_.poses.end();i++){
+        pcl::PointXYZI ipt;
+        ipt.x = (*i).pose.position.x;
+        ipt.y = (*i).pose.position.y;
+        ipt.z = (*i).pose.position.z;
+        ipt.intensity = 0.;
+        pcl_prune_plan_->push_back(ipt);
+      }
     }
+    pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr pcl_perception_kdtree_;
 
-    pcl_prune_plan_.reset(new pcl::PointCloud<pcl::PointXYZI>);
-    for (const auto& pose : prune_plan_.poses) {
-      pcl::PointXYZI point;
-      point.x = pose.pose.position.x;
-      point.y = pose.pose.position.y;
-      point.z = pose.pose.position.z;
-      point.intensity = 0.0;
-      pcl_prune_plan_->push_back(point);
-    }
+    pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_perception_;
+    
+    //@ this will be easy use for kdtree from pct
+    pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_prune_plan_;
 
-    pcl_prune_plan_kdtree_.reset();
-    if (pcl_prune_plan_->points.size() >= 3) {
-      pcl_prune_plan_kdtree_.reset(new pcl::KdTreeFLANN<pcl::PointXYZI>());
-      pcl_prune_plan_kdtree_->setInputCloud(pcl_prune_plan_);
-    }
-  }
+    nav_msgs::msg::Path prune_plan_;
 
-  pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr pcl_perception_kdtree_;
-  pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_perception_;
+    geometry_msgs::msg::TransformStamped robot_pose_;
 
-  // Cached prune-plan point cloud and KD-tree for critics.
-  pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_prune_plan_;
-  pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr pcl_prune_plan_kdtree_;
+    std::string global_frame_, base_frame_;
 
-  nav_msgs::msg::Path prune_plan_;
-  geometry_msgs::msg::TransformStamped robot_pose_;
-  std::string global_frame_, base_frame_;
-  nav_msgs::msg::Odometry robot_state_;
-  double heading_deviation_;
+    nav_msgs::msg::Odometry robot_state_;
 
- private:
-  std::shared_ptr<tf2_ros::Buffer> tf2Buffer_;
+    double heading_deviation_;
+
+  private:
+
+    std::shared_ptr<tf2_ros::Buffer> tf2Buffer_; 
+    
+    
+
 };
 
 
