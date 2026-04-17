@@ -139,6 +139,7 @@ void StackedPerception::refreshObservationCache(){
   std::unique_lock<std::recursive_mutex> sensor_lock(shared_data_->ground_kdtree_cb_mutex_);
 
   auto aggregate_observation = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+  auto aggregate_observation_kdtree = std::make_shared<pcl::KdTreeFLANN<pcl::PointXYZI>>();
   std::string frame_id;
 
   for (std::vector<std::shared_ptr<Sensor> >::iterator plugin = plugins_.begin(); plugin != plugins_.end();
@@ -162,6 +163,10 @@ void StackedPerception::refreshObservationCache(){
 
   aggregate_observation->header.frame_id = frame_id;
   shared_data_->aggregate_observation_ = aggregate_observation;
+  if(aggregate_observation->points.size() >= 5){
+    aggregate_observation_kdtree->setInputCloud(aggregate_observation);
+  }
+  shared_data_->aggregate_observation_kdtree_ = aggregate_observation_kdtree;
 }
 
 void StackedPerception::aggregateLethal(){

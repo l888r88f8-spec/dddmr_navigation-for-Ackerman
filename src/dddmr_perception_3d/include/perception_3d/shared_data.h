@@ -73,10 +73,11 @@ class SharedData{
     //@ Static graph in static layer for path planning
     std::shared_ptr<perception_3d::StaticGraph> sGraph_ptr_;    
     
-    //@ We only make aggregate observation as shared
-    //@ Add kd tree as shared make system unstable, because multi process are calling the tree
-    //@ I am not able to make a more stable structure
+    //@ Aggregate observation cache for local planner / critics.
+    //@ The point cloud and kdtree are rebuilt together in perception thread and
+    //@ consumed as a snapshot in control loops.
     pcl::PointCloud<pcl::PointXYZI>::Ptr aggregate_observation_;
+    pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr aggregate_observation_kdtree_;
     pcl::PointCloud<pcl::PointXYZI>::Ptr aggregate_lethal_;
 
     //@ limit the current speed of trajectories

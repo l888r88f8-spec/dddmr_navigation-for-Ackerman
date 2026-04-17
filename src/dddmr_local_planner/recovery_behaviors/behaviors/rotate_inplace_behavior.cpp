@@ -188,9 +188,11 @@ dddmr_sys_core::RecoveryState RotateInPlaceBehavior::runBehavior(
     }
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr aggregate_observation;
+    pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr aggregate_observation_kdtree;
     {
       std::unique_lock<perception_3d::StackedPerception::mutex_t> pct_lock(*(stacked_perception->getMutex()));
       aggregate_observation = perception_shared_data->aggregate_observation_;
+      aggregate_observation_kdtree = perception_shared_data->aggregate_observation_kdtree_;
       perception_3d_ros_->getGlobalPose(trans_gbl2b);
       trans2Pose(trans_gbl2b, global_pose);
     }
@@ -259,6 +261,7 @@ dddmr_sys_core::RecoveryState RotateInPlaceBehavior::runBehavior(
     mpc_critics_ros_->getSharedDataPtr()->robot_pose_ = trans_gbl2b;
     mpc_critics_ros_->getSharedDataPtr()->robot_state_ = shared_data_->robot_state_;
     mpc_critics_ros_->getSharedDataPtr()->pcl_perception_ = aggregate_observation;
+    mpc_critics_ros_->getSharedDataPtr()->pcl_perception_kdtree_ = aggregate_observation_kdtree;
     //@ Below function transform prune_plane from nav::msg to pcl type
     //@ Below function put new perception in kdtree for critics to avoid obstacles
     mpc_critics_ros_->updateSharedData();

@@ -587,6 +587,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   control_loop_time_ = clock_->now();
 
   pcl::PointCloud<pcl::PointXYZI>::Ptr aggregate_observation;
+  pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr aggregate_observation_kdtree;
   std::vector<perception_3d::PerceptionOpinion> opinions;
   double current_allowed_max_linear_speed = -1.0;
 
@@ -599,6 +600,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
     prunePlan(forward_prune_, backward_prune_);
     perception_shared_data->pcl_prune_plan_ = pcl_prune_plan_;
     aggregate_observation = perception_shared_data->aggregate_observation_;
+    aggregate_observation_kdtree = perception_shared_data->aggregate_observation_kdtree_;
     current_allowed_max_linear_speed = perception_shared_data->current_allowed_max_linear_speed_;
     opinions = stacked_perception->getOpinions();
   }
@@ -689,6 +691,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   mpc_critics_ros_->getSharedDataPtr()->robot_pose_ = trans_gbl2b_;
   mpc_critics_ros_->getSharedDataPtr()->robot_state_ = robot_state_;
   mpc_critics_ros_->getSharedDataPtr()->pcl_perception_ = aggregate_observation;
+  mpc_critics_ros_->getSharedDataPtr()->pcl_perception_kdtree_ = aggregate_observation_kdtree;
   mpc_critics_ros_->getSharedDataPtr()->prune_plan_ = prune_plan_;
   //@ Below function transform prune_plane from nav::msg to pcl type
   //@ Below function generate kd-tree using aggregate observation
