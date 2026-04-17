@@ -30,6 +30,7 @@
 */
 /*Debug*/
 #include <chrono>
+#include <mutex>
 #include <p2p_move_base/p2p_fsm.h>
 
 //@in enum state, the p_to_p_move_base is included
@@ -71,6 +72,7 @@ class P2PMoveBase : public rclcpp::Node {
     rclcpp_action::Server<dddmr_sys_core::action::PToPMoveBase>::SharedPtr action_server_p2p_move_base_;
 
     std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> current_handle_;
+    mutable std::mutex current_handle_mutex_;
     
     rclcpp::CallbackGroup::SharedPtr tf_listener_group_;
     rclcpp::CallbackGroup::SharedPtr action_server_group_;
@@ -107,6 +109,12 @@ class P2PMoveBase : public rclcpp::Node {
     {
       return handle != nullptr && handle->is_active();
     }
+    bool is_current(
+      const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> handle) const;
+    std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> set_current_and_get_previous(
+      const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> handle);
+    void clear_current_if_matches(
+      const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> handle);
 
     rclcpp_action::Client<dddmr_sys_core::action::RecoveryBehaviors>::SharedPtr recovery_behaviors_client_ptr_;
     void recovery_behaviors_client_goal_response_callback(const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::RecoveryBehaviors>::SharedPtr & goal_handle);
