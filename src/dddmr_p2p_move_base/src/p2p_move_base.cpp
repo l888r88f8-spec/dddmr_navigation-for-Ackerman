@@ -57,39 +57,16 @@ rclcpp_action::CancelResponse P2PMoveBase::handle_cancel(
   return rclcpp_action::CancelResponse::ACCEPT;
 }
 
-bool P2PMoveBase::is_current(
-  const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> handle) const
-{
-  std::lock_guard<std::mutex> lock(current_handle_mutex_);
-  return current_handle_ == handle;
-}
-
-std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>>
-P2PMoveBase::set_current_and_get_previous(
-  const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> handle)
-{
-  std::lock_guard<std::mutex> lock(current_handle_mutex_);
-  auto previous_handle = current_handle_;
-  current_handle_ = handle;
-  return previous_handle;
-}
-
-void P2PMoveBase::clear_current_if_matches(
-  const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> handle)
-{
-  std::lock_guard<std::mutex> lock(current_handle_mutex_);
-  if(current_handle_ == handle){
-    current_handle_.reset();
-  }
-}
-
 void P2PMoveBase::handle_accepted(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> goal_handle)
 {
-  auto previous_handle = set_current_and_get_previous(goal_handle);
-  if (is_active(previous_handle)){
-    RCLCPP_INFO(this->get_logger(), "An older goal is active, preempt it with the new goal.");
+  if (is_active(current_handle_)){
+    RCLCPP_INFO(this->get_logger(), "An older goal is active, cancelling current one.");
     auto result = std::make_shared<dddmr_sys_core::action::PToPMoveBase::Result>();
-    previous_handle->abort(result);
+    current_handle_->abort(result);
+    return;
+  }
+  else{
+    current_handle_ = goal_handle;
   }
   // this needs to return quickly to avoid blocking the executor, so spin up a new thread
   std::thread{std::bind(&P2PMoveBase::executeCb, this, std::placeholders::_1), goal_handle}.detach();
@@ -238,11 +215,7 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
   if(!isQuaternionValid(move_base_goal->target_pose.pose.orientation)){
     RCLCPP_WARN(this->get_logger(),"Aborting on goal because it was sent with an invalid quaternion");
     goal_handle->abort(result);
-    if(is_current(goal_handle)){
-      publishZeroVelocity();
-      GPM_->stop();
-      clear_current_if_matches(goal_handle);
-    }
+    publishZeroVelocity();
     return;
   }
 
@@ -265,11 +238,8 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
       }
 
       RCLCPP_INFO(this->get_logger(), "P2P move base preempted.");
-      if(is_current(goal_handle)){
-        publishZeroVelocity();
-        GPM_->stop();
-        clear_current_if_matches(goal_handle);
-      }
+      publishZeroVelocity();
+      GPM_->stop();
       return;
     }
 
@@ -282,11 +252,8 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
 
       goal_handle->canceled(result);
       RCLCPP_INFO(this->get_logger(), "P2P move base cancelled.");
-      if(is_current(goal_handle)){
-        publishZeroVelocity();
-        GPM_->stop();
-        clear_current_if_matches(goal_handle);
-      }
+      publishZeroVelocity();
+      GPM_->stop();
       return;
     }
 
@@ -297,16 +264,11 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
     feedback->base_position = FSM_->global_pose_;
     feedback->last_decision = FSM_->getLastDecision();
     feedback->current_decision = FSM_->getCurrentDecision();
-    if(goal_handle->is_active()){
-      goal_handle->publish_feedback(feedback);
-    }
+    goal_handle->publish_feedback(feedback);
 
     //if we're done, then we'll return from execute
     if(done){
-      if(is_current(goal_handle)){
-        GPM_->stop();
-        clear_current_if_matches(goal_handle);
-      }
+      GPM_->stop();
       return;
     }
     
@@ -315,10 +277,7 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
     //if(FSM_->isCurrentDecision("d_controlling") && r.cycleTime() > ros::Duration(1 / FSM_->controller_frequency_))
     //  ROS_WARN("Control loop missed its desired rate of %.4fHz... the loop actually took %.4f seconds", FSM_->controller_frequency_, r.cycleTime().toSec());
   }
-  if(is_current(goal_handle)){
-    GPM_->stop();
-    clear_current_if_matches(goal_handle);
-  }
+  GPM_->stop();
 }
 
 bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> goal_handle){
@@ -463,9 +422,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
         RCLCPP_INFO(this->get_logger(), "Goal reach.");
         auto result = std::make_shared<dddmr_sys_core::action::PToPMoveBase::Result>();
         goal_handle->succeed(result);
-        if(is_current(goal_handle)){
-          publishZeroVelocity();
-        }
+        publishZeroVelocity();
         return true;
       }
       else{

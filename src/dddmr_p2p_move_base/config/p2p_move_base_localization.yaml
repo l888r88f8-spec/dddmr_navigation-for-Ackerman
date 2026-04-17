@@ -135,10 +135,10 @@ local_planner:
     # Ackermann platforms cannot rotate in place, so we skip the
     # initial heading-alignment phase and let the path follower turn while moving.
     heading_align_angle: 3.2                                 # 起步前朝向对齐阈值，阿克曼车这里设大表示基本跳过原地对齐
-    prune_plane_timeout: 3.0 # 裁剪超时                     # 局部裁剪路径失效多久后判失败
+    prune_plane_timeout: 3.0 # 裁剪超时                       # 局部裁剪路径失效多久后判失败
     xy_goal_tolerance: 0.6                                   # 到达目标点的位置容差，单位 m
     # Likewise, do not require an in-place final heading alignment at the goal.
-    yaw_goal_tolerance: 5.0                                 # 到达目标点的朝向容差，单位 rad；设大表示基本不要求末端转正
+    yaw_goal_tolerance: 5.0                                  # 到达目标点的朝向容差，单位 rad；设大表示基本不要求末端转正
     controller_frequency: 10.0                               # 局部规划器内部控制频率
     # 碰撞约束
     cuboid:
