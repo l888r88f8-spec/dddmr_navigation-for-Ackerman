@@ -34,6 +34,27 @@ PLUGINLIB_EXPORT_CLASS(perception_3d::StaticLayer, perception_3d::Sensor)
 
 namespace perception_3d
 {
+namespace {
+
+struct GroundLayerAccumulator {
+  double sum_x = 0.0;
+  double sum_y = 0.0;
+  double sum_z = 0.0;
+  double sum_intensity = 0.0;
+  std::size_t count = 0;
+};
+
+using GroundCellKey = std::pair<int, int>;
+
+struct GroundCellKeyHash {
+  std::size_t operator()(const GroundCellKey& key) const {
+    const std::size_t h1 = std::hash<int>{}(key.first);
+    const std::size_t h2 = std::hash<int>{}(key.second);
+    return h1 ^ (h2 << 1);
+  }
+};
+
+}  // namespace
 
 StaticLayer::StaticLayer(){
   current_lethal_.reset(new pcl::PointCloud<pcl::PointXYZI>);
@@ -104,6 +125,18 @@ void StaticLayer::onInitialize()
   node_->get_parameter(name_ + ".support.generate_static_graph", generate_static_graph_);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "generate_static_graph: %d", generate_static_graph_);     
 
+  node_->declare_parameter(name_ + ".support.merge_ground_layers", rclcpp::ParameterValue(false));
+  node_->get_parameter(name_ + ".support.merge_ground_layers", merge_ground_layers_);
+  RCLCPP_INFO(node_->get_logger().get_child(name_), "merge_ground_layers: %d", merge_ground_layers_);
+
+  node_->declare_parameter(name_ + ".support.merge_ground_xy_resolution", rclcpp::ParameterValue(0.1));
+  node_->get_parameter(name_ + ".support.merge_ground_xy_resolution", merge_ground_xy_resolution_);
+  RCLCPP_INFO(node_->get_logger().get_child(name_), "merge_ground_xy_resolution: %.2f", merge_ground_xy_resolution_);
+
+  node_->declare_parameter(name_ + ".support.merge_ground_z_tolerance", rclcpp::ParameterValue(0.12));
+  node_->get_parameter(name_ + ".support.merge_ground_z_tolerance", merge_ground_z_tolerance_);
+  RCLCPP_INFO(node_->get_logger().get_child(name_), "merge_ground_z_tolerance: %.2f", merge_ground_z_tolerance_);
+
   
   shared_data_->mapping_mode_ = mapping_mode_;
   
@@ -141,6 +174,69 @@ void StaticLayer::ptrInitial(){
   shared_data_->sGraph_ptr_ = std::make_shared<perception_3d::StaticGraph>();
   new_map_ = new_ground_ = is_local_planner_ = false;
   is_ground_and_map_being_initialized_once_ = false;
+}
+
+pcl::PointCloud<pcl::PointXYZI>::Ptr StaticLayer::mergeGroundLayers(
+  const pcl::PointCloud<pcl::PointXYZI>::Ptr& input_cloud) const
+{
+  if(!merge_ground_layers_ || !input_cloud || input_cloud->points.empty() ||
+     merge_ground_xy_resolution_ <= 0.0 || merge_ground_z_tolerance_ <= 0.0){
+    return input_cloud;
+  }
+
+  std::unordered_map<GroundCellKey, std::vector<GroundLayerAccumulator>, GroundCellKeyHash> cells;
+  cells.reserve(input_cloud->points.size());
+
+  for(const auto& point : input_cloud->points){
+    const int cell_x = static_cast<int>(std::floor(point.x / merge_ground_xy_resolution_));
+    const int cell_y = static_cast<int>(std::floor(point.y / merge_ground_xy_resolution_));
+    auto& layers = cells[GroundCellKey(cell_x, cell_y)];
+
+    bool merged = false;
+    for(auto& layer : layers){
+      const double mean_z = layer.sum_z / static_cast<double>(layer.count);
+      if(std::fabs(mean_z - point.z) <= merge_ground_z_tolerance_){
+        layer.sum_x += point.x;
+        layer.sum_y += point.y;
+        layer.sum_z += point.z;
+        layer.sum_intensity += point.intensity;
+        layer.count++;
+        merged = true;
+        break;
+      }
+    }
+
+    if(!merged){
+      GroundLayerAccumulator layer;
+      layer.sum_x = point.x;
+      layer.sum_y = point.y;
+      layer.sum_z = point.z;
+      layer.sum_intensity = point.intensity;
+      layer.count = 1;
+      layers.push_back(layer);
+    }
+  }
+
+  auto merged_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+  merged_cloud->header = input_cloud->header;
+  merged_cloud->points.reserve(input_cloud->points.size());
+
+  for(const auto& cell_entry : cells){
+    for(const auto& layer : cell_entry.second){
+      if(layer.count == 0){
+        continue;
+      }
+      pcl::PointXYZI merged_point;
+      const double count = static_cast<double>(layer.count);
+      merged_point.x = static_cast<float>(layer.sum_x / count);
+      merged_point.y = static_cast<float>(layer.sum_y / count);
+      merged_point.z = static_cast<float>(layer.sum_z / count);
+      merged_point.intensity = static_cast<float>(layer.sum_intensity / count);
+      merged_cloud->points.push_back(merged_point);
+    }
+  }
+
+  return merged_cloud;
 }
 
 void StaticLayer::cbMap(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
@@ -181,7 +277,13 @@ void StaticLayer::cbGround(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
     return;
   }
 
-  pcl_ground_ = incoming_ground;
+  pcl_ground_ = mergeGroundLayers(incoming_ground);
+  if(merge_ground_layers_ && pcl_ground_ &&
+     pcl_ground_->points.size() != incoming_ground->points.size()){
+    RCLCPP_INFO(node_->get_logger().get_child(name_),
+      "%s merged layered ground points: %zu -> %zu",
+      name_.c_str(), incoming_ground->points.size(), pcl_ground_->points.size());
+  }
 
   if(shared_data_->static_ground_size_!=pcl_ground_->points.size()){
     new_ground_ = true;

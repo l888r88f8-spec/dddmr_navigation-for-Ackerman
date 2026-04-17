@@ -61,6 +61,7 @@
 
 /*pass through*/
 #include <pcl/filters/passthrough.h>
+#include <unordered_map>
 
 namespace perception_3d
 {
@@ -85,6 +86,8 @@ class StaticLayer: public Sensor{
     void ptrInitial();
     void radiusSearchConnection();
     void generateStaticGraph();
+    pcl::PointCloud<pcl::PointXYZI>::Ptr mergeGroundLayers(
+      const pcl::PointCloud<pcl::PointXYZI>::Ptr& input_cloud) const;
 
     /*call back of the ground*/
     void cbGround(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
@@ -117,6 +120,9 @@ class StaticLayer: public Sensor{
     bool is_ground_and_map_being_initialized_once_;
     bool enable_edge_detection_;
     bool generate_static_graph_;
+    bool merge_ground_layers_;
+    double merge_ground_xy_resolution_;
+    double merge_ground_z_tolerance_;
 };
 
 }//end of name space
