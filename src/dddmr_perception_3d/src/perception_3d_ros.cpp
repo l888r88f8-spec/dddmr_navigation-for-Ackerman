@@ -236,7 +236,7 @@ void Perception3D_ROS::sensorsUpdateLoop()
   start_t = start.tv_sec + double(start.tv_usec) / 1e6;
   end_t = end.tv_sec + double(end.tv_usec) / 1e6;
   t_diff = end_t - start_t;
-  RCLCPP_INFO(this->get_logger(), "Map update time: %.9f", t_diff);
+  RCLCPP_DEBUG(this->get_logger(), "Map update time: %.9f", t_diff);
   #endif
 
   // make sure to sleep for the remainder of our cycle time
