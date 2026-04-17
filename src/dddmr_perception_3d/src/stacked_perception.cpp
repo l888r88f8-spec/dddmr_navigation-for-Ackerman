@@ -127,19 +127,41 @@ double StackedPerception::get_min_dGraphValue(const unsigned int index){
 }
 
 void StackedPerception::aggregateObservations(){
+  refreshObservationCache();
+}
+
+void StackedPerception::refreshObservationCache(){
+  if(!shared_data_){
+    return;
+  }
+
   std::unique_lock<mutex_t> lock(*access_);
   std::unique_lock<std::recursive_mutex> sensor_lock(shared_data_->ground_kdtree_cb_mutex_);
 
-  shared_data_->aggregate_observation_.reset(new pcl::PointCloud<pcl::PointXYZI>);
+  auto aggregate_observation = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+  std::string frame_id;
 
   for (std::vector<std::shared_ptr<Sensor> >::iterator plugin = plugins_.begin(); plugin != plugins_.end();
        ++plugin)
   {
-    //@aggregate observation for perception
-    (*shared_data_->aggregate_observation_) += (*(*plugin)->getObservation());
-    shared_data_->aggregate_observation_->header.frame_id = (*plugin)->getGlobalUtils()->getGblFrame();
+    if(!(*plugin)){
+      continue;
+    }
+
+    auto observation = (*plugin)->getObservation();
+    if(observation){
+      //@ aggregate observation for perception
+      (*aggregate_observation) += (*observation);
+    }
+
+    auto gbl_utils = (*plugin)->getGlobalUtils();
+    if(frame_id.empty() && gbl_utils){
+      frame_id = gbl_utils->getGblFrame();
+    }
   }
 
+  aggregate_observation->header.frame_id = frame_id;
+  shared_data_->aggregate_observation_ = aggregate_observation;
 }
 
 void StackedPerception::aggregateLethal(){

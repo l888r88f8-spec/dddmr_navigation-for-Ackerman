@@ -564,13 +564,20 @@ void Local_Planner::getBestTrajectory(std::string traj_gen_name, base_trajectory
 }
 
 dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string traj_gen_name, base_trajectory::Trajectory& best_traj){
+  auto* stacked_perception = perception_3d_ros_ ? perception_3d_ros_->getStackedPerception() : nullptr;
+  auto perception_shared_data = perception_3d_ros_ ? perception_3d_ros_->getSharedDataPtr() : nullptr;
   
   if(!got_odom_){
     RCLCPP_ERROR(this->get_logger().get_child(name_), "Odom is not received.");
     return dddmr_sys_core::TF_FAIL;
   }
 
-  if(!perception_3d_ros_->getStackedPerception()->isSensorOK()){
+  if(!stacked_perception || !perception_shared_data){
+    RCLCPP_ERROR(this->get_logger().get_child(name_), "Perception 3D shared data is not ready.");
+    return dddmr_sys_core::PERCEPTION_MALFUNCTION;
+  }
+
+  if(!stacked_perception->isSensorOK()){
     RCLCPP_ERROR(this->get_logger().get_child(name_), "Perception 3D is not ok.");
     return dddmr_sys_core::PERCEPTION_MALFUNCTION;
   }
@@ -579,20 +586,30 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   //for timing that gives real time even in simulation
   control_loop_time_ = clock_->now();
 
-  std::unique_lock<perception_3d::StackedPerception::mutex_t> pct_lock(*(perception_3d_ros_->getStackedPerception()->getMutex()));
-  
-  //@ update current observation for scoring
-  //@ we need to visualized this for debug/justification
-  perception_3d_ros_->getStackedPerception()->aggregateObservations();
+  pcl::PointCloud<pcl::PointXYZI>::Ptr aggregate_observation;
+  std::vector<perception_3d::PerceptionOpinion> opinions;
+  double current_allowed_max_linear_speed = -1.0;
 
-  //@ forward_prune_/backward_prune_: should adapt to vehicle speed.
-  //@ prune plan are used by trajectory_generators/perception
-  //@ prune plan has to come after mutex lock, because global_plan_ros_sub_ reset global plan kd tree
-  prunePlan(forward_prune_, backward_prune_);
+  {
+    std::unique_lock<perception_3d::StackedPerception::mutex_t> pct_lock(*(stacked_perception->getMutex()));
+
+    //@ forward_prune_/backward_prune_: should adapt to vehicle speed.
+    //@ prune plan are used by trajectory_generators/perception
+    //@ prune plan has to come after mutex lock, because global_plan_ros_sub_ reset global plan kd tree
+    prunePlan(forward_prune_, backward_prune_);
+    perception_shared_data->pcl_prune_plan_ = pcl_prune_plan_;
+    aggregate_observation = perception_shared_data->aggregate_observation_;
+    current_allowed_max_linear_speed = perception_shared_data->current_allowed_max_linear_speed_;
+    opinions = stacked_perception->getOpinions();
+  }
+
+  if(!aggregate_observation){
+    aggregate_observation = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+  }
 
   if(debug_publish_aggregated_pc_ && pub_aggregate_observation_->get_subscription_count() > 0){
     sensor_msgs::msg::PointCloud2 ros2_aggregate_onservation;
-    pcl::toROSMsg(*(perception_3d_ros_->getSharedDataPtr()->aggregate_observation_), ros2_aggregate_onservation);
+    pcl::toROSMsg(*aggregate_observation, ros2_aggregate_onservation);
     pub_aggregate_observation_->publish(ros2_aggregate_onservation);
   }
   if((clock_->now()-trans_gbl2b_.header.stamp).seconds() > 2.0){
@@ -601,7 +618,6 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   }
 
   //@ TODO: Compute cuboid of each pose and send to determineIsPathBlock
-  perception_3d_ros_->getSharedDataPtr()->pcl_prune_plan_ = pcl_prune_plan_;
   //perception_3d_ros_->getStackedPerception()->determineIsPathBlock(pcl_prune_plan_);
 
   if((clock_->now()-last_valid_prune_plan_).seconds()>=prune_plane_timeout_){
@@ -616,7 +632,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   trajectory_generators_ros_->getSharedDataPtr()->prune_plan_ = prune_plan_;
   //@ change max speed from perception shared data framework
   trajectory_generators_ros_->getSharedDataPtr()->current_allowed_max_linear_speed_ 
-                  = perception_3d_ros_->getSharedDataPtr()->current_allowed_max_linear_speed_;
+                  = current_allowed_max_linear_speed;
 
   trajectory_generators_ros_->initializeTheories_wi_Shared_data();
 
@@ -672,7 +688,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   //@ keep below for easy migration for ROS2
   mpc_critics_ros_->getSharedDataPtr()->robot_pose_ = trans_gbl2b_;
   mpc_critics_ros_->getSharedDataPtr()->robot_state_ = robot_state_;
-  mpc_critics_ros_->getSharedDataPtr()->pcl_perception_ = perception_3d_ros_->getSharedDataPtr()->aggregate_observation_;
+  mpc_critics_ros_->getSharedDataPtr()->pcl_perception_ = aggregate_observation;
   mpc_critics_ros_->getSharedDataPtr()->prune_plan_ = prune_plan_;
   //@ Below function transform prune_plane from nav::msg to pcl type
   //@ Below function generate kd-tree using aggregate observation
@@ -687,7 +703,6 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   }
   
   //@Loop opinions
-  std::vector<perception_3d::PerceptionOpinion> opinions = perception_3d_ros_->getStackedPerception()->getOpinions();
   for(auto opinion_it=opinions.begin(); opinion_it!=opinions.end();opinion_it++){
     if((*opinion_it)==perception_3d::PATH_BLOCKED_WAIT){
       RCLCPP_WARN_THROTTLE(this->get_logger().get_child(name_), *clock_, 5000, "Found the prune plan is blocked, go to wait state.");

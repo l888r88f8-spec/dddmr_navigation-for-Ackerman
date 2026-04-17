@@ -229,6 +229,7 @@ void Perception3D_ROS::sensorsUpdateLoop()
 
 
   stacked_perception_->doClear_then_Mark();
+  stacked_perception_->refreshObservationCache();
 
 
   #ifdef HAVE_SYS_TIME_H

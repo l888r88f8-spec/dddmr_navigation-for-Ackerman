@@ -70,6 +70,9 @@ class StackedPerception{
     /*Aggregate observation pointers for local planner*/
     void aggregateObservations();
 
+    /*Refresh the cached aggregate observation in perception update thread*/
+    void refreshObservationCache();
+
     /*Aggregate lethal for line-of-sight check in global planner*/
     void aggregateLethal();
 

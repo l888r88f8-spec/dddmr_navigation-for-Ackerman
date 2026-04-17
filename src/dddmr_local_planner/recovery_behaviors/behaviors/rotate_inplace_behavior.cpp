@@ -122,6 +122,12 @@ void RotateInPlaceBehavior::trans2Pose(geometry_msgs::msg::TransformStamped& tra
 
 dddmr_sys_core::RecoveryState RotateInPlaceBehavior::runBehavior(
     const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::RecoveryBehaviors>> goal_handle){
+  auto* stacked_perception = perception_3d_ros_ ? perception_3d_ros_->getStackedPerception() : nullptr;
+  auto perception_shared_data = perception_3d_ros_ ? perception_3d_ros_->getSharedDataPtr() : nullptr;
+  if(!stacked_perception || !perception_shared_data){
+    RCLCPP_ERROR(node_->get_logger().get_child(name_), "Perception 3D shared data is not ready.");
+    return dddmr_sys_core::RecoveryState::RECOVERY_FAIL;
+  }
 
   //@Print thread for debug
   std::stringstream ss;
@@ -181,16 +187,17 @@ dddmr_sys_core::RecoveryState RotateInPlaceBehavior::runBehavior(
       
     }
 
-    // Update Current Angle
-    std::unique_lock<perception_3d::StackedPerception::mutex_t> pct_lock(*(perception_3d_ros_->getStackedPerception()->getMutex()));
+    pcl::PointCloud<pcl::PointXYZI>::Ptr aggregate_observation;
+    {
+      std::unique_lock<perception_3d::StackedPerception::mutex_t> pct_lock(*(stacked_perception->getMutex()));
+      aggregate_observation = perception_shared_data->aggregate_observation_;
+      perception_3d_ros_->getGlobalPose(trans_gbl2b);
+      trans2Pose(trans_gbl2b, global_pose);
+    }
 
-    //@ update current observation for scoring
-    //@ we need to visualized this for debug/justification
-    perception_3d_ros_->getStackedPerception()->aggregateObservations();
-    //pub_aggregate_observation_.publish(aggregate_observation_);
-
-    perception_3d_ros_->getGlobalPose(trans_gbl2b);
-    trans2Pose(trans_gbl2b, global_pose);
+    if(!aggregate_observation){
+      aggregate_observation = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+    }
 
     tf2::Quaternion global_pose_orientation(
     global_pose.pose.orientation.x, 
@@ -251,7 +258,7 @@ dddmr_sys_core::RecoveryState RotateInPlaceBehavior::runBehavior(
     //@ keep below for easy migration for ROS2
     mpc_critics_ros_->getSharedDataPtr()->robot_pose_ = trans_gbl2b;
     mpc_critics_ros_->getSharedDataPtr()->robot_state_ = shared_data_->robot_state_;
-    mpc_critics_ros_->getSharedDataPtr()->pcl_perception_ = perception_3d_ros_->getSharedDataPtr()->aggregate_observation_;
+    mpc_critics_ros_->getSharedDataPtr()->pcl_perception_ = aggregate_observation;
     //@ Below function transform prune_plane from nav::msg to pcl type
     //@ Below function put new perception in kdtree for critics to avoid obstacles
     mpc_critics_ros_->updateSharedData();
