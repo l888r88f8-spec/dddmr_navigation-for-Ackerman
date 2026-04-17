@@ -281,7 +281,6 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
 }
 
 bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> goal_handle){
-
     FSM_->global_pose_ = LP_->getGlobalPose();
     if(FSM_->getDistance(FSM_->global_pose_, FSM_->oscillation_pose_) >= FSM_->oscillation_distance_ ||
           FSM_->getAngle(FSM_->global_pose_, FSM_->oscillation_pose_) >= FSM_->oscillation_angle_)

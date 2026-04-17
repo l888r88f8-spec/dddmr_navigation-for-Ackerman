@@ -184,5 +184,4 @@ void P2PGlobalPlanManager::copyPlan(std::vector<geometry_msgs::msg::PoseStamped>
     plan.push_back(global_path_.poses[i]);
   }
 }
-
 }
