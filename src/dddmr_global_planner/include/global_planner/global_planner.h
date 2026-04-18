@@ -52,6 +52,7 @@ type edge_t is inside here
 #include <global_planner/a_star_on_pc.h>
 #include <global_planner/a_star_on_pre_graph.h>
 #include <set>
+#include <mutex>
 
 /*For distance calculation*/
 #include <pcl/common/geometry.h>
@@ -108,6 +109,7 @@ class GlobalPlanner : public rclcpp::Node {
       void handle_accepted(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle);
       
       std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> current_handle_;
+      std::mutex current_handle_mutex_;
 
       rclcpp_action::Server<dddmr_sys_core::action::GetPlan>::SharedPtr action_server_global_planner_;
 
@@ -176,6 +178,8 @@ class GlobalPlanner : public rclcpp::Node {
         const geometry_msgs::msg::PoseStamped& start,
         const geometry_msgs::msg::PoseStamped& goal,
         nav_msgs::msg::Path& ros_path);
+      bool clearCurrentHandleIfMatches(
+        const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle);
 
       void pubStaticGraph();
       void getROSPath(std::vector<unsigned int>& path_id, nav_msgs::msg::Path& ros_path);

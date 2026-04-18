@@ -57,6 +57,17 @@ rclcpp_action::CancelResponse GlobalPlanner::handle_cancel(
   return rclcpp_action::CancelResponse::ACCEPT;
 }
 
+bool GlobalPlanner::clearCurrentHandleIfMatches(
+  const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle)
+{
+  std::lock_guard<std::mutex> lock(current_handle_mutex_);
+  if(current_handle_ != goal_handle){
+    return false;
+  }
+  current_handle_.reset();
+  return true;
+}
+
 void GlobalPlanner::handle_accepted(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle)
 {
   rclcpp::Rate r(20);
@@ -64,8 +75,11 @@ void GlobalPlanner::handle_accepted(const std::shared_ptr<rclcpp_action::ServerG
     RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000, "Wait for current handle to join");
     r.sleep();
   }
-  current_handle_.reset();
-  current_handle_ = goal_handle;
+  {
+    std::lock_guard<std::mutex> lock(current_handle_mutex_);
+    current_handle_.reset();
+    current_handle_ = goal_handle;
+  }
   // this needs to return quickly to avoid blocking the executor, so spin up a new thread
   std::thread{std::bind(&GlobalPlanner::makePlan, this, std::placeholders::_1), goal_handle}.detach();
 }
@@ -652,6 +666,7 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
     RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000, "Received the request before static layer is ready");
     auto result = std::make_shared<dddmr_sys_core::action::GetPlan::Result>();
     goal_handle->abort(result);
+    clearCurrentHandleIfMatches(goal_handle);
     return;
   }
 
@@ -659,6 +674,7 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
     auto result = std::make_shared<dddmr_sys_core::action::GetPlan::Result>();
     RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000, "Deactivate thread");
     goal_handle->succeed(result);
+    clearCurrentHandleIfMatches(goal_handle);
     return;
   }
 
@@ -677,7 +693,7 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
     global_plan_result_->path = ros_path;
     goal_handle->succeed(global_plan_result_);
   }
-  
+  clearCurrentHandleIfMatches(goal_handle);
 }
 
 nav_msgs::msg::Path GlobalPlanner::makeROSPlan(const geometry_msgs::msg::PoseStamped& start, const geometry_msgs::msg::PoseStamped& goal){

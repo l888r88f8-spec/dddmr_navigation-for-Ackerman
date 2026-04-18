@@ -81,6 +81,7 @@ void P2PGlobalPlanManager::initial(){
 }
 
 void P2PGlobalPlanManager::resume(){
+  std::unique_lock<std::mutex> lock(access_);
   global_path_.poses.clear();
   is_planning_ = false;
   loop_timer_->reset();
@@ -88,9 +89,17 @@ void P2PGlobalPlanManager::resume(){
 }
 
 void P2PGlobalPlanManager::stop(){
-  loop_timer_->cancel();
-  
-  if(got_first_goal_){
+  bool should_deactivate_threading = false;
+  {
+    std::unique_lock<std::mutex> lock(access_);
+    loop_timer_->cancel();
+    global_path_.poses.clear();
+    is_planning_ = false;
+    should_deactivate_threading = got_first_goal_;
+    got_first_goal_ = false;
+  }
+
+  if(should_deactivate_threading){
     auto goal_msg = dddmr_sys_core::action::GetPlan::Goal();
     goal_msg.activate_threading = false;
     auto send_goal_options = rclcpp_action::Client<dddmr_sys_core::action::GetPlan>::SendGoalOptions();
@@ -99,7 +108,6 @@ void P2PGlobalPlanManager::stop(){
     send_goal_options.result_callback =
       std::bind(&P2PGlobalPlanManager::global_planner_client_result_callback, this, std::placeholders::_1);
     global_planner_client_ptr_->async_send_goal(goal_msg, send_goal_options);
-    got_first_goal_ = false;
   }
 
   RCLCPP_INFO(this->get_logger(), "Global plan manager is stopped");
@@ -161,7 +169,13 @@ void P2PGlobalPlanManager::global_planner_client_result_callback(const rclcpp_ac
       RCLCPP_ERROR(this->get_logger(), "Global Planner ---> %s: Unknown result code", global_planner_action_name_.c_str());
       break;
   }
-  global_path_ = result.result->path;
+  std::unique_lock<std::mutex> lock(access_);
+  if(result.result){
+    global_path_ = result.result->path;
+  }
+  else{
+    global_path_.poses.clear();
+  }
   is_planning_ = false;
 }
 

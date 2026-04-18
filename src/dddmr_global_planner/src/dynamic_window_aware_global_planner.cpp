@@ -57,6 +57,17 @@ rclcpp_action::CancelResponse DWA_GlobalPlanner::handle_cancel(
   return rclcpp_action::CancelResponse::ACCEPT;
 }
 
+bool DWA_GlobalPlanner::clearCurrentHandleIfMatches(
+  const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle)
+{
+  std::lock_guard<std::mutex> lock(current_handle_mutex_);
+  if(current_handle_ != goal_handle){
+    return false;
+  }
+  current_handle_.reset();
+  return true;
+}
+
 void DWA_GlobalPlanner::handle_accepted(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle)
 {
   rclcpp::Rate r(20);
@@ -64,8 +75,11 @@ void DWA_GlobalPlanner::handle_accepted(const std::shared_ptr<rclcpp_action::Ser
     RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000, "Wait for current handle to join");
     r.sleep();
   }
-  current_handle_.reset();
-  current_handle_ = goal_handle;
+  {
+    std::lock_guard<std::mutex> lock(current_handle_mutex_);
+    current_handle_.reset();
+    current_handle_ = goal_handle;
+  }
   // this needs to return quickly to avoid blocking the executor, so spin up a new thread
   std::thread{std::bind(&DWA_GlobalPlanner::makePlan, this, std::placeholders::_1), goal_handle}.detach();
 }
@@ -113,6 +127,7 @@ DWA_GlobalPlanner::~DWA_GlobalPlanner(){
 }
 
 bool DWA_GlobalPlanner::isNewGoal(){
+  std::lock_guard<std::mutex> lock(plan_state_mutex_);
   if(new_goal_.pose.position.x==current_goal_.pose.position.x && 
       new_goal_.pose.position.y==current_goal_.pose.position.y && 
         new_goal_.pose.position.z==current_goal_.pose.position.z && 
@@ -131,13 +146,17 @@ bool DWA_GlobalPlanner::isNewGoal(){
 
 void DWA_GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle){
   
-  new_goal_ = goal_handle->get_goal()->goal;
+  {
+    std::lock_guard<std::mutex> lock(plan_state_mutex_);
+    new_goal_ = goal_handle->get_goal()->goal;
+  }
 
   if(!perception_3d_ros_->getSharedDataPtr()->is_static_layer_ready_){
     RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000, "Waiting for static layer");
     threading_timer_->cancel();
     auto result = std::make_shared<dddmr_sys_core::action::GetPlan::Result>();
     goal_handle->abort(result);
+    clearCurrentHandleIfMatches(goal_handle);
     return;
   }
 
@@ -145,6 +164,7 @@ void DWA_GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoal
     threading_timer_->cancel();
     auto result = std::make_shared<dddmr_sys_core::action::GetPlan::Result>();
     goal_handle->succeed(result);
+    clearCurrentHandleIfMatches(goal_handle);
     return;
   }
   
@@ -153,52 +173,70 @@ void DWA_GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoal
     geometry_msgs::msg::PoseStamped start;
     perception_3d_ros_->getGlobalPose(start);
 
-    global_path_ = global_planner_->makeROSPlan(start, goal_handle->get_goal()->goal);
+    nav_msgs::msg::Path global_path = global_planner_->makeROSPlan(start, goal_handle->get_goal()->goal);
     auto result = std::make_shared<dddmr_sys_core::action::GetPlan::Result>();
-    result->path = global_path_;
+    result->path = global_path;
 
-    if(global_path_.poses.empty()){
+    if(global_path.poses.empty()){
       goal_handle->abort(result);
     }
     else{
-      current_goal_ = new_goal_;
-      result->path = global_path_;
-      goal_handle->succeed(result);
-      
-      //@move global plan to pcl
-      pcl_global_path_->points.clear();
-      for(auto it=global_path_.poses.begin(); it!=global_path_.poses.end(); it++){
-        pcl::PointXYZ pt;
-        pt.x = (*it).pose.position.x; pt.y = (*it).pose.position.y; pt.z = (*it).pose.position.z;
-        pcl_global_path_->push_back(pt);
+      {
+        std::lock_guard<std::mutex> lock(plan_state_mutex_);
+        current_goal_ = new_goal_;
+        global_path_ = global_path;
+        global_dwa_path_.poses.clear();
+        global_dwa_path_.header = global_path.header;
+
+        pcl_global_path_->points.clear();
+        for(const auto& pose : global_path_.poses){
+          pcl::PointXYZ pt;
+          pt.x = pose.pose.position.x;
+          pt.y = pose.pose.position.y;
+          pt.z = pose.pose.position.z;
+          pcl_global_path_->push_back(pt);
+        }
+
+        kdtree_global_path_.reset(new pcl::KdTreeFLANN<pcl::PointXYZ>());
+        kdtree_global_path_->setInputCloud(pcl_global_path_);
       }
-      //@ generate kd-tree
-      kdtree_global_path_.reset(new pcl::KdTreeFLANN<pcl::PointXYZ>());
-      kdtree_global_path_->setInputCloud(pcl_global_path_); 
+      result->path = global_path;
+      goal_handle->succeed(result);
 
       threading_timer_->reset();
     }
-    pub_path_->publish(global_path_);
+    pub_path_->publish(global_path);
   }
   else{
     auto result = std::make_shared<dddmr_sys_core::action::GetPlan::Result>();
-    if(global_dwa_path_.poses.empty()){
-      result->path = global_path_;
-      pub_path_->publish(global_path_);
+    nav_msgs::msg::Path path_to_publish;
+    {
+      std::lock_guard<std::mutex> lock(plan_state_mutex_);
+      if(global_dwa_path_.poses.empty()){
+        path_to_publish = global_path_;
+      }
+      else{
+        path_to_publish = global_dwa_path_;
+      }
     }
-    else{
-      result->path = global_dwa_path_;
-      pub_path_->publish(global_dwa_path_);
-    }
+    result->path = path_to_publish;
+    pub_path_->publish(path_to_publish);
     goal_handle->succeed(result);
   }
-  
+  clearCurrentHandleIfMatches(goal_handle);
 }
 
 void DWA_GlobalPlanner::determineDWAPlan(){
 
-  if(global_path_.poses.empty() || pcl_global_path_->points.empty()){
-    return;
+  nav_msgs::msg::Path global_path_snapshot;
+  pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_global_path_snapshot(new pcl::PointCloud<pcl::PointXYZ>);
+  {
+    std::lock_guard<std::mutex> lock(plan_state_mutex_);
+    if(global_path_.poses.empty() || pcl_global_path_->points.empty()){
+      return;
+    }
+    global_path_snapshot = global_path_;
+    *pcl_global_path_snapshot = *pcl_global_path_;
   }
 
   geometry_msgs::msg::PoseStamped start;
@@ -207,7 +245,9 @@ void DWA_GlobalPlanner::determineDWAPlan(){
   start_pt.x = start.pose.position.x; start_pt.y = start.pose.position.y; start_pt.z = start.pose.position.z;
   std::vector<float> resultant_distances;
   std::vector<int> indices;
-  kdtree_global_path_->nearestKSearch(start_pt, 1, indices, resultant_distances);
+  pcl::KdTreeFLANN<pcl::PointXYZ> kdtree_global_path_snapshot;
+  kdtree_global_path_snapshot.setInputCloud(pcl_global_path_snapshot);
+  kdtree_global_path_snapshot.nearestKSearch(start_pt, 1, indices, resultant_distances);
 
   if(indices.empty()){
     RCLCPP_INFO(this->get_logger(), "k-NN search fail, something wrong.");
@@ -223,9 +263,9 @@ void DWA_GlobalPlanner::determineDWAPlan(){
 
     double accumulative_distance = 0.0;
     int pivot = indices[0];
-    pcl::PointXYZ last_point = pcl_global_path_->points[pivot];
-    while(accumulative_distance<look_ahead_distance_+look_ahead_step && pivot<pcl_global_path_->points.size()-1){
-      pcl::PointXYZ current_point = pcl_global_path_->points[pivot];
+    pcl::PointXYZ last_point = pcl_global_path_snapshot->points[pivot];
+    while(accumulative_distance<look_ahead_distance_+look_ahead_step && pivot<pcl_global_path_snapshot->points.size()-1){
+      pcl::PointXYZ current_point = pcl_global_path_snapshot->points[pivot];
       double dx = current_point.x - last_point.x;
       double dy = current_point.y - last_point.y;
       double dz = current_point.z - last_point.z;
@@ -234,17 +274,17 @@ void DWA_GlobalPlanner::determineDWAPlan(){
       pivot++;
     }
 
-    if(pivot>=pcl_global_path_->points.size()-1){
-      dwa_pivot = pcl_global_path_->points.size()-1;
+    if(pivot>=pcl_global_path_snapshot->points.size()-1){
+      dwa_pivot = pcl_global_path_snapshot->points.size()-1;
       if(recompute_frequency_>2.0)
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 5000, "DWA goal reach the global path end at: %.2f, %.2f, %.2f", pcl_global_path_->points[dwa_pivot].x, pcl_global_path_->points[dwa_pivot].y, pcl_global_path_->points[dwa_pivot].z);
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 5000, "DWA goal reach the global path end at: %.2f, %.2f, %.2f", pcl_global_path_snapshot->points[dwa_pivot].x, pcl_global_path_snapshot->points[dwa_pivot].y, pcl_global_path_snapshot->points[dwa_pivot].z);
       else
-        RCLCPP_INFO(this->get_logger(), "DWA goal reach the global path end at: %.2f, %.2f, %.2f", pcl_global_path_->points[dwa_pivot].x, pcl_global_path_->points[dwa_pivot].y, pcl_global_path_->points[dwa_pivot].z);
+        RCLCPP_INFO(this->get_logger(), "DWA goal reach the global path end at: %.2f, %.2f, %.2f", pcl_global_path_snapshot->points[dwa_pivot].x, pcl_global_path_snapshot->points[dwa_pivot].y, pcl_global_path_snapshot->points[dwa_pivot].z);
       break;
     }
 
     if(look_ahead_distance_+look_ahead_step>100.0){
-      dwa_pivot = pcl_global_path_->points.size()-1;
+      dwa_pivot = pcl_global_path_snapshot->points.size()-1;
       RCLCPP_INFO(this->get_logger(), "Look ahead distance reach unrealistic distance.");
       break;      
     }
@@ -252,16 +292,16 @@ void DWA_GlobalPlanner::determineDWAPlan(){
     std::vector<int> pointIdxRadiusSearch;
     std::vector<float> pointRadiusSquaredDistance;
     pcl::PointXYZI ipt;
-    ipt.x = pcl_global_path_->points[pivot].x;
-    ipt.y = pcl_global_path_->points[pivot].y;
-    ipt.z = pcl_global_path_->points[pivot].z;
+    ipt.x = pcl_global_path_snapshot->points[pivot].x;
+    ipt.y = pcl_global_path_snapshot->points[pivot].y;
+    ipt.z = pcl_global_path_snapshot->points[pivot].z;
     perception_3d_ros_->getSharedDataPtr()->kdtree_ground_->radiusSearch(ipt, 0.25, pointIdxRadiusSearch, pointRadiusSquaredDistance);
     
     double inscribed_radius = perception_3d_ros_->getGlobalUtils()->getInscribedRadius();
     if(pointIdxRadiusSearch.empty()){
       look_ahead_step+=1.0;
       dwa_goal_clear = false;
-      RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000,  "No ground is found for DWA goal at: %.2f, %.2f, %.2f", pcl_global_path_->points[pivot].x, pcl_global_path_->points[pivot].y, pcl_global_path_->points[pivot].z);
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000,  "No ground is found for DWA goal at: %.2f, %.2f, %.2f", pcl_global_path_snapshot->points[pivot].x, pcl_global_path_snapshot->points[pivot].y, pcl_global_path_snapshot->points[pivot].z);
     }
     else{
       for(auto it=pointIdxRadiusSearch.begin();it!=pointIdxRadiusSearch.end();it++){
@@ -271,7 +311,7 @@ void DWA_GlobalPlanner::determineDWAPlan(){
         if(dGraphValue<inscribed_radius){
           look_ahead_step+=1.0;
           dwa_goal_clear = false;
-          RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000, "DWA goal is blocked at: %.2f, %.2f, %.2f", pcl_global_path_->points[pivot].x, pcl_global_path_->points[pivot].y, pcl_global_path_->points[pivot].z);
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000, "DWA goal is blocked at: %.2f, %.2f, %.2f", pcl_global_path_snapshot->points[pivot].x, pcl_global_path_snapshot->points[pivot].y, pcl_global_path_snapshot->points[pivot].z);
           break;
         }
         else{
@@ -284,9 +324,9 @@ void DWA_GlobalPlanner::determineDWAPlan(){
 
   geometry_msgs::msg::PoseStamped dwa_goal;
   dwa_goal.header.frame_id = global_frame_;
-  dwa_goal.pose.position.x = pcl_global_path_->points[dwa_pivot].x;
-  dwa_goal.pose.position.y = pcl_global_path_->points[dwa_pivot].y;
-  dwa_goal.pose.position.z = pcl_global_path_->points[dwa_pivot].z;
+  dwa_goal.pose.position.x = pcl_global_path_snapshot->points[dwa_pivot].x;
+  dwa_goal.pose.position.y = pcl_global_path_snapshot->points[dwa_pivot].y;
+  dwa_goal.pose.position.z = pcl_global_path_snapshot->points[dwa_pivot].z;
   
   nav_msgs::msg::Path dwa_path = global_planner_->makeROSPlan(start, dwa_goal);
   dwa_path.header.frame_id = global_frame_;
@@ -298,15 +338,18 @@ void DWA_GlobalPlanner::determineDWAPlan(){
   }
 
   size_t safe_pivot = static_cast<size_t>(dwa_pivot);
-  if(safe_pivot >= global_path_.poses.size()){
-    safe_pivot = global_path_.poses.size() - 1;
+  if(safe_pivot >= global_path_snapshot.poses.size()){
+    safe_pivot = global_path_snapshot.poses.size() - 1;
   }
 
-  for(size_t i=safe_pivot; i<global_path_.poses.size(); i++){
-    dwa_path.poses.push_back(global_path_.poses[i]);
+  for(size_t i=safe_pivot; i<global_path_snapshot.poses.size(); i++){
+    dwa_path.poses.push_back(global_path_snapshot.poses[i]);
   }
-  dwa_path.poses.push_back(global_path_.poses.back());
-  global_dwa_path_ = dwa_path;
+  dwa_path.poses.push_back(global_path_snapshot.poses.back());
+  {
+    std::lock_guard<std::mutex> lock(plan_state_mutex_);
+    global_dwa_path_ = dwa_path;
+  }
 }
 
 }

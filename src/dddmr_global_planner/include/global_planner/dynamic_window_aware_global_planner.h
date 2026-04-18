@@ -65,6 +65,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <mutex>
 
 namespace global_planner
 {
@@ -94,6 +95,8 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       void handle_accepted(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle);
       
       std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> current_handle_;
+      std::mutex current_handle_mutex_;
+      std::mutex plan_state_mutex_;
 
       rclcpp_action::Server<dddmr_sys_core::action::GetPlan>::SharedPtr action_server_global_planner_;
 
@@ -123,6 +126,8 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       void makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle);
       bool isNewGoal();
       void determineDWAPlan();
+      bool clearCurrentHandleIfMatches(
+        const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle);
 
 };
 
