@@ -28,6 +28,15 @@ local_planner:
     backward_prune: 1.0
     heading_tracking_distance: 0.5
     heading_align_angle: 6.28 #align heading to this value and then move. 6.28 means dont align heading before moving
+    causal_prune_search_window: 40
+    causal_prune_max_index_jump: 15
+    causal_prune_max_arc_jump: 2.0
+    causal_prune_max_lateral_distance: 1.0
+    causal_prune_max_heading_error: 1.75
+    min_heading_reference_length: 0.3
+    max_heading_reference_stale_cycles: 10
+    max_prune_failure_cycles: 10
+    cached_pruned_path_timeout_sec: 0.8
     prune_plane_timeout: 3.0
     xy_goal_tolerance: 0.3
     yaw_goal_tolerance: 0.3

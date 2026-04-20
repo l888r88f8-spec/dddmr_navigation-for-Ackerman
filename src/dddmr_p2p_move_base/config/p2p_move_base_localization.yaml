@@ -133,6 +133,15 @@ local_planner:
     # Ackermann platforms cannot rotate in place, so we skip the
     # initial heading-alignment phase and let the path follower turn while moving.
     heading_align_angle: 3.2                                 # 起步前朝向对齐阈值，阿克曼车这里设大表示基本跳过原地对齐
+    causal_prune_search_window: 40                           # causal prune 仅在当前进度附近搜索，避免跳到欧氏近但顺序错误的后续段
+    causal_prune_max_index_jump: 15                          # 单周期允许推进的最大索引步长
+    causal_prune_max_arc_jump: 2.0                           # 单周期允许推进的最大路径弧长，单位 m
+    causal_prune_max_lateral_distance: 1.0                   # 机器人到候选 route segment 的最大横向距离
+    causal_prune_max_heading_error: 1.75                     # 候选 route tangent 与当前车头允许的最大夹角
+    min_heading_reference_length: 0.3                        # heading check 降级时允许使用的最小参考长度
+    max_heading_reference_stale_cycles: 10                   # heading 参考短时复用的最大周期数
+    max_prune_failure_cycles: 10                             # 连续 prune 失败多少周期后才允许确认偏离
+    cached_pruned_path_timeout_sec: 0.8                      # prune 短时失败时复用上一帧有效局部路径的最长时间
     prune_plane_timeout: 3.0 # 裁剪超时                       # 局部裁剪路径失效多久后判失败
     xy_goal_tolerance: 0.6                                   # 到达目标点的位置容差，单位 m
     # Likewise, do not require an in-place final heading alignment at the goal.

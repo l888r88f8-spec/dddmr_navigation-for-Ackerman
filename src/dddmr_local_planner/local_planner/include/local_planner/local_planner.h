@@ -32,11 +32,12 @@
 #ifndef DDDMR_LOCAL_PLANNER_H_
 #define DDDMR_LOCAL_PLANNER_H_
 
-/*For graph*/
-#include <unordered_map>
-#include <set>
-#include <queue> 
 #include <angles/angles.h>
+
+/*For graph*/
+#include <queue>
+#include <set>
+#include <unordered_map>
 /*For perception plugin*/
 #include <perception_3d/perception_3d_ros.h>
 
@@ -56,6 +57,7 @@
 //@planner state
 #include <dddmr_sys_core/dddmr_enum_states.h>
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -161,8 +163,36 @@ class Local_Planner : public rclcpp::Node {
       
       void parseCuboid();
       //void normal2quaternion();
-      void prunePlan(double forward_distance, double backward_distance);
-      double getDistanceBTWPoseStamp(const geometry_msgs::msg::PoseStamped& a, const geometry_msgs::msg::PoseStamped& b);
+      bool prunePlan(double forward_distance, double backward_distance);
+      double getDistanceBTWPoseStamp(const geometry_msgs::msg::PoseStamped& a, const geometry_msgs::msg::PoseStamped& b) const;
+      void resetLocalRouteTrackingState();
+      void rebuildGlobalPlanArcLengths();
+      double getGlobalPlanArcDistance(std::size_t start_index, std::size_t end_index) const;
+      double getRobotYaw() const;
+      double getRouteSegmentLateralDistance(std::size_t index) const;
+      double getRouteHeadingError(std::size_t index) const;
+      bool selectCausalPruneAnchor(std::size_t * anchor_index, double * robot_to_route_distance);
+      bool buildPrunedPlanAroundIndex(
+        std::size_t anchor_index,
+        double forward_distance,
+        double backward_distance,
+        nav_msgs::msg::Path * prune_plan,
+        pcl::PointCloud<pcl::PointXYZI> * pcl_prune_plan) const;
+      bool tryReuseCachedPrunedPath();
+      bool buildHeadingReferenceFromPoses(
+        const geometry_msgs::msg::PoseStamped & first_pose,
+        const geometry_msgs::msg::PoseStamped & last_pose,
+        tf2::Transform * reference_pose) const;
+      bool buildHeadingReferenceFromPlan(
+        const std::vector<geometry_msgs::msg::PoseStamped> & plan,
+        std::size_t start_index,
+        double min_reference_length,
+        tf2::Transform * reference_pose) const;
+      bool buildHeadingReferenceFromPoseOrientation(
+        const geometry_msgs::msg::PoseStamped & pose,
+        tf2::Transform * reference_pose) const;
+      void cacheHeadingReference(const tf2::Transform & reference_pose);
+      double updateHeadingDeviation(const tf2::Transform & reference_pose);
 
       bool compute_best_trajectory_in_odomCb_;
 
@@ -171,11 +201,30 @@ class Local_Planner : public rclcpp::Node {
          The variable should be adapt to vehicle speed!!!
       */
       double forward_prune_, backward_prune_, heading_tracking_distance_, heading_align_angle_;
+      std::size_t causal_prune_search_window_, causal_prune_max_index_jump_;
+      double causal_prune_max_arc_jump_, causal_prune_max_lateral_distance_, causal_prune_max_heading_error_;
+      double min_heading_reference_length_;
+      std::size_t max_heading_reference_stale_cycles_;
+      std::size_t max_prune_failure_cycles_;
+      double cached_pruned_path_timeout_sec_;
 
       /*Timer for robust system design*/
       double prune_plane_timeout_;
       rclcpp::Time last_valid_prune_plan_;
+      rclcpp::Time cached_local_pruned_path_stamp_;
       bool got_odom_;
+      std::size_t local_route_progress_index_;
+      double last_robot_to_route_distance_;
+      std::size_t consecutive_prune_failure_cycles_;
+      bool last_prune_used_cache_;
+      bool cached_local_pruned_path_valid_;
+      nav_msgs::msg::Path cached_local_pruned_path_;
+      pcl::PointCloud<pcl::PointXYZI> cached_pcl_prune_plan_;
+      std::vector<double> global_plan_arc_lengths_;
+      bool last_heading_reference_valid_;
+      tf2::Transform last_heading_reference_pose_;
+      std::size_t heading_reference_stale_cycles_;
+      std::size_t consecutive_heading_reference_failure_cycles_;
 
       double xy_goal_tolerance_, yaw_goal_tolerance_;
       double controller_frequency_;

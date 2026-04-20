@@ -30,7 +30,9 @@
 */
 #include <local_planner/local_planner.h>
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace local_planner {
 
@@ -40,9 +42,18 @@ Local_Planner::Local_Planner(const std::string& name): Node(name)
   clock_ = this->get_clock();
   got_odom_ = false;
   last_valid_prune_plan_ = clock_->now();
+  cached_local_pruned_path_stamp_ = clock_->now();
   route_version_ = 0;
   goal_seq_ = 0;
   route_source_label_ = "planner_result";
+  local_route_progress_index_ = 0;
+  last_robot_to_route_distance_ = std::numeric_limits<double>::infinity();
+  consecutive_prune_failure_cycles_ = 0;
+  last_prune_used_cache_ = false;
+  cached_local_pruned_path_valid_ = false;
+  last_heading_reference_valid_ = false;
+  heading_reference_stale_cycles_ = 0;
+  consecutive_heading_reference_failure_cycles_ = 0;
 }
 
 void Local_Planner::initial(
@@ -77,6 +88,42 @@ void Local_Planner::initial(
   declare_parameter("heading_align_angle", rclcpp::ParameterValue(0.5));
   this->get_parameter("heading_align_angle", heading_align_angle_);
   RCLCPP_INFO(this->get_logger(), "heading_align_angle: %.2f", heading_align_angle_);
+
+  declare_parameter("causal_prune_search_window", rclcpp::ParameterValue(40));
+  this->get_parameter("causal_prune_search_window", causal_prune_search_window_);
+  RCLCPP_INFO(this->get_logger(), "causal_prune_search_window: %zu", causal_prune_search_window_);
+
+  declare_parameter("causal_prune_max_index_jump", rclcpp::ParameterValue(15));
+  this->get_parameter("causal_prune_max_index_jump", causal_prune_max_index_jump_);
+  RCLCPP_INFO(this->get_logger(), "causal_prune_max_index_jump: %zu", causal_prune_max_index_jump_);
+
+  declare_parameter("causal_prune_max_arc_jump", rclcpp::ParameterValue(2.0));
+  this->get_parameter("causal_prune_max_arc_jump", causal_prune_max_arc_jump_);
+  RCLCPP_INFO(this->get_logger(), "causal_prune_max_arc_jump: %.2f", causal_prune_max_arc_jump_);
+
+  declare_parameter("causal_prune_max_lateral_distance", rclcpp::ParameterValue(1.0));
+  this->get_parameter("causal_prune_max_lateral_distance", causal_prune_max_lateral_distance_);
+  RCLCPP_INFO(this->get_logger(), "causal_prune_max_lateral_distance: %.2f", causal_prune_max_lateral_distance_);
+
+  declare_parameter("causal_prune_max_heading_error", rclcpp::ParameterValue(1.75));
+  this->get_parameter("causal_prune_max_heading_error", causal_prune_max_heading_error_);
+  RCLCPP_INFO(this->get_logger(), "causal_prune_max_heading_error: %.2f", causal_prune_max_heading_error_);
+
+  declare_parameter("min_heading_reference_length", rclcpp::ParameterValue(0.3));
+  this->get_parameter("min_heading_reference_length", min_heading_reference_length_);
+  RCLCPP_INFO(this->get_logger(), "min_heading_reference_length: %.2f", min_heading_reference_length_);
+
+  declare_parameter("max_heading_reference_stale_cycles", rclcpp::ParameterValue(10));
+  this->get_parameter("max_heading_reference_stale_cycles", max_heading_reference_stale_cycles_);
+  RCLCPP_INFO(this->get_logger(), "max_heading_reference_stale_cycles: %zu", max_heading_reference_stale_cycles_);
+
+  declare_parameter("max_prune_failure_cycles", rclcpp::ParameterValue(10));
+  this->get_parameter("max_prune_failure_cycles", max_prune_failure_cycles_);
+  RCLCPP_INFO(this->get_logger(), "max_prune_failure_cycles: %zu", max_prune_failure_cycles_);
+
+  declare_parameter("cached_pruned_path_timeout_sec", rclcpp::ParameterValue(0.8));
+  this->get_parameter("cached_pruned_path_timeout_sec", cached_pruned_path_timeout_sec_);
+  RCLCPP_INFO(this->get_logger(), "cached_pruned_path_timeout_sec: %.2f", cached_pruned_path_timeout_sec_);
 
   declare_parameter("prune_plane_timeout", rclcpp::ParameterValue(3.0));
   this->get_parameter("prune_plane_timeout", prune_plane_timeout_);
@@ -239,23 +286,468 @@ void Local_Planner::publishDebugPath(
   if(throttle_log){
     RCLCPP_INFO_THROTTLE(
       this->get_logger().get_child(name_), *clock_, 2000,
-      "%s published, route_version=%zu, goal_seq=%zu, source=%s, poses=%zu",
+      "%s published, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, poses=%zu",
       stage_label.c_str(),
       route_version,
       goal_seq,
       source_label.c_str(),
+      local_route_progress_index_,
       output.poses.size());
   }
   else{
     RCLCPP_INFO(
       this->get_logger().get_child(name_),
-      "%s published, route_version=%zu, goal_seq=%zu, source=%s, poses=%zu",
+      "%s published, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, poses=%zu",
       stage_label.c_str(),
       route_version,
       goal_seq,
       source_label.c_str(),
+      local_route_progress_index_,
       output.poses.size());
   }
+}
+
+void Local_Planner::resetLocalRouteTrackingState()
+{
+  local_route_progress_index_ = 0;
+  last_robot_to_route_distance_ = std::numeric_limits<double>::infinity();
+  consecutive_prune_failure_cycles_ = 0;
+  last_prune_used_cache_ = false;
+  cached_local_pruned_path_valid_ = false;
+  cached_local_pruned_path_.poses.clear();
+  cached_local_pruned_path_.header.frame_id = global_frame_;
+  cached_local_pruned_path_.header.stamp = clock_->now();
+  cached_local_pruned_path_stamp_ = clock_->now();
+  cached_pcl_prune_plan_.clear();
+  prune_plan_.poses.clear();
+  prune_plan_.header.frame_id = global_frame_;
+  prune_plan_.header.stamp = clock_->now();
+  pcl_prune_plan_.clear();
+  global_plan_arc_lengths_.clear();
+  last_heading_reference_valid_ = false;
+  heading_reference_stale_cycles_ = 0;
+  consecutive_heading_reference_failure_cycles_ = 0;
+  last_valid_prune_plan_ = clock_->now();
+}
+
+void Local_Planner::rebuildGlobalPlanArcLengths()
+{
+  global_plan_arc_lengths_.clear();
+  global_plan_arc_lengths_.reserve(global_plan_.size());
+  double accumulated_distance = 0.0;
+  for(std::size_t i = 0; i < global_plan_.size(); ++i){
+    if(i > 0){
+      accumulated_distance += getDistanceBTWPoseStamp(global_plan_[i - 1], global_plan_[i]);
+    }
+    global_plan_arc_lengths_.push_back(accumulated_distance);
+  }
+}
+
+double Local_Planner::getGlobalPlanArcDistance(std::size_t start_index, std::size_t end_index) const
+{
+  if(global_plan_arc_lengths_.empty()){
+    return 0.0;
+  }
+  start_index = std::min(start_index, global_plan_arc_lengths_.size() - 1);
+  end_index = std::min(end_index, global_plan_arc_lengths_.size() - 1);
+  const double start_arc = global_plan_arc_lengths_[start_index];
+  const double end_arc = global_plan_arc_lengths_[end_index];
+  return std::fabs(end_arc - start_arc);
+}
+
+double Local_Planner::getRobotYaw() const
+{
+  tf2::Quaternion q;
+  tf2::fromMsg(trans_gbl2b_.transform.rotation, q);
+  double roll = 0.0;
+  double pitch = 0.0;
+  double yaw = 0.0;
+  tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+  return yaw;
+}
+
+double Local_Planner::getRouteSegmentLateralDistance(std::size_t index) const
+{
+  if(global_plan_.empty()){
+    return std::numeric_limits<double>::infinity();
+  }
+
+  index = std::min(index, global_plan_.size() - 1);
+  const double robot_x = trans_gbl2b_.transform.translation.x;
+  const double robot_y = trans_gbl2b_.transform.translation.y;
+
+  const auto distance_to_point =
+    [&](const geometry_msgs::msg::PoseStamped & pose) {
+      const double dx = robot_x - pose.pose.position.x;
+      const double dy = robot_y - pose.pose.position.y;
+      return std::sqrt(dx * dx + dy * dy);
+    };
+
+  const auto distance_to_segment =
+    [&](const geometry_msgs::msg::PoseStamped & start_pose,
+        const geometry_msgs::msg::PoseStamped & end_pose) {
+      const double start_x = start_pose.pose.position.x;
+      const double start_y = start_pose.pose.position.y;
+      const double end_x = end_pose.pose.position.x;
+      const double end_y = end_pose.pose.position.y;
+      const double seg_x = end_x - start_x;
+      const double seg_y = end_y - start_y;
+      const double seg_len_sq = seg_x * seg_x + seg_y * seg_y;
+      if(seg_len_sq < 1e-6){
+        return distance_to_point(start_pose);
+      }
+      const double projection =
+        ((robot_x - start_x) * seg_x + (robot_y - start_y) * seg_y) / seg_len_sq;
+      const double clamped_projection = std::max(0.0, std::min(1.0, projection));
+      const double closest_x = start_x + clamped_projection * seg_x;
+      const double closest_y = start_y + clamped_projection * seg_y;
+      const double dx = robot_x - closest_x;
+      const double dy = robot_y - closest_y;
+      return std::sqrt(dx * dx + dy * dy);
+    };
+
+  double best_distance = distance_to_point(global_plan_[index]);
+  if(index > 0){
+    best_distance = std::min(best_distance, distance_to_segment(global_plan_[index - 1], global_plan_[index]));
+  }
+  if(index + 1 < global_plan_.size()){
+    best_distance = std::min(best_distance, distance_to_segment(global_plan_[index], global_plan_[index + 1]));
+  }
+  return best_distance;
+}
+
+double Local_Planner::getRouteHeadingError(std::size_t index) const
+{
+  if(global_plan_.size() < 2){
+    return 0.0;
+  }
+
+  index = std::min(index, global_plan_.size() - 1);
+  std::size_t first_index = index;
+  std::size_t last_index = index;
+  if(index + 1 < global_plan_.size()){
+    last_index = index + 1;
+  }
+  else if(index > 0){
+    first_index = index - 1;
+  }
+
+  const double dx =
+    global_plan_[last_index].pose.position.x - global_plan_[first_index].pose.position.x;
+  const double dy =
+    global_plan_[last_index].pose.position.y - global_plan_[first_index].pose.position.y;
+  if(std::hypot(dx, dy) < 1e-6){
+    return 0.0;
+  }
+
+  const double route_yaw = std::atan2(dy, dx);
+  return std::fabs(angles::shortest_angular_distance(getRobotYaw(), route_yaw));
+}
+
+bool Local_Planner::selectCausalPruneAnchor(
+  std::size_t * anchor_index,
+  double * robot_to_route_distance)
+{
+  if(anchor_index == nullptr || robot_to_route_distance == nullptr || global_plan_.empty()){
+    return false;
+  }
+
+  const std::size_t current_index = std::min(local_route_progress_index_, global_plan_.size() - 1);
+  const std::size_t search_window =
+    std::max<std::size_t>(1, causal_prune_search_window_);
+  const std::size_t search_end =
+    std::min(current_index + search_window, global_plan_.size() - 1);
+
+  bool have_candidate = false;
+  std::size_t best_index = current_index;
+  double best_lateral_distance = std::numeric_limits<double>::infinity();
+
+  for(std::size_t idx = current_index; idx <= search_end; ++idx){
+    const std::size_t index_jump = idx - current_index;
+    const double arc_jump = getGlobalPlanArcDistance(current_index, idx);
+    const double lateral_distance = getRouteSegmentLateralDistance(idx);
+    const double heading_error = getRouteHeadingError(idx);
+
+    // Local causal prune must follow route order. It must not jump to a later
+    // segment that is only Euclidean-close.
+    const bool heading_ok =
+      heading_error <= causal_prune_max_heading_error_ || index_jump <= 1;
+    const bool accept_candidate =
+      index_jump <= causal_prune_max_index_jump_ &&
+      arc_jump <= causal_prune_max_arc_jump_ &&
+      lateral_distance <= causal_prune_max_lateral_distance_ &&
+      heading_ok;
+
+    if(!accept_candidate){
+      continue;
+    }
+
+    if(!have_candidate || lateral_distance + 1e-6 < best_lateral_distance ||
+       (std::fabs(lateral_distance - best_lateral_distance) <= 1e-6 && idx < best_index)){
+      have_candidate = true;
+      best_index = idx;
+      best_lateral_distance = lateral_distance;
+    }
+  }
+
+  if(have_candidate){
+    *anchor_index = best_index;
+    *robot_to_route_distance = best_lateral_distance;
+    return true;
+  }
+
+  const double fallback_distance = getRouteSegmentLateralDistance(current_index);
+  if(fallback_distance <= causal_prune_max_lateral_distance_ * 1.5){
+    *anchor_index = current_index;
+    *robot_to_route_distance = fallback_distance;
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "causal prune rejected jump, keeping current progress index, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu",
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str(),
+      local_route_progress_index_);
+    return true;
+  }
+
+  const std::size_t relaxed_step_end = std::min(
+    current_index + std::min<std::size_t>(causal_prune_max_index_jump_, 3),
+    global_plan_.size() - 1);
+  for(std::size_t idx = current_index + 1; idx <= relaxed_step_end; ++idx){
+    const double lateral_distance = getRouteSegmentLateralDistance(idx);
+    if(lateral_distance <= causal_prune_max_lateral_distance_ * 1.25){
+      *anchor_index = idx;
+      *robot_to_route_distance = lateral_distance;
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger().get_child(name_), *clock_, 2000,
+        "causal prune accepted only a small progress step, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, next_index=%zu",
+        route_version_,
+        goal_seq_,
+        route_source_label_.c_str(),
+        local_route_progress_index_,
+        idx);
+      return true;
+    }
+  }
+
+  *robot_to_route_distance = fallback_distance;
+  return false;
+}
+
+bool Local_Planner::buildPrunedPlanAroundIndex(
+  std::size_t anchor_index,
+  double forward_distance,
+  double backward_distance,
+  nav_msgs::msg::Path * prune_plan,
+  pcl::PointCloud<pcl::PointXYZI> * pcl_prune_plan) const
+{
+  if(prune_plan == nullptr || pcl_prune_plan == nullptr || global_plan_.empty()){
+    return false;
+  }
+
+  anchor_index = std::min(anchor_index, global_plan_.size() - 1);
+  prune_plan->poses.clear();
+  pcl_prune_plan->clear();
+  prune_plan->header.frame_id = global_frame_;
+  prune_plan->header.stamp = clock_->now();
+
+  geometry_msgs::msg::PoseStamped last_pose = global_plan_[anchor_index];
+  for(std::size_t offset = 0; offset <= anchor_index; ++offset){
+    const std::size_t i = anchor_index - offset;
+    prune_plan->poses.push_back(global_plan_[i]);
+    pcl::PointXYZI pt;
+    pt.x = global_plan_[i].pose.position.x;
+    pt.y = global_plan_[i].pose.position.y;
+    pt.z = global_plan_[i].pose.position.z;
+    pt.intensity = -1.0;
+    pcl_prune_plan->points.push_back(pt);
+    if(i < anchor_index){
+      backward_distance -= getDistanceBTWPoseStamp(last_pose, global_plan_[i]);
+    }
+    last_pose = global_plan_[i];
+    if(backward_distance < 0.0 || i == 0){
+      break;
+    }
+  }
+
+  std::reverse(prune_plan->poses.begin(), prune_plan->poses.end());
+
+  last_pose = global_plan_[anchor_index];
+  for(std::size_t i = anchor_index; i < global_plan_.size(); ++i){
+    prune_plan->poses.push_back(global_plan_[i]);
+    pcl::PointXYZI pt;
+    pt.x = global_plan_[i].pose.position.x;
+    pt.y = global_plan_[i].pose.position.y;
+    pt.z = global_plan_[i].pose.position.z;
+    pt.intensity = (i == 0) ? 0.0 : 1.0;
+    pcl_prune_plan->points.push_back(pt);
+    if(i > anchor_index){
+      forward_distance -= getDistanceBTWPoseStamp(last_pose, global_plan_[i]);
+    }
+    last_pose = global_plan_[i];
+    if(forward_distance < 0.0){
+      break;
+    }
+  }
+
+  for(auto & pose : prune_plan->poses){
+    pose.header = prune_plan->header;
+  }
+
+  return !prune_plan->poses.empty();
+}
+
+bool Local_Planner::tryReuseCachedPrunedPath()
+{
+  if(!cached_local_pruned_path_valid_){
+    return false;
+  }
+
+  const double cached_age = (clock_->now() - cached_local_pruned_path_stamp_).seconds();
+  if(cached_age > cached_pruned_path_timeout_sec_){
+    return false;
+  }
+
+  if(consecutive_prune_failure_cycles_ > max_prune_failure_cycles_){
+    return false;
+  }
+
+  prune_plan_ = cached_local_pruned_path_;
+  prune_plan_.header.frame_id = global_frame_;
+  prune_plan_.header.stamp = clock_->now();
+  for(auto & pose : prune_plan_.poses){
+    pose.header = prune_plan_.header;
+  }
+  pcl_prune_plan_ = cached_pcl_prune_plan_;
+  last_prune_used_cache_ = true;
+  last_valid_prune_plan_ = clock_->now();
+  publishDebugPath(
+    prune_plan_,
+    pub_local_pruned_path_,
+    "local_pruned_path",
+    route_version_,
+    goal_seq_,
+    route_source_label_,
+    true);
+  RCLCPP_WARN_THROTTLE(
+    this->get_logger().get_child(name_), *clock_, 2000,
+    "reuse cached local pruned path due to transient prune failure, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu",
+    route_version_,
+    goal_seq_,
+    route_source_label_.c_str(),
+    local_route_progress_index_,
+    consecutive_prune_failure_cycles_);
+  return true;
+}
+
+bool Local_Planner::buildHeadingReferenceFromPoses(
+  const geometry_msgs::msg::PoseStamped & first_pose,
+  const geometry_msgs::msg::PoseStamped & last_pose,
+  tf2::Transform * reference_pose) const
+{
+  if(reference_pose == nullptr){
+    return false;
+  }
+
+  const double vx = last_pose.pose.position.x - first_pose.pose.position.x;
+  const double vy = last_pose.pose.position.y - first_pose.pose.position.y;
+  const double vz = last_pose.pose.position.z - first_pose.pose.position.z;
+  const double distance = std::sqrt(vx * vx + vy * vy + vz * vz);
+  if(distance < 1e-6){
+    return false;
+  }
+
+  tf2::Quaternion q;
+  if(std::fabs(vz) > 1e-6){
+    tf2::Vector3 axis_vector(vx / distance, vy / distance, vz / distance);
+    tf2::Vector3 up_vector(1.0, 0.0, 0.0);
+    tf2::Vector3 right_vector = axis_vector.cross(up_vector);
+    if(right_vector.length2() < 1e-6){
+      return false;
+    }
+    right_vector.normalize();
+    tf2::Quaternion q_pre(right_vector, -1.0 * std::acos(axis_vector.dot(up_vector)));
+    q_pre.normalize();
+    q = q_pre;
+  }
+  else{
+    tf2::Quaternion q_pre;
+    q_pre.setRPY(0.0, 0.0, std::atan2(vy, vx));
+    q = q_pre;
+  }
+
+  reference_pose->setRotation(q);
+  reference_pose->setOrigin(tf2::Vector3(
+    first_pose.pose.position.x,
+    first_pose.pose.position.y,
+    first_pose.pose.position.z));
+  return true;
+}
+
+bool Local_Planner::buildHeadingReferenceFromPlan(
+  const std::vector<geometry_msgs::msg::PoseStamped> & plan,
+  std::size_t start_index,
+  double min_reference_length,
+  tf2::Transform * reference_pose) const
+{
+  if(reference_pose == nullptr || plan.size() < 2){
+    return false;
+  }
+
+  start_index = std::min(start_index, plan.size() - 1);
+  double accumulated_distance = 0.0;
+  for(std::size_t end_index = start_index + 1; end_index < plan.size(); ++end_index){
+    accumulated_distance += getDistanceBTWPoseStamp(plan[end_index - 1], plan[end_index]);
+    if(accumulated_distance + 1e-6 < min_reference_length){
+      continue;
+    }
+    if(buildHeadingReferenceFromPoses(plan[start_index], plan[end_index], reference_pose)){
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool Local_Planner::buildHeadingReferenceFromPoseOrientation(
+  const geometry_msgs::msg::PoseStamped & pose,
+  tf2::Transform * reference_pose) const
+{
+  if(reference_pose == nullptr){
+    return false;
+  }
+
+  const auto & q_msg = pose.pose.orientation;
+  const double quat_norm =
+    q_msg.x * q_msg.x + q_msg.y * q_msg.y + q_msg.z * q_msg.z + q_msg.w * q_msg.w;
+  if(quat_norm < 1e-6){
+    return false;
+  }
+
+  tf2::Quaternion q;
+  tf2::fromMsg(q_msg, q);
+  q.normalize();
+  reference_pose->setRotation(q);
+  reference_pose->setOrigin(tf2::Vector3(
+    pose.pose.position.x,
+    pose.pose.position.y,
+    pose.pose.position.z));
+  return true;
+}
+
+void Local_Planner::cacheHeadingReference(const tf2::Transform & reference_pose)
+{
+  last_heading_reference_pose_ = reference_pose;
+  last_heading_reference_valid_ = true;
+  heading_reference_stale_cycles_ = 0;
+  consecutive_heading_reference_failure_cycles_ = 0;
+}
+
+double Local_Planner::updateHeadingDeviation(const tf2::Transform & reference_pose)
+{
+  const double yaw = getShortestAngleFromPose2RobotHeading(reference_pose);
+  mpc_critics_ros_->getSharedDataPtr()->heading_deviation_ = yaw;
+  return yaw;
 }
 
 void Local_Planner::parseCuboid(){
@@ -328,57 +820,90 @@ double Local_Planner::getShortestAngleFromPose2RobotHeading(tf2::Transform m_pos
 bool Local_Planner::isInitialHeadingAligned(){
 
   prunePlan(heading_tracking_distance_, 0.0);
-  if(prune_plan_.poses.size()<3){
-    RCLCPP_WARN_THROTTLE(this->get_logger().get_child(name_), *clock_, 5000, "Prune plan is too short when checking initial heading.");
+  tf2::Transform heading_reference_pose;
+  bool have_heading_reference = false;
+
+  if(buildHeadingReferenceFromPlan(prune_plan_.poses, 0, heading_tracking_distance_, &heading_reference_pose)){
+    cacheHeadingReference(heading_reference_pose);
+    have_heading_reference = true;
+  }
+  else if(buildHeadingReferenceFromPlan(
+            global_plan_,
+            local_route_progress_index_,
+            min_heading_reference_length_,
+            &heading_reference_pose)){
+    cacheHeadingReference(heading_reference_pose);
+    have_heading_reference = true;
+    RCLCPP_INFO_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "heading check degraded to route tangent, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu",
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str(),
+      local_route_progress_index_);
+  }
+  else if(last_heading_reference_valid_ &&
+          heading_reference_stale_cycles_ < max_heading_reference_stale_cycles_){
+    heading_reference_pose = last_heading_reference_pose_;
+    have_heading_reference = true;
+    ++heading_reference_stale_cycles_;
+    consecutive_heading_reference_failure_cycles_ = 0;
+    RCLCPP_INFO_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "heading check reused previous valid heading reference, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, stale_cycles=%zu",
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str(),
+      local_route_progress_index_,
+      heading_reference_stale_cycles_);
+  }
+  else if(!prune_plan_.poses.empty() &&
+          buildHeadingReferenceFromPlan(
+            prune_plan_.poses, 0, min_heading_reference_length_, &heading_reference_pose)){
+    cacheHeadingReference(heading_reference_pose);
+    have_heading_reference = true;
+    RCLCPP_INFO_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "heading check degraded to short local prune tangent, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu",
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str(),
+      local_route_progress_index_);
+  }
+  else if(!prune_plan_.poses.empty() &&
+          buildHeadingReferenceFromPoseOrientation(prune_plan_.poses.back(), &heading_reference_pose)){
+    cacheHeadingReference(heading_reference_pose);
+    have_heading_reference = true;
+    RCLCPP_INFO_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "heading check degraded to local path tail orientation, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu",
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str(),
+      local_route_progress_index_);
+  }
+
+  if(!have_heading_reference){
+    ++consecutive_heading_reference_failure_cycles_;
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "heading check failed after fallback, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu",
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str(),
+      local_route_progress_index_,
+      consecutive_heading_reference_failure_cycles_);
     return false;
   }
-  
-  //@ Get first/last pose from prune plan
-  geometry_msgs::msg::PoseStamped first_pose = prune_plan_.poses.front();
-  geometry_msgs::msg::PoseStamped last_pose = prune_plan_.poses.back();
 
-  //@ Generate a pose pointing from first pose to last pose
-  double vx,vy,vz;
-  vx = last_pose.pose.position.x - first_pose.pose.position.x;
-  vy = last_pose.pose.position.y - first_pose.pose.position.y;
-  vz = last_pose.pose.position.z - first_pose.pose.position.z;
-  tf2::Quaternion q;
-  if(vz!=0){
-    double unit = sqrt(vx*vx + vy*vy + vz*vz);
-    
-    tf2::Vector3 axis_vector(vx/unit, vy/unit, vz/unit);
+  const double yaw = updateHeadingDeviation(heading_reference_pose);
+  RCLCPP_DEBUG(
+    this->get_logger().get_child(name_),
+    "Heading difference from the prune plan starting at %.2f is %.2f",
+    heading_tracking_distance_,
+    yaw);
 
-    tf2::Vector3 up_vector(1.0, 0.0, 0.0);
-    tf2::Vector3 right_vector = axis_vector.cross(up_vector);
-    right_vector.normalized();
-    tf2::Quaternion q_pre(right_vector, -1.0*acos(axis_vector.dot(up_vector)));
-    q_pre.normalize();
-    q = q_pre;
-  }
-  else{
-    //@ handle with 2D
-    double yaw = atan2(vy, vx);
-    tf2::Quaternion q_pre;
-    q_pre.setRPY(0.0, 0.0, yaw);
-    q = q_pre;
-  }
-
-  tf2::Transform tf2_prune_pointing_pose;
-  //@Transform last pose to tf2 type
-  //tf2::Quaternion(q.getX(), q.getY(), q.getZ(), q.getW())
-  tf2_prune_pointing_pose.setRotation(q);
-  tf2_prune_pointing_pose.setOrigin(tf2::Vector3(first_pose.pose.position.x, first_pose.pose.position.y, first_pose.pose.position.z));
-
-  //@Update the value to critics that allow the robot to turn by shortest angle
-  double yaw = getShortestAngleFromPose2RobotHeading(tf2_prune_pointing_pose);
-  mpc_critics_ros_->getSharedDataPtr()->heading_deviation_ = yaw;
-  
-  RCLCPP_DEBUG(this->get_logger().get_child(name_), "Heading difference from the prune plan starting at %.2f is %.2f", heading_tracking_distance_, yaw);
-
-  if(fabs(yaw) < heading_align_angle_)
-    return true;
-  else
-    return false;
+  return std::fabs(yaw) < heading_align_angle_;
 }
 
 bool Local_Planner::isGoalHeadingAligned(){
@@ -444,10 +969,11 @@ void Local_Planner::setPlan(
   {
     RCLCPP_INFO_THROTTLE(
       this->get_logger().get_child(name_), *clock_, 5000,
-      "Reuse delivered route for local planner, route_version=%zu, goal_seq=%zu, source=%s",
+      "Reuse delivered route for local planner, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu",
       route_version,
       goal_seq,
-      source_label.c_str());
+      source_label.c_str(),
+      local_route_progress_index_);
     return;
   }
 
@@ -475,6 +1001,7 @@ void Local_Planner::setPlan(
   route_version_ = route_version;
   goal_seq_ = goal_seq;
   route_source_label_ = source_label;
+  resetLocalRouteTrackingState();
 
   pcl_global_plan_.reset(new pcl::PointCloud<pcl::PointXYZ>);
   for(auto gbl_it = global_plan_.begin(); gbl_it!=global_plan_.end();gbl_it++){
@@ -487,16 +1014,21 @@ void Local_Planner::setPlan(
 
   kdtree_global_plan_.reset(new pcl::KdTreeFLANN<pcl::PointXYZ>());
   kdtree_global_plan_->setInputCloud (pcl_global_plan_);
+  rebuildGlobalPlanArcLengths();
   RCLCPP_INFO(
     this->get_logger().get_child(name_),
-    "Receive new global plan, route_version=%zu, goal_seq=%zu, source=%s, poses=%zu",
+    "Receive new global plan, route_version=%zu, goal_seq=%zu, source=%s, poses=%zu, local_route_progress_index=%zu",
     route_version_,
     goal_seq_,
     route_source_label_.c_str(),
-    global_plan_.size());
+    global_plan_.size(),
+    local_route_progress_index_);
 }
 
-double Local_Planner::getDistanceBTWPoseStamp(const geometry_msgs::msg::PoseStamped& a, const geometry_msgs::msg::PoseStamped& b){
+double Local_Planner::getDistanceBTWPoseStamp(
+  const geometry_msgs::msg::PoseStamped& a,
+  const geometry_msgs::msg::PoseStamped& b) const
+{
 
   double dx = a.pose.position.x-b.pose.position.x;
   double dy = a.pose.position.y-b.pose.position.y;
@@ -526,14 +1058,20 @@ geometry_msgs::msg::TransformStamped Local_Planner::getGlobalPose(){
   return trans_gbl2b_;
 }
 
-void Local_Planner::prunePlan(double forward_distance, double backward_distance){
+bool Local_Planner::prunePlan(double forward_distance, double backward_distance){
 
   prune_plan_.poses.clear();
   pcl_prune_plan_.clear();
   prune_plan_.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
   prune_plan_.header.stamp = clock_->now();
+  last_prune_used_cache_ = false;
 
-  if(pcl_global_plan_->points.size()<3){
+  if(global_plan_.size() < 3){
+    ++consecutive_prune_failure_cycles_;
+    last_robot_to_route_distance_ = std::numeric_limits<double>::infinity();
+    if(tryReuseCachedPrunedPath()){
+      return true;
+    }
     publishDebugPath(
       prune_plan_,
       pub_local_pruned_path_,
@@ -542,18 +1080,38 @@ void Local_Planner::prunePlan(double forward_distance, double backward_distance)
       goal_seq_,
       route_source_label_,
       true);
-    return;
+    return false;
   }
 
-  std::vector<int> pointIdxNKNSearch(1);
-  std::vector<float> pointNKNSquaredDistance(1);
-  pcl::PointXYZ robot_pose;
-  robot_pose.x = trans_gbl2b_.transform.translation.x;
-  robot_pose.y = trans_gbl2b_.transform.translation.y;
-  robot_pose.z = trans_gbl2b_.transform.translation.z;
+  std::size_t anchor_index = local_route_progress_index_;
+  double robot_to_route_distance = std::numeric_limits<double>::infinity();
+  const bool have_anchor = selectCausalPruneAnchor(&anchor_index, &robot_to_route_distance);
+  last_robot_to_route_distance_ = robot_to_route_distance;
 
-  if ( kdtree_global_plan_->nearestKSearch (robot_pose, 1, pointIdxNKNSearch, pointNKNSquaredDistance) <= 0 ){
-    RCLCPP_DEBUG(this->get_logger().get_child(name_), "Ready to fix some exception here.");
+  if(have_anchor &&
+     buildPrunedPlanAroundIndex(anchor_index, forward_distance, backward_distance, &prune_plan_, &pcl_prune_plan_)){
+    local_route_progress_index_ = std::max(local_route_progress_index_, anchor_index);
+    consecutive_prune_failure_cycles_ = 0;
+    cached_local_pruned_path_valid_ = true;
+    cached_local_pruned_path_ = prune_plan_;
+    cached_local_pruned_path_stamp_ = clock_->now();
+    cached_pcl_prune_plan_ = pcl_prune_plan_;
+    last_valid_prune_plan_ = clock_->now();
+  }
+  else{
+    ++consecutive_prune_failure_cycles_;
+    if(tryReuseCachedPrunedPath()){
+      return true;
+    }
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "transient prune failure, not treating as deviation yet, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f",
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str(),
+      local_route_progress_index_,
+      consecutive_prune_failure_cycles_,
+      last_robot_to_route_distance_);
     publishDebugPath(
       prune_plan_,
       pub_local_pruned_path_,
@@ -562,66 +1120,9 @@ void Local_Planner::prunePlan(double forward_distance, double backward_distance)
       goal_seq_,
       route_source_label_,
       true);
-    return;
+    return false;
   }
 
-
-  if(sqrt(pointNKNSquaredDistance[0])>1.0){
-    RCLCPP_DEBUG(this->get_logger().get_child(name_), "Deviate from plan, fix some exception here.");
-    //@ consider to clear prune_plan in model_shared_data?
-    publishDebugPath(
-      prune_plan_,
-      pub_local_pruned_path_,
-      "local_pruned_path",
-      route_version_,
-      goal_seq_,
-      route_source_label_,
-      true);
-    return;
-  }
-
-  //@ backward check
-  geometry_msgs::msg::PoseStamped last_pose = global_plan_[pointIdxNKNSearch[0]];
-  for(int i=pointIdxNKNSearch[0]; i>=0; i--){
-    prune_plan_.poses.push_back(global_plan_[i]);
-    pcl::PointXYZI pt;
-    pt.x = global_plan_[i].pose.position.x; pt.y = global_plan_[i].pose.position.y; pt.z = global_plan_[i].pose.position.z;
-    pt.intensity = -1; //@ we tag backward plan as negative for path_blocked_strategy(plugin) to distinguish the backward pose
-    pcl_prune_plan_.points.push_back(pt);
-    if(i<pointIdxNKNSearch[0]){
-      backward_distance -= getDistanceBTWPoseStamp(last_pose, global_plan_[i]);
-    }
-    last_pose = global_plan_[i];
-    if(backward_distance<0)
-      break;
-  }
-  
-  std::reverse(prune_plan_.poses.begin(),prune_plan_.poses.end()); 
-
-  //@ forward check
-  for(int i=pointIdxNKNSearch[0];i<global_plan_.size();i++){
-    prune_plan_.poses.push_back(global_plan_[i]);
-    pcl::PointXYZI pt;
-    pt.x = global_plan_[i].pose.position.x; pt.y = global_plan_[i].pose.position.y; pt.z = global_plan_[i].pose.position.z;
-    if(i == 0){
-      pt.intensity = 0;
-    }
-    else{
-      pt.intensity = 1;
-    }
-    pcl_prune_plan_.points.push_back(pt);
-
-    if(i>pointIdxNKNSearch[0]){
-      forward_distance -= getDistanceBTWPoseStamp(last_pose, global_plan_[i]);
-    }
-    last_pose = global_plan_[i];
-    if(forward_distance<0)
-      break;
-  }
-  
-  for(auto & pose : prune_plan_.poses){
-    pose.header = prune_plan_.header;
-  }
   if(debug_publish_prune_plan_ && pub_prune_plan_->get_subscription_count() > 0){
     pub_prune_plan_->publish(prune_plan_);
   }
@@ -633,8 +1134,7 @@ void Local_Planner::prunePlan(double forward_distance, double backward_distance)
     goal_seq_,
     route_source_label_,
     true);
-  last_valid_prune_plan_ = clock_->now();
-  //RCLCPP_DEBUG(this->get_logger().get_child(name_), "%lu",prune_plan_.poses.size());
+  return true;
 }
 
 void Local_Planner::getBestTrajectory(std::string traj_gen_name, base_trajectory::Trajectory& best_traj){
@@ -770,6 +1270,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr aggregate_observation_kdtree;
   std::vector<perception_3d::PerceptionOpinion> opinions;
   double current_allowed_max_linear_speed = -1.0;
+  bool have_usable_prune_plan = false;
 
   {
     std::unique_lock<perception_3d::StackedPerception::mutex_t> pct_lock(*(stacked_perception->getMutex()));
@@ -777,7 +1278,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
     //@ forward_prune_/backward_prune_: should adapt to vehicle speed.
     //@ prune plan are used by trajectory_generators/perception
     //@ prune plan has to come after mutex lock, because global_plan_ros_sub_ reset global plan kd tree
-    prunePlan(forward_prune_, backward_prune_);
+    have_usable_prune_plan = prunePlan(forward_prune_, backward_prune_);
     perception_shared_data->pcl_prune_plan_ = pcl_prune_plan_;
     aggregate_observation = perception_shared_data->aggregate_observation_;
     aggregate_observation_kdtree = perception_shared_data->aggregate_observation_kdtree_;
@@ -802,9 +1303,42 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   //@ TODO: Compute cuboid of each pose and send to determineIsPathBlock
   //perception_3d_ros_->getStackedPerception()->determineIsPathBlock(pcl_prune_plan_);
 
-  if((clock_->now()-last_valid_prune_plan_).seconds()>=prune_plane_timeout_){
-    RCLCPP_FATAL(this->get_logger().get_child(name_), "Deviate global plan too much, computeVelocityCommand() returns false.");
-    return dddmr_sys_core::PRUNE_PLAN_FAIL;
+  if(!have_usable_prune_plan){
+    const bool deviation_timeout =
+      (clock_->now() - last_valid_prune_plan_).seconds() >= prune_plane_timeout_;
+    const bool deviation_distance =
+      last_robot_to_route_distance_ > causal_prune_max_lateral_distance_;
+    const bool deviation_confirmed =
+      consecutive_prune_failure_cycles_ > max_prune_failure_cycles_ &&
+      deviation_timeout &&
+      deviation_distance;
+
+    if(deviation_confirmed){
+      RCLCPP_FATAL(
+        this->get_logger().get_child(name_),
+        "deviation confirmed after consecutive prune failures, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f",
+        route_version_,
+        goal_seq_,
+        route_source_label_.c_str(),
+        local_route_progress_index_,
+        consecutive_prune_failure_cycles_,
+        last_robot_to_route_distance_);
+      RCLCPP_FATAL(
+        this->get_logger().get_child(name_),
+        "Deviate global plan too much, computeVelocityCommand() returns false.");
+      return dddmr_sys_core::PRUNE_PLAN_FAIL;
+    }
+
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "transient prune failure, not treating as deviation yet, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f",
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str(),
+      local_route_progress_index_,
+      consecutive_prune_failure_cycles_,
+      last_robot_to_route_distance_);
+    return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
   }
 
   //Do not create a function to set the parameters unless a nice structure is found
@@ -909,6 +1443,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   //@ Reset kd tree/observations because it is shared_ptr and copied from perception_ros
   mpc_critics_ros_->getSharedDataPtr()->pcl_perception_.reset(new pcl::PointCloud<pcl::PointXYZI>());
   mpc_critics_ros_->getSharedDataPtr()->pcl_perception_kdtree_.reset(new pcl::KdTreeFLANN<pcl::PointXYZI>());
+  return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
 }
 
 void Local_Planner::trajectory2posearray_cuboids(const base_trajectory::Trajectory& a_traj, 
