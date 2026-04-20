@@ -41,6 +41,7 @@ public:
     double heading_change_penalty = 0.4;
     double obstacle_penalty_weight = 1.0;
     double heuristic_heading_weight = 0.2;
+    double turn_side_hysteresis_penalty = 0.8;
   };
 
   explicit ForwardHybridAStar(
@@ -56,7 +57,9 @@ public:
     const geometry_msgs::msg::PoseStamped & start,
     const geometry_msgs::msg::PoseStamped & goal,
     nav_msgs::msg::Path * ros_path,
-    bool force_position_only_goal = false);
+    bool force_position_only_goal = false,
+    bool force_use_goal_heading = false,
+    int preferred_initial_turn_sign = 0);
 
 private:
   struct NodeRecord
@@ -68,6 +71,7 @@ private:
     double f = std::numeric_limits<double>::infinity();
     std::size_t parent_state_id = std::numeric_limits<std::size_t>::max();
     int primitive_index = -1;
+    int initial_turn_sign = 0;
     std::size_t ground_index = 0;
     int heading_bin = 0;
     double x = 0.0;
@@ -157,10 +161,12 @@ private:
     bool use_goal_heading) const;
 
   double GetPrimitiveSteerByIndex(int primitive_index) const;
+  int GetPrimitiveTurnSign(int primitive_index) const;
   double ComputeTransitionCost(
     const NodeRecord & parent,
     int primitive_index,
-    const PrimitiveResult & primitive_result) const;
+    const PrimitiveResult & primitive_result,
+    int preferred_initial_turn_sign) const;
 
   bool RolloutPrimitive(
     const NodeRecord & parent,

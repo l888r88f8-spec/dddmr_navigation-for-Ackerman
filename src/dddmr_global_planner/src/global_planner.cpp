@@ -151,6 +151,8 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   this->get_parameter("hybrid_astar.obstacle_penalty_weight", forward_hybrid_astar_config_.obstacle_penalty_weight);
   declare_parameter("hybrid_astar.heuristic_heading_weight", rclcpp::ParameterValue(0.2));
   this->get_parameter("hybrid_astar.heuristic_heading_weight", forward_hybrid_astar_config_.heuristic_heading_weight);
+  declare_parameter("hybrid_astar.turn_side_hysteresis_penalty", rclcpp::ParameterValue(0.8));
+  this->get_parameter("hybrid_astar.turn_side_hysteresis_penalty", forward_hybrid_astar_config_.turn_side_hysteresis_penalty);
 
   RCLCPP_INFO(
     this->get_logger(),
@@ -282,7 +284,7 @@ void GlobalPlanner::cbClickedPoint(const geometry_msgs::msg::PointStamped::Share
     return;
   }
   
-  auto ros_path = makeROSPlan(start, goal, true);
+  auto ros_path = makeROSPlan(start, goal, true, false, 0);
   if(ros_path.poses.empty()){
     RCLCPP_WARN(this->get_logger(), "No path found for clicked goal.");
     return;
@@ -742,7 +744,7 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
   geometry_msgs::msg::PoseStamped start;
   perception_3d_ros_->getGlobalPose(start);
 
-  auto ros_path = makeROSPlan(start, goal->goal, false);
+  auto ros_path = makeROSPlan(start, goal->goal, false, false, 0);
 
   if(ros_path.poses.empty()){
     global_plan_result_->path = ros_path;
@@ -760,7 +762,9 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
 nav_msgs::msg::Path GlobalPlanner::makeROSPlan(
   const geometry_msgs::msg::PoseStamped& start,
   const geometry_msgs::msg::PoseStamped& goal,
-  bool force_position_only_goal){
+  bool force_position_only_goal,
+  bool force_use_goal_heading,
+  int preferred_initial_turn_sign){
   
   std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
   unsigned int start_id = 0;
@@ -780,7 +784,10 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlan(
   if(use_forward_hybrid_astar_ && forward_hybrid_astar_planner_){
     nav_msgs::msg::Path hybrid_path;
     if(forward_hybrid_astar_planner_->MakePlan(
-        start, goal, &hybrid_path, force_position_only_goal))
+        start, goal, &hybrid_path,
+        force_position_only_goal,
+        force_use_goal_heading,
+        preferred_initial_turn_sign))
     {
       hybrid_path.header.frame_id = global_frame_;
       hybrid_path.header.stamp = clock_->now();

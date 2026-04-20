@@ -40,12 +40,15 @@ global_planner:
       heading_change_penalty: 0.4
       obstacle_penalty_weight: 1.0
       heuristic_heading_weight: 0.2
+      turn_side_hysteresis_penalty: 0.8
 
 #if we use get_dwa_plan in global_plan_manager, we setup parameters for dwa_global_planner
 dynamic_window_aware_global_planner:
   ros__parameters:
     look_ahead_distance: 2.0                                # 全局重规划前视距离
     recompute_frequency: 2.0                                # 全局路径动态重算频率
+    startup_replan_lock_distance: 0.8                       # 起步阶段锁定重规划距离，避免首段接入弧反复翻边
+    startup_replan_lock_offtrack_tolerance: 1.0             # 机器人偏离当前DWA路径超过该距离时解除锁定
 
 perception_3d_global:
   ros__parameters:

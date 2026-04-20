@@ -30,6 +30,9 @@
 */
 #include <global_planner/dynamic_window_aware_global_planner.h>
 
+#include <cmath>
+#include <limits>
+
 using namespace std::chrono_literals;
 
 namespace global_planner
@@ -99,6 +102,17 @@ void DWA_GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3
   declare_parameter("recompute_frequency", rclcpp::ParameterValue(10.0));
   this->get_parameter("recompute_frequency", recompute_frequency_);
   RCLCPP_INFO(this->get_logger(), "recompute_frequency: %.2f", recompute_frequency_);     
+  declare_parameter("startup_replan_lock_distance", rclcpp::ParameterValue(0.8));
+  this->get_parameter("startup_replan_lock_distance", startup_replan_lock_distance_);
+  RCLCPP_INFO(this->get_logger(), "startup_replan_lock_distance: %.2f", startup_replan_lock_distance_);
+  declare_parameter("startup_replan_lock_offtrack_tolerance", rclcpp::ParameterValue(1.0));
+  this->get_parameter(
+    "startup_replan_lock_offtrack_tolerance",
+    startup_replan_lock_offtrack_tolerance_);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "startup_replan_lock_offtrack_tolerance: %.2f",
+    startup_replan_lock_offtrack_tolerance_);
   
   pub_path_ = this->create_publisher<nav_msgs::msg::Path>("awared_global_path", 1);
 
@@ -226,9 +240,129 @@ void DWA_GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoal
   clearCurrentHandleIfMatches(goal_handle);
 }
 
+bool DWA_GlobalPlanner::ComputePathTangentYaw(
+  const nav_msgs::msg::Path & path,
+  std::size_t pivot_index,
+  double * yaw) const
+{
+  if (yaw == nullptr || path.poses.size() < 2) {
+    return false;
+  }
+  if (pivot_index >= path.poses.size()) {
+    return false;
+  }
+
+  auto compute_yaw_from_pair =
+    [&](std::size_t from_index, std::size_t to_index, double * pair_yaw) -> bool
+    {
+      if (pair_yaw == nullptr) {
+        return false;
+      }
+      if (from_index >= path.poses.size() || to_index >= path.poses.size()) {
+        return false;
+      }
+      const auto & from_pose = path.poses[from_index].pose.position;
+      const auto & to_pose = path.poses[to_index].pose.position;
+      const double dx = to_pose.x - from_pose.x;
+      const double dy = to_pose.y - from_pose.y;
+      const double norm = std::hypot(dx, dy);
+      if (!std::isfinite(norm) || norm < 1e-4) {
+        return false;
+      }
+      *pair_yaw = std::atan2(dy, dx);
+      return std::isfinite(*pair_yaw);
+    };
+
+  double tangent_yaw = 0.0;
+  if (pivot_index + 1 < path.poses.size() &&
+    compute_yaw_from_pair(pivot_index, pivot_index + 1, &tangent_yaw))
+  {
+    *yaw = tangent_yaw;
+    return true;
+  }
+
+  if (pivot_index > 0 &&
+    compute_yaw_from_pair(pivot_index - 1, pivot_index, &tangent_yaw))
+  {
+    *yaw = tangent_yaw;
+    return true;
+  }
+
+  return false;
+}
+
+int DWA_GlobalPlanner::EstimatePreferredTurnSign(const nav_msgs::msg::Path & path) const
+{
+  if (path.poses.size() < 3) {
+    return 0;
+  }
+
+  for (std::size_t i = 0; i + 2 < path.poses.size(); ++i) {
+    const auto & p0 = path.poses[i].pose.position;
+    const auto & p1 = path.poses[i + 1].pose.position;
+    const auto & p2 = path.poses[i + 2].pose.position;
+    const double v1x = p1.x - p0.x;
+    const double v1y = p1.y - p0.y;
+    const double v2x = p2.x - p1.x;
+    const double v2y = p2.y - p1.y;
+    const double n1 = std::hypot(v1x, v1y);
+    const double n2 = std::hypot(v2x, v2y);
+    if (!std::isfinite(n1) || !std::isfinite(n2) || n1 < 1e-4 || n2 < 1e-4) {
+      continue;
+    }
+
+    const double cross = v1x * v2y - v1y * v2x;
+    if (!std::isfinite(cross) || std::abs(cross) < 1e-4) {
+      continue;
+    }
+    return cross > 0.0 ? 1 : -1;
+  }
+  return 0;
+}
+
+bool DWA_GlobalPlanner::ShouldLockStartupReplan(
+  const nav_msgs::msg::Path & dwa_path,
+  const geometry_msgs::msg::PoseStamped & robot_pose) const
+{
+  if (startup_replan_lock_distance_ <= 1e-6 || dwa_path.poses.size() < 2) {
+    return false;
+  }
+
+  std::size_t nearest_index = 0;
+  double nearest_sq = std::numeric_limits<double>::infinity();
+  for (std::size_t i = 0; i < dwa_path.poses.size(); ++i) {
+    const double dx = dwa_path.poses[i].pose.position.x - robot_pose.pose.position.x;
+    const double dy = dwa_path.poses[i].pose.position.y - robot_pose.pose.position.y;
+    const double d2 = dx * dx + dy * dy;
+    if (d2 < nearest_sq) {
+      nearest_sq = d2;
+      nearest_index = i;
+    }
+  }
+
+  if (!std::isfinite(nearest_sq)) {
+    return false;
+  }
+
+  if (nearest_sq >
+    startup_replan_lock_offtrack_tolerance_ * startup_replan_lock_offtrack_tolerance_)
+  {
+    return false;
+  }
+
+  double progressed = 0.0;
+  for (std::size_t i = 1; i <= nearest_index && i < dwa_path.poses.size(); ++i) {
+    const auto & p0 = dwa_path.poses[i - 1].pose.position;
+    const auto & p1 = dwa_path.poses[i].pose.position;
+    progressed += std::hypot(p1.x - p0.x, p1.y - p0.y);
+  }
+  return progressed < startup_replan_lock_distance_;
+}
+
 void DWA_GlobalPlanner::determineDWAPlan(){
 
   nav_msgs::msg::Path global_path_snapshot;
+  nav_msgs::msg::Path global_dwa_path_snapshot;
   pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_global_path_snapshot(new pcl::PointCloud<pcl::PointXYZ>);
   {
     std::lock_guard<std::mutex> lock(plan_state_mutex_);
@@ -236,11 +370,19 @@ void DWA_GlobalPlanner::determineDWAPlan(){
       return;
     }
     global_path_snapshot = global_path_;
+    global_dwa_path_snapshot = global_dwa_path_;
     *pcl_global_path_snapshot = *pcl_global_path_;
   }
 
   geometry_msgs::msg::PoseStamped start;
   perception_3d_ros_->getGlobalPose(start);
+  if(ShouldLockStartupReplan(global_dwa_path_snapshot, start)){
+    RCLCPP_INFO_THROTTLE(
+      this->get_logger(), *clock_, 1000,
+      "Keep current DWA global path during startup lock window.");
+    return;
+  }
+
   pcl::PointXYZ start_pt;
   start_pt.x = start.pose.position.x; start_pt.y = start.pose.position.y; start_pt.z = start.pose.position.z;
   std::vector<float> resultant_distances;
@@ -324,11 +466,35 @@ void DWA_GlobalPlanner::determineDWAPlan(){
 
   geometry_msgs::msg::PoseStamped dwa_goal;
   dwa_goal.header.frame_id = global_frame_;
+  dwa_goal.header.stamp = clock_->now();
   dwa_goal.pose.position.x = pcl_global_path_snapshot->points[dwa_pivot].x;
   dwa_goal.pose.position.y = pcl_global_path_snapshot->points[dwa_pivot].y;
   dwa_goal.pose.position.z = pcl_global_path_snapshot->points[dwa_pivot].z;
-  
-  nav_msgs::msg::Path dwa_path = global_planner_->makeROSPlan(start, dwa_goal);
+  dwa_goal.pose.orientation.w = 1.0;
+
+  double tangent_yaw = 0.0;
+  const bool has_tangent_yaw = ComputePathTangentYaw(
+    global_path_snapshot,
+    static_cast<std::size_t>(dwa_pivot),
+    &tangent_yaw);
+  if(has_tangent_yaw){
+    tf2::Quaternion q;
+    q.setRPY(0.0, 0.0, tangent_yaw);
+    q.normalize();
+    dwa_goal.pose.orientation.x = q.x();
+    dwa_goal.pose.orientation.y = q.y();
+    dwa_goal.pose.orientation.z = q.z();
+    dwa_goal.pose.orientation.w = q.w();
+  }
+  else{
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger(), *clock_, 2000,
+      "Failed to compute tangent yaw for DWA pivot, fallback to position-only heading.");
+  }
+
+  const int preferred_turn_sign = EstimatePreferredTurnSign(global_dwa_path_snapshot);
+  nav_msgs::msg::Path dwa_path = global_planner_->makeROSPlan(
+    start, dwa_goal, false, has_tangent_yaw, preferred_turn_sign);
   dwa_path.header.frame_id = global_frame_;
   dwa_path.header.stamp = clock_->now();
 

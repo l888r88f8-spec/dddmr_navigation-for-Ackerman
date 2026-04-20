@@ -93,7 +93,9 @@ class GlobalPlanner : public rclcpp::Node {
       nav_msgs::msg::Path makeROSPlan(
         const geometry_msgs::msg::PoseStamped& start,
         const geometry_msgs::msg::PoseStamped& goal,
-        bool force_position_only_goal = false);
+        bool force_position_only_goal = false,
+        bool force_use_goal_heading = false,
+        int preferred_initial_turn_sign = 0);
       std::shared_ptr<dddmr_sys_core::action::GetPlan::Result> global_plan_result_;
 
     private:

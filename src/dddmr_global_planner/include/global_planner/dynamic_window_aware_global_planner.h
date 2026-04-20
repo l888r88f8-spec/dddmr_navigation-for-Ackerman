@@ -118,6 +118,8 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       nav_msgs::msg::Path global_dwa_path_;
       double look_ahead_distance_;
       double recompute_frequency_;
+      double startup_replan_lock_distance_;
+      double startup_replan_lock_offtrack_tolerance_;
       
       pcl::KdTreeFLANN<pcl::PointXYZ>::Ptr kdtree_global_path_; 
       pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_global_path_;
@@ -126,6 +128,14 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       void makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle);
       bool isNewGoal();
       void determineDWAPlan();
+      bool ComputePathTangentYaw(
+        const nav_msgs::msg::Path & path,
+        std::size_t pivot_index,
+        double * yaw) const;
+      int EstimatePreferredTurnSign(const nav_msgs::msg::Path & path) const;
+      bool ShouldLockStartupReplan(
+        const nav_msgs::msg::Path & dwa_path,
+        const geometry_msgs::msg::PoseStamped & robot_pose) const;
       bool clearCurrentHandleIfMatches(
         const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle);
 
