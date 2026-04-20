@@ -15,8 +15,8 @@ p2p_move_base:
 ### 全局规划器和感知层参数
 global_plan_manager:
   ros__parameters:
-    global_planner_action_name: "get_dwa_plan"
-    global_plan_query_frequency: 2.0                         # 全局路径重查询频率
+    global_planner_action_name: "get_plan"
+    global_plan_query_frequency: 2.0                         # Route layer 查询频率（低频主路由）
 
 global_planner:
   ros__parameters:
@@ -41,18 +41,24 @@ global_planner:
       obstacle_penalty_weight: 1.0
       heuristic_heading_weight: 0.2
       turn_side_hysteresis_penalty: 0.8
-      rearward_check_distance: 1.5
-      rearward_allowance: 0.05
-      rearward_excursion_penalty: 4.0
-      rearward_hard_reject_distance: 0.20
+      rearward_check_distance: 2.0
+      rearward_allowance: 0.0
+      rearward_excursion_penalty: 8.0
+      rearward_hard_reject_distance: 0.08
 
-#if we use get_dwa_plan in global_plan_manager, we setup parameters for dwa_global_planner
+# get_dwa_plan now acts as reconnect service (Connector layer), not default route source.
 dynamic_window_aware_global_planner:
   ros__parameters:
-    look_ahead_distance: 2.0                                # 全局重规划前视距离
-    recompute_frequency: 2.0                                # 全局路径动态重算频率
+    look_ahead_distance: 2.0                                # reconnect 目标参考距离（兼容旧参数）
+    recompute_frequency: 2.0                                # reconnect 频率（兼容旧参数）
+    reconnect_frequency: 2.0                                # Connector 层重接回频率
+    corridor_forward_distance: 8.0                          # Corridor 前方窗口长度
+    reconnect_target_distance: 2.0                          # 在 Corridor 中选择接回 anchor 的距离
+    reconnect_deviation_threshold: 0.7                      # 偏离 Corridor 超过该阈值触发接回
+    reconnect_heading_threshold: 1.3                        # 朝向偏差超过该阈值触发接回
+    max_reconnect_failures_before_global_replan: 3.0        # 连续接回失败后触发 Route 层重算
     startup_replan_lock_distance: 0.8                       # 起步阶段锁定重规划距离，避免首段接入弧反复翻边
-    startup_replan_lock_offtrack_tolerance: 1.0             # 机器人偏离当前DWA路径超过该距离时解除锁定
+    startup_replan_lock_offtrack_tolerance: 0.0             # 机器人偏离当前DWA路径超过该距离时解除锁定
     preferred_turn_sign_lookahead_distance: 1.8             # 从机器人当前未走路径前视窗口估计转向偏好
     min_force_goal_heading_distance: 3.0                    # 仅远距离中间接入目标才强制终点朝向
     max_force_goal_heading_angle: 1.75                      # 起点朝向与切线夹角过大时不强制终点朝向

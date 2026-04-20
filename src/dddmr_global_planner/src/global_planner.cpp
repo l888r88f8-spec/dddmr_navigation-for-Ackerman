@@ -833,6 +833,67 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlan(
     else
       RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 5000, "Path found from: %u to %u", start_id, goal_id);
     getROSPath(path, ros_path);
+
+    // Legacy graph A* can return a first segment that starts from projected
+    // ground nodes slightly behind the current robot pose. Trim this near-start
+    // rearward prefix and anchor the path with the current start pose so the
+    // local planner does not receive an immediate backward hook.
+    double start_yaw = 0.0;
+    bool has_start_yaw = false;
+    {
+      const auto & q_msg = start.pose.orientation;
+      const double norm =
+        q_msg.x * q_msg.x + q_msg.y * q_msg.y + q_msg.z * q_msg.z + q_msg.w * q_msg.w;
+      if (std::isfinite(norm) && norm > 1e-9) {
+        tf2::Quaternion q(q_msg.x, q_msg.y, q_msg.z, q_msg.w);
+        q.normalize();
+        double roll = 0.0;
+        double pitch = 0.0;
+        tf2::Matrix3x3(q).getRPY(roll, pitch, start_yaw);
+        has_start_yaw = std::isfinite(start_yaw);
+      }
+    }
+
+    if (has_start_yaw && !ros_path.poses.empty()) {
+      constexpr double kRearTrimDistance = 1.5;
+      constexpr double kRearTrimAllowance = 0.05;
+      std::size_t trim_count = 0;
+      for (std::size_t i = 0; i < ros_path.poses.size(); ++i) {
+        const double dx = ros_path.poses[i].pose.position.x - start.pose.position.x;
+        const double dy = ros_path.poses[i].pose.position.y - start.pose.position.y;
+        const double distance = std::hypot(dx, dy);
+        if (!std::isfinite(distance) || distance > kRearTrimDistance) {
+          break;
+        }
+        const double x_local = std::cos(start_yaw) * dx + std::sin(start_yaw) * dy;
+        if (x_local < -kRearTrimAllowance) {
+          trim_count = i + 1;
+          continue;
+        }
+        break;
+      }
+
+      if (trim_count > 0 && trim_count < ros_path.poses.size()) {
+        ros_path.poses.erase(ros_path.poses.begin(), ros_path.poses.begin() + trim_count);
+      } else if (trim_count >= ros_path.poses.size()) {
+        ros_path.poses.clear();
+      }
+    }
+
+    if (ros_path.poses.empty()) {
+      geometry_msgs::msg::PoseStamped start_pose = start;
+      start_pose.header = ros_path.header;
+      ros_path.poses.push_back(start_pose);
+    } else {
+      const double first_dx = ros_path.poses.front().pose.position.x - start.pose.position.x;
+      const double first_dy = ros_path.poses.front().pose.position.y - start.pose.position.y;
+      if (std::hypot(first_dx, first_dy) > 0.05) {
+        geometry_msgs::msg::PoseStamped start_pose = start;
+        start_pose.header = ros_path.header;
+        ros_path.poses.insert(ros_path.poses.begin(), start_pose);
+      }
+    }
+
     ros_path.poses.push_back(goal);
     return ros_path;
   }
