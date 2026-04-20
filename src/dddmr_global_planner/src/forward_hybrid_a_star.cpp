@@ -854,20 +854,21 @@ bool ForwardHybridAStar::MakePlan(
     const OpenEntry top_entry = open_list.top();
     open_list.pop();
 
-    NodeRecord * current = FindNode(top_entry.state_id);
-    if (current == nullptr) {
+    NodeRecord * current_ptr = FindNode(top_entry.state_id);
+    if (current_ptr == nullptr) {
       continue;
     }
-    if (!current->opened || current->closed) {
+    if (!current_ptr->opened || current_ptr->closed) {
       continue;
     }
-    if (!IsFinite(current->f) || top_entry.f > current->f + 1e-9) {
+    if (!IsFinite(current_ptr->f) || top_entry.f > current_ptr->f + 1e-9) {
       continue;
     }
 
-    current->closed = true;
+    current_ptr->closed = true;
+    const NodeRecord current = *current_ptr;
 
-    if (IsGoalReached(*current, goal, goal_yaw, has_goal_yaw, use_goal_heading)) {
+    if (IsGoalReached(current, goal, goal_yaw, has_goal_yaw, use_goal_heading)) {
       goal_state_id = top_entry.state_id;
       break;
     }
@@ -877,7 +878,7 @@ bool ForwardHybridAStar::MakePlan(
       ++primitive_index)
     {
       PrimitiveResult primitive_result;
-      if (!RolloutPrimitive(*current, primitive_index, &primitive_result, nullptr)) {
+      if (!RolloutPrimitive(current, primitive_index, &primitive_result, nullptr)) {
         continue;
       }
 
@@ -896,8 +897,8 @@ bool ForwardHybridAStar::MakePlan(
       }
 
       const double transition_cost =
-        ComputeTransitionCost(*current, primitive_index, primitive_result);
-      const double tentative_g = current->g + transition_cost;
+        ComputeTransitionCost(current, primitive_index, primitive_result);
+      const double tentative_g = current.g + transition_cost;
       if (neighbor != nullptr && neighbor->opened && tentative_g >= neighbor->g - 1e-9) {
         continue;
       }
