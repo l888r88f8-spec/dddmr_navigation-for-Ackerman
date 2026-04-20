@@ -1070,6 +1070,10 @@ void DWA_GlobalPlanner::determineDWAPlan()
     {
       std::lock_guard<std::mutex> lock(plan_state_mutex_);
       const bool was_latched = active_connector_latched_;
+      // Connector lifecycle rule:
+      // connector is ephemeral; once reconnect is no longer needed, the
+      // system must fall back to route path instead of reusing stale connector
+      // geometry.
       active_connector_latched_ = false;
       active_route_anchor_index_ = 0;
       active_connector_start_time_ = now;
@@ -1077,10 +1081,25 @@ void DWA_GlobalPlanner::determineDWAPlan()
       active_connector_path_.poses.clear();
       active_connector_path_.header.frame_id = global_frame_;
       active_connector_path_.header.stamp = now;
+      active_reconnect_goal_.header.frame_id = global_frame_;
+      active_reconnect_goal_.header.stamp = now;
+      active_reconnect_goal_.pose.position.x = 0.0;
+      active_reconnect_goal_.pose.position.y = 0.0;
+      active_reconnect_goal_.pose.position.z = 0.0;
+      active_reconnect_goal_.pose.orientation.x = 0.0;
+      active_reconnect_goal_.pose.orientation.y = 0.0;
+      active_reconnect_goal_.pose.orientation.z = 0.0;
+      active_reconnect_goal_.pose.orientation.w = 1.0;
       active_connector_has_goal_heading_ = false;
       active_connector_preferred_turn_sign_ = 0;
+      global_dwa_path_.poses.clear();
+      global_dwa_path_.header.frame_id = global_frame_;
+      global_dwa_path_.header.stamp = now;
       if (was_latched) {
-        RCLCPP_INFO(this->get_logger(), "Release latched connector: %s", reason.c_str());
+        RCLCPP_INFO(
+          this->get_logger(),
+          "Release latched connector: %s. Clearing stale global_dwa_path after reconnect completion.",
+          reason.c_str());
       }
     };
 
@@ -1217,12 +1236,20 @@ void DWA_GlobalPlanner::determineDWAPlan()
       clear_active_connector_latch(release_reason);
       active_connector_latched_snapshot = false;
       active_connector_path_snapshot.poses.clear();
-      connector_snapshot = route_snapshot;
-      PrunePathPrefix(&connector_snapshot, start, true);
+      nav_msgs::msg::Path route_follow_path = route_snapshot;
+      if (!PrunePathPrefix(&route_follow_path, start, true)) {
+        route_follow_path = route_snapshot;
+      }
+      publish_path(route_follow_path);
+      RCLCPP_INFO(
+        this->get_logger(),
+        "Connector released, switch back to route path. reason=%s",
+        release_reason.c_str());
       SwitchPlannerMode(
         PlannerMode::kRouteFollow,
         std::string("release connector latch: ") + release_reason,
         ReconnectResult::kReusePrunedPath);
+      return;
     } else {
       nav_msgs::msg::Path locked_path = connector_snapshot;
       if (locked_path.poses.empty() || !PrunePathPrefix(&locked_path, start, true)) {
@@ -1246,8 +1273,10 @@ void DWA_GlobalPlanner::determineDWAPlan()
           clear_active_connector_latch("latched connector replan failed");
           nav_msgs::msg::Path fallback_path = route_snapshot;
           if (PrunePathPrefix(&fallback_path, start, true)) {
-            store_connector_path(fallback_path);
             publish_path(fallback_path);
+            RCLCPP_INFO(
+              this->get_logger(),
+              "Route-follow publishes route path, not connector path (latched connector retry failed).");
             SwitchPlannerMode(
               PlannerMode::kRouteFollow,
               "latched connector failed, fallback to route",
@@ -1273,7 +1302,6 @@ void DWA_GlobalPlanner::determineDWAPlan()
             PlannerMode::kRouteFollow,
             "latched connector compose failed, release latch",
             ReconnectResult::kConnectorFailed);
-          store_connector_path(route_snapshot);
           publish_path(route_snapshot);
           return;
         }
@@ -1306,9 +1334,16 @@ void DWA_GlobalPlanner::determineDWAPlan()
     }
   }
 
-  if (!connector_snapshot.poses.empty() && ShouldLockStartupReplan(connector_snapshot, start)) {
+  if (
+    active_connector_latched_snapshot &&
+    !connector_snapshot.poses.empty() &&
+    ShouldLockStartupReplan(connector_snapshot, start))
+  {
     store_connector_path(connector_snapshot);
     publish_path(connector_snapshot);
+    RCLCPP_INFO_THROTTLE(
+      this->get_logger(), *clock_, 1000,
+      "Connector retained only because reconnect is still active (startup lock).");
     SwitchPlannerMode(
       PlannerMode::kLockConnector,
       "startup lock active, reuse current connector",
@@ -1329,13 +1364,16 @@ void DWA_GlobalPlanner::determineDWAPlan()
       return;
     }
 
-    nav_msgs::msg::Path fallback_path = !connector_snapshot.poses.empty() ? connector_snapshot : route_snapshot;
+    clear_active_connector_latch("corridor empty");
+    nav_msgs::msg::Path fallback_path = route_snapshot;
     if (PrunePathPrefix(&fallback_path, start, true)) {
-      store_connector_path(fallback_path);
       publish_path(fallback_path);
+      RCLCPP_INFO_THROTTLE(
+        this->get_logger(), *clock_, 1000,
+        "Route-follow publishes route path, not connector path (corridor empty fallback).");
       SwitchPlannerMode(
         PlannerMode::kRouteFollow,
-        "corridor empty, reuse pruned path",
+        "corridor empty, fallback to route path",
         ReconnectResult::kCorridorEmpty);
       return;
     }
@@ -1348,24 +1386,22 @@ void DWA_GlobalPlanner::determineDWAPlan()
   }
 
   // Connector layer: only reconnect when corridor tracking is not feasible.
-  const bool reconnect_required =
-    connector_snapshot.poses.empty() || IsReconnectRequired(corridor, start);
+  const bool reconnect_required = IsReconnectRequired(corridor, start);
 
   if (!reconnect_required) {
     set_reconnect_failure_count(0);
     clear_active_connector_latch("corridor tracking became feasible");
-
-    nav_msgs::msg::Path follow_path =
-      !connector_snapshot.poses.empty() ? connector_snapshot : route_snapshot;
-    if (!PrunePathPrefix(&follow_path, start, true)) {
-      follow_path = route_snapshot;
+    nav_msgs::msg::Path route_follow_path = route_snapshot;
+    if (!PrunePathPrefix(&route_follow_path, start, true)) {
+      route_follow_path = route_snapshot;
     }
-
-    store_connector_path(follow_path);
-    publish_path(follow_path);
+    publish_path(route_follow_path);
+    RCLCPP_INFO_THROTTLE(
+      this->get_logger(), *clock_, 1000,
+      "Route-follow publishes route path, not connector path.");
     SwitchPlannerMode(
       PlannerMode::kRouteFollow,
-      "corridor tracking feasible, skip reconnect",
+      "corridor tracking feasible, switch back to route path",
       ReconnectResult::kReusePrunedPath);
     return;
   }
@@ -1389,16 +1425,18 @@ void DWA_GlobalPlanner::determineDWAPlan()
 
     SwitchPlannerMode(
       PlannerMode::kRouteFollow,
-      "failed to build reconnect goal, reuse route",
+      "failed to build reconnect goal, fallback to route",
       ReconnectResult::kReusePrunedPath);
-    store_connector_path(route_snapshot);
+    clear_active_connector_latch("failed to build reconnect goal");
     publish_path(route_snapshot);
+    RCLCPP_INFO_THROTTLE(
+      this->get_logger(), *clock_, 1000,
+      "Route-follow publishes route path, not connector path (reconnect-goal build failed).");
     return;
   }
 
   int preferred_turn_sign = 0;
-  const nav_msgs::msg::Path & turn_sign_path =
-    !connector_snapshot.poses.empty() ? connector_snapshot : route_snapshot;
+  const nav_msgs::msg::Path & turn_sign_path = route_snapshot;
   const std::size_t turn_sign_start_index = FindNearestPathIndex(turn_sign_path, start);
   preferred_turn_sign = EstimatePreferredTurnSignAhead(
     turn_sign_path,
@@ -1439,13 +1477,16 @@ void DWA_GlobalPlanner::determineDWAPlan()
       return;
     }
 
-    nav_msgs::msg::Path fallback_path = !connector_snapshot.poses.empty() ? connector_snapshot : route_snapshot;
+    clear_active_connector_latch("connector planning failed while reconnect requested");
+    nav_msgs::msg::Path fallback_path = route_snapshot;
     if (PrunePathPrefix(&fallback_path, start, true)) {
-      store_connector_path(fallback_path);
       publish_path(fallback_path);
+      RCLCPP_INFO_THROTTLE(
+        this->get_logger(), *clock_, 1000,
+        "Route-follow publishes route path, not connector path (connector planning failed).");
       SwitchPlannerMode(
         PlannerMode::kRouteFollow,
-        "connector failed, reuse pruned path",
+        "connector failed, fallback to route",
         ReconnectResult::kConnectorFailed);
       return;
     }
@@ -1468,7 +1509,7 @@ void DWA_GlobalPlanner::determineDWAPlan()
       PlannerMode::kRouteFollow,
       "connector composition failed, reuse route",
       ReconnectResult::kReusePrunedPath);
-    store_connector_path(route_snapshot);
+    clear_active_connector_latch("connector composition failed");
     publish_path(route_snapshot);
     return;
   }

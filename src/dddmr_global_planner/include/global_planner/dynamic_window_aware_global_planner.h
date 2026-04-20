@@ -116,6 +116,7 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       geometry_msgs::msg::PoseStamped new_goal_;
       geometry_msgs::msg::PoseStamped current_goal_;
       nav_msgs::msg::Path global_path_;
+      // Ephemeral connector path. This should only exist while reconnect is active.
       nav_msgs::msg::Path global_dwa_path_;
       double look_ahead_distance_;
       double recompute_frequency_;
