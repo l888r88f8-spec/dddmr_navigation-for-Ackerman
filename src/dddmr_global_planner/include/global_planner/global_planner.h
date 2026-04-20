@@ -90,7 +90,10 @@ class GlobalPlanner : public rclcpp::Node {
 
       void initial(const std::shared_ptr<perception_3d::Perception3D_ROS>& perception_3d);
       
-      nav_msgs::msg::Path makeROSPlan(const geometry_msgs::msg::PoseStamped& start, const geometry_msgs::msg::PoseStamped& goal);
+      nav_msgs::msg::Path makeROSPlan(
+        const geometry_msgs::msg::PoseStamped& start,
+        const geometry_msgs::msg::PoseStamped& goal,
+        bool force_position_only_goal = false);
       std::shared_ptr<dddmr_sys_core::action::GetPlan::Result> global_plan_result_;
 
     private:

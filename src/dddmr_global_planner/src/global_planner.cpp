@@ -282,7 +282,7 @@ void GlobalPlanner::cbClickedPoint(const geometry_msgs::msg::PointStamped::Share
     return;
   }
   
-  auto ros_path = makeROSPlan(start, goal);
+  auto ros_path = makeROSPlan(start, goal, true);
   if(ros_path.poses.empty()){
     RCLCPP_WARN(this->get_logger(), "No path found for clicked goal.");
     return;
@@ -742,7 +742,7 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
   geometry_msgs::msg::PoseStamped start;
   perception_3d_ros_->getGlobalPose(start);
 
-  auto ros_path = makeROSPlan(start, goal->goal);
+  auto ros_path = makeROSPlan(start, goal->goal, false);
 
   if(ros_path.poses.empty()){
     global_plan_result_->path = ros_path;
@@ -757,7 +757,10 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
   clearCurrentHandleIfMatches(goal_handle);
 }
 
-nav_msgs::msg::Path GlobalPlanner::makeROSPlan(const geometry_msgs::msg::PoseStamped& start, const geometry_msgs::msg::PoseStamped& goal){
+nav_msgs::msg::Path GlobalPlanner::makeROSPlan(
+  const geometry_msgs::msg::PoseStamped& start,
+  const geometry_msgs::msg::PoseStamped& goal,
+  bool force_position_only_goal){
   
   std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
   unsigned int start_id = 0;
@@ -776,7 +779,9 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlan(const geometry_msgs::msg::PoseSta
 
   if(use_forward_hybrid_astar_ && forward_hybrid_astar_planner_){
     nav_msgs::msg::Path hybrid_path;
-    if(forward_hybrid_astar_planner_->MakePlan(start, goal, &hybrid_path)){
+    if(forward_hybrid_astar_planner_->MakePlan(
+        start, goal, &hybrid_path, force_position_only_goal))
+    {
       hybrid_path.header.frame_id = global_frame_;
       hybrid_path.header.stamp = clock_->now();
       return hybrid_path;

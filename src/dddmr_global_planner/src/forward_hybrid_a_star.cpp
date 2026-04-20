@@ -176,12 +176,7 @@ bool ForwardHybridAStar::ComputeStateId(
     return false;
   }
 
-  const std::size_t computed_state_id = base + heading_bin_unsigned;
-  if (computed_state_id >= nodes_.size()) {
-    return false;
-  }
-
-  *state_id = computed_state_id;
+  *state_id = base + heading_bin_unsigned;
   return true;
 }
 
@@ -284,6 +279,9 @@ bool ForwardHybridAStar::ValidateSample(
   if (ground_index == nullptr || projected_z == nullptr || dgraph_value == nullptr) {
     return false;
   }
+  if (perception_3d_ == nullptr || pcl_ground_ == nullptr) {
+    return false;
+  }
 
   if (!IsFinite(x) || !IsFinite(y) || !IsFinite(yaw) || !IsFinite(z_hint)) {
     return false;
@@ -296,6 +294,16 @@ bool ForwardHybridAStar::ValidateSample(
   }
 
   if (projected_ground_index >= pcl_ground_->points.size()) {
+    return false;
+  }
+  const pcl::PointXYZI & projected_pt = pcl_ground_->points[projected_ground_index];
+  if (!IsFinite(projected_pt.x) || !IsFinite(projected_pt.y) || !IsFinite(projected_pt.z)) {
+    return false;
+  }
+  const double max_projection_distance = config_.projection_search_radius * 1.5;
+  if (SquaredDistance2D(x, y, projected_pt.x, projected_pt.y) >
+    max_projection_distance * max_projection_distance)
+  {
     return false;
   }
 
@@ -317,20 +325,49 @@ bool ForwardHybridAStar::ValidateSample(
   return true;
 }
 
+bool ForwardHybridAStar::IsProjectedGroundTransitionValid(
+  std::size_t from_ground_index,
+  std::size_t to_ground_index) const
+{
+  if (pcl_ground_ == nullptr) {
+    return false;
+  }
+  if (from_ground_index >= pcl_ground_->points.size() ||
+    to_ground_index >= pcl_ground_->points.size())
+  {
+    return false;
+  }
+  if (from_ground_index == to_ground_index) {
+    return true;
+  }
+
+  const pcl::PointXYZI & from_pt = pcl_ground_->points[from_ground_index];
+  const pcl::PointXYZI & to_pt = pcl_ground_->points[to_ground_index];
+  if (!IsFinite(from_pt.x) || !IsFinite(from_pt.y) || !IsFinite(to_pt.x) || !IsFinite(to_pt.y)) {
+    return false;
+  }
+
+  const double max_projection_jump =
+    std::max(config_.projection_search_radius, config_.primitive_step * 3.0);
+  return SquaredDistance2D(from_pt.x, from_pt.y, to_pt.x, to_pt.y) <=
+         max_projection_jump * max_projection_jump;
+}
+
 double ForwardHybridAStar::ComputeHeuristic(
   double x,
   double y,
   double yaw,
   const geometry_msgs::msg::PoseStamped & goal,
   double goal_yaw,
-  bool has_goal_yaw) const
+  bool has_goal_yaw,
+  bool use_goal_heading) const
 {
   const double dx = goal.pose.position.x - x;
   const double dy = goal.pose.position.y - y;
   const double distance = std::sqrt(dx * dx + dy * dy);
 
   double target_yaw = goal_yaw;
-  if (!config_.use_goal_heading) {
+  if (!use_goal_heading) {
     if (distance > 1e-6) {
       target_yaw = std::atan2(dy, dx);
     } else if (!has_goal_yaw) {
@@ -346,7 +383,8 @@ bool ForwardHybridAStar::IsGoalReached(
   const NodeRecord & node,
   const geometry_msgs::msg::PoseStamped & goal,
   double goal_yaw,
-  bool has_goal_yaw) const
+  bool has_goal_yaw,
+  bool use_goal_heading) const
 {
   const double distance_squared =
     SquaredDistance2D(node.x, node.y, goal.pose.position.x, goal.pose.position.y);
@@ -356,7 +394,7 @@ bool ForwardHybridAStar::IsGoalReached(
     return false;
   }
 
-  if (!config_.use_goal_heading) {
+  if (!use_goal_heading) {
     return true;
   }
 
@@ -407,6 +445,9 @@ bool ForwardHybridAStar::RolloutPrimitive(
   if (primitive_result == nullptr) {
     return false;
   }
+  if (perception_3d_ == nullptr || pcl_ground_ == nullptr) {
+    return false;
+  }
   if (primitive_index < 0 ||
     primitive_index >= static_cast<int>(primitive_steers_.size()))
   {
@@ -434,6 +475,11 @@ bool ForwardHybridAStar::RolloutPrimitive(
   std::size_t sample_count = 0;
   std::size_t end_ground_index = parent.ground_index;
   double end_projected_z = z;
+  std::size_t previous_ground_index = parent.ground_index;
+
+  if (pcl_ground_ == nullptr || previous_ground_index >= pcl_ground_->points.size()) {
+    return false;
+  }
 
   while (remaining > 1e-9) {
     const double ds = std::min(step, remaining);
@@ -443,6 +489,8 @@ bool ForwardHybridAStar::RolloutPrimitive(
     y += ds * std::sin(yaw);
     yaw = NormalizeAngle(yaw + ds / config_.wheelbase * std::tan(steer));
 
+    // The trajectory is continuous in SE(2), then each sample is projected to
+    // nearest ground points for terrain/collision semantics.
     std::size_t sample_ground_index = 0;
     double sample_z = 0.0;
     double sample_dgraph = 0.0;
@@ -450,6 +498,9 @@ bool ForwardHybridAStar::RolloutPrimitive(
         x, y, yaw, z,
         &sample_ground_index, &sample_z, &sample_dgraph))
     {
+      return false;
+    }
+    if (!IsProjectedGroundTransitionValid(previous_ground_index, sample_ground_index)) {
       return false;
     }
 
@@ -460,6 +511,7 @@ bool ForwardHybridAStar::RolloutPrimitive(
     z = sample_z;
     end_ground_index = sample_ground_index;
     end_projected_z = sample_z;
+    previous_ground_index = sample_ground_index;
 
     heading_change += std::abs(NormalizeAngle(yaw - previous_yaw));
     const double obstacle_factor =
@@ -527,17 +579,37 @@ void ForwardHybridAStar::AppendPose(
   ros_path->poses.push_back(pose);
 }
 
+const ForwardHybridAStar::NodeRecord * ForwardHybridAStar::FindNode(std::size_t state_id) const
+{
+  const auto it = nodes_.find(state_id);
+  if (it == nodes_.end()) {
+    return nullptr;
+  }
+  return &it->second;
+}
+
+ForwardHybridAStar::NodeRecord * ForwardHybridAStar::FindNode(std::size_t state_id)
+{
+  const auto it = nodes_.find(state_id);
+  if (it == nodes_.end()) {
+    return nullptr;
+  }
+  return &it->second;
+}
+
 bool ForwardHybridAStar::ReconstructPath(
   std::size_t goal_state_id,
   const geometry_msgs::msg::PoseStamped & goal,
   double goal_yaw,
   bool has_goal_yaw,
+  bool use_goal_heading,
   nav_msgs::msg::Path * ros_path) const
 {
   if (ros_path == nullptr) {
     return false;
   }
-  if (goal_state_id >= nodes_.size()) {
+  const NodeRecord * goal_node = FindNode(goal_state_id);
+  if (goal_node == nullptr) {
     return false;
   }
 
@@ -546,24 +618,25 @@ bool ForwardHybridAStar::ReconstructPath(
 
   std::size_t current_state_id = goal_state_id;
   std::size_t guard = 0;
+  const std::size_t guard_limit = std::max<std::size_t>(nodes_.size(), 1);
   while (current_state_id != kInvalidStateId) {
-    if (current_state_id >= nodes_.size()) {
+    const NodeRecord * node = FindNode(current_state_id);
+    if (node == nullptr) {
       return false;
     }
 
     state_chain.push_back(current_state_id);
 
-    const NodeRecord & node = nodes_[current_state_id];
-    if (node.parent_state_id == kInvalidStateId) {
+    if (node->parent_state_id == kInvalidStateId) {
       break;
     }
-    if (node.parent_state_id == current_state_id) {
+    if (node->parent_state_id == current_state_id) {
       return false;
     }
 
-    current_state_id = node.parent_state_id;
+    current_state_id = node->parent_state_id;
     ++guard;
-    if (guard > nodes_.size()) {
+    if (guard > guard_limit) {
       return false;
     }
   }
@@ -578,22 +651,28 @@ bool ForwardHybridAStar::ReconstructPath(
   ros_path->header.frame_id = global_frame_;
   ros_path->header.stamp = rclcpp::Clock(RCL_ROS_TIME).now();
 
-  const NodeRecord & start_node = nodes_[state_chain.front()];
-  AppendPose(start_node.x, start_node.y, start_node.z, start_node.yaw, ros_path);
+  const NodeRecord * start_node = FindNode(state_chain.front());
+  if (start_node == nullptr) {
+    return false;
+  }
+  AppendPose(start_node->x, start_node->y, start_node->z, start_node->yaw, ros_path);
 
   for (std::size_t i = 1; i < state_chain.size(); ++i) {
-    const NodeRecord & parent = nodes_[state_chain[i - 1]];
-    const NodeRecord & child = nodes_[state_chain[i]];
+    const NodeRecord * parent = FindNode(state_chain[i - 1]);
+    const NodeRecord * child = FindNode(state_chain[i]);
+    if (parent == nullptr || child == nullptr) {
+      return false;
+    }
 
-    if (child.primitive_index < 0) {
-      AppendPose(child.x, child.y, child.z, child.yaw, ros_path);
+    if (child->primitive_index < 0) {
+      AppendPose(child->x, child->y, child->z, child->yaw, ros_path);
       continue;
     }
 
     PrimitiveResult primitive_result;
     std::vector<SamplePose> sampled_poses;
-    if (!RolloutPrimitive(parent, child.primitive_index, &primitive_result, &sampled_poses)) {
-      AppendPose(child.x, child.y, child.z, child.yaw, ros_path);
+    if (!RolloutPrimitive(*parent, child->primitive_index, &primitive_result, &sampled_poses)) {
+      AppendPose(child->x, child->y, child->z, child->yaw, ros_path);
       continue;
     }
 
@@ -626,8 +705,8 @@ bool ForwardHybridAStar::ReconstructPath(
       projected_goal_z = last_pose.pose.position.z;
     }
 
-    double final_yaw = nodes_[goal_state_id].yaw;
-    if (config_.use_goal_heading && has_goal_yaw) {
+    double final_yaw = goal_node->yaw;
+    if (use_goal_heading && has_goal_yaw) {
       final_yaw = goal_yaw;
     }
     AppendPose(
@@ -644,7 +723,8 @@ bool ForwardHybridAStar::ReconstructPath(
 bool ForwardHybridAStar::MakePlan(
   const geometry_msgs::msg::PoseStamped & start,
   const geometry_msgs::msg::PoseStamped & goal,
-  nav_msgs::msg::Path * ros_path)
+  nav_msgs::msg::Path * ros_path,
+  bool force_position_only_goal)
 {
   if (ros_path == nullptr) {
     RCLCPP_WARN(logger_, "Hybrid A*: ros_path pointer is null.");
@@ -682,7 +762,8 @@ bool ForwardHybridAStar::MakePlan(
 
   double goal_yaw = 0.0;
   const bool has_goal_yaw = ExtractYaw(goal, &goal_yaw);
-  if (config_.use_goal_heading && !has_goal_yaw) {
+  const bool use_goal_heading = config_.use_goal_heading && !force_position_only_goal;
+  if (use_goal_heading && !has_goal_yaw) {
     RCLCPP_WARN(logger_, "Hybrid A*: use_goal_heading enabled but goal yaw is invalid.");
     return false;
   }
@@ -730,7 +811,7 @@ bool ForwardHybridAStar::MakePlan(
 
   const std::size_t state_space_size = ground_size * heading_bin_size;
   nodes_.clear();
-  nodes_.resize(state_space_size);
+  nodes_.reserve(std::min<std::size_t>(state_space_size, 200000));
 
   const int start_heading_bin = QuantizeYaw(start_yaw);
   std::size_t start_state_id = kInvalidStateId;
@@ -739,7 +820,7 @@ bool ForwardHybridAStar::MakePlan(
     return false;
   }
 
-  NodeRecord & start_node = nodes_[start_state_id];
+  NodeRecord start_node;
   start_node.opened = true;
   start_node.closed = false;
   start_node.g = 0.0;
@@ -749,7 +830,8 @@ bool ForwardHybridAStar::MakePlan(
     start_yaw,
     goal,
     goal_yaw,
-    has_goal_yaw);
+    has_goal_yaw,
+    use_goal_heading);
   start_node.f = start_node.g + start_node.h;
   start_node.parent_state_id = kInvalidStateId;
   start_node.primitive_index = -1;
@@ -759,6 +841,7 @@ bool ForwardHybridAStar::MakePlan(
   start_node.y = start.pose.position.y;
   start_node.z = start_projected_z;
   start_node.yaw = start_yaw;
+  nodes_.emplace(start_state_id, start_node);
 
   std::priority_queue<OpenEntry, std::vector<OpenEntry>, OpenEntryGreater> open_list;
   open_list.push(OpenEntry{start_node.f, start_state_id});
@@ -771,21 +854,20 @@ bool ForwardHybridAStar::MakePlan(
     const OpenEntry top_entry = open_list.top();
     open_list.pop();
 
-    if (top_entry.state_id >= nodes_.size()) {
+    NodeRecord * current = FindNode(top_entry.state_id);
+    if (current == nullptr) {
+      continue;
+    }
+    if (!current->opened || current->closed) {
+      continue;
+    }
+    if (!IsFinite(current->f) || top_entry.f > current->f + 1e-9) {
       continue;
     }
 
-    NodeRecord & current = nodes_[top_entry.state_id];
-    if (!current.opened || current.closed) {
-      continue;
-    }
-    if (!IsFinite(current.f) || top_entry.f > current.f + 1e-9) {
-      continue;
-    }
+    current->closed = true;
 
-    current.closed = true;
-
-    if (IsGoalReached(current, goal, goal_yaw, has_goal_yaw)) {
+    if (IsGoalReached(*current, goal, goal_yaw, has_goal_yaw, use_goal_heading)) {
       goal_state_id = top_entry.state_id;
       break;
     }
@@ -795,7 +877,7 @@ bool ForwardHybridAStar::MakePlan(
       ++primitive_index)
     {
       PrimitiveResult primitive_result;
-      if (!RolloutPrimitive(current, primitive_index, &primitive_result, nullptr)) {
+      if (!RolloutPrimitive(*current, primitive_index, &primitive_result, nullptr)) {
         continue;
       }
 
@@ -808,43 +890,50 @@ bool ForwardHybridAStar::MakePlan(
         continue;
       }
 
-      if (next_state_id >= nodes_.size()) {
-        continue;
-      }
-
-      NodeRecord & neighbor = nodes_[next_state_id];
-      if (neighbor.closed) {
+      NodeRecord * neighbor = FindNode(next_state_id);
+      if (neighbor != nullptr && neighbor->closed) {
         continue;
       }
 
       const double transition_cost =
-        ComputeTransitionCost(current, primitive_index, primitive_result);
-      const double tentative_g = current.g + transition_cost;
-      if (neighbor.opened && tentative_g >= neighbor.g - 1e-9) {
+        ComputeTransitionCost(*current, primitive_index, primitive_result);
+      const double tentative_g = current->g + transition_cost;
+      if (neighbor != nullptr && neighbor->opened && tentative_g >= neighbor->g - 1e-9) {
         continue;
       }
 
-      neighbor.opened = true;
-      neighbor.closed = false;
-      neighbor.g = tentative_g;
-      neighbor.h = ComputeHeuristic(
+      NodeRecord updated_neighbor;
+      if (neighbor != nullptr) {
+        updated_neighbor = *neighbor;
+      }
+      updated_neighbor.opened = true;
+      updated_neighbor.closed = false;
+      updated_neighbor.g = tentative_g;
+      updated_neighbor.h = ComputeHeuristic(
         primitive_result.end_x,
         primitive_result.end_y,
         primitive_result.end_yaw,
         goal,
         goal_yaw,
-        has_goal_yaw);
-      neighbor.f = neighbor.g + neighbor.h;
-      neighbor.parent_state_id = top_entry.state_id;
-      neighbor.primitive_index = primitive_index;
-      neighbor.ground_index = primitive_result.end_ground_index;
-      neighbor.heading_bin = primitive_result.end_heading_bin;
-      neighbor.x = primitive_result.end_x;
-      neighbor.y = primitive_result.end_y;
-      neighbor.z = primitive_result.end_z;
-      neighbor.yaw = primitive_result.end_yaw;
+        has_goal_yaw,
+        use_goal_heading);
+      updated_neighbor.f = updated_neighbor.g + updated_neighbor.h;
+      updated_neighbor.parent_state_id = top_entry.state_id;
+      updated_neighbor.primitive_index = primitive_index;
+      updated_neighbor.ground_index = primitive_result.end_ground_index;
+      updated_neighbor.heading_bin = primitive_result.end_heading_bin;
+      updated_neighbor.x = primitive_result.end_x;
+      updated_neighbor.y = primitive_result.end_y;
+      updated_neighbor.z = primitive_result.end_z;
+      updated_neighbor.yaw = primitive_result.end_yaw;
 
-      open_list.push(OpenEntry{neighbor.f, next_state_id});
+      if (neighbor != nullptr) {
+        *neighbor = updated_neighbor;
+      } else {
+        nodes_.emplace(next_state_id, updated_neighbor);
+      }
+
+      open_list.push(OpenEntry{updated_neighbor.f, next_state_id});
     }
 
     ++expand_count;
@@ -857,7 +946,13 @@ bool ForwardHybridAStar::MakePlan(
     return false;
   }
 
-  return ReconstructPath(goal_state_id, goal, goal_yaw, has_goal_yaw, ros_path);
+  return ReconstructPath(
+    goal_state_id,
+    goal,
+    goal_yaw,
+    has_goal_yaw,
+    use_goal_heading,
+    ros_path);
 }
 
 }  // namespace global_planner

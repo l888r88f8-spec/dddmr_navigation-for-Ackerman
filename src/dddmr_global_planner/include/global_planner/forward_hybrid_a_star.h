@@ -14,6 +14,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace global_planner
@@ -22,6 +23,8 @@ namespace global_planner
 class ForwardHybridAStar
 {
 public:
+  // This planner is a forward continuous-lattice search with projection-based
+  // collision/ground validation. It is not a strictly graph-constrained Hybrid A*.
   struct Config
   {
     double wheelbase = 0.549185;
@@ -52,7 +55,8 @@ public:
   bool MakePlan(
     const geometry_msgs::msg::PoseStamped & start,
     const geometry_msgs::msg::PoseStamped & goal,
-    nav_msgs::msg::Path * ros_path);
+    nav_msgs::msg::Path * ros_path,
+    bool force_position_only_goal = false);
 
 private:
   struct NodeRecord
@@ -132,19 +136,25 @@ private:
     double * projected_z,
     double * dgraph_value) const;
 
+  bool IsProjectedGroundTransitionValid(
+    std::size_t from_ground_index,
+    std::size_t to_ground_index) const;
+
   double ComputeHeuristic(
     double x,
     double y,
     double yaw,
     const geometry_msgs::msg::PoseStamped & goal,
     double goal_yaw,
-    bool has_goal_yaw) const;
+    bool has_goal_yaw,
+    bool use_goal_heading) const;
 
   bool IsGoalReached(
     const NodeRecord & node,
     const geometry_msgs::msg::PoseStamped & goal,
     double goal_yaw,
-    bool has_goal_yaw) const;
+    bool has_goal_yaw,
+    bool use_goal_heading) const;
 
   double GetPrimitiveSteerByIndex(int primitive_index) const;
   double ComputeTransitionCost(
@@ -170,7 +180,11 @@ private:
     const geometry_msgs::msg::PoseStamped & goal,
     double goal_yaw,
     bool has_goal_yaw,
+    bool use_goal_heading,
     nav_msgs::msg::Path * ros_path) const;
+
+  const NodeRecord * FindNode(std::size_t state_id) const;
+  NodeRecord * FindNode(std::size_t state_id);
 
   std::shared_ptr<perception_3d::Perception3D_ROS> perception_3d_;
   pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_ground_;
@@ -180,7 +194,7 @@ private:
   std::string global_frame_;
   Config config_;
   std::vector<double> primitive_steers_;
-  std::vector<NodeRecord> nodes_;
+  std::unordered_map<std::size_t, NodeRecord> nodes_;
 };
 
 }  // namespace global_planner
