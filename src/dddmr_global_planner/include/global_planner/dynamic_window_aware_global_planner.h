@@ -118,6 +118,7 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       nav_msgs::msg::Path global_path_;
       // Ephemeral connector path. This should only exist while reconnect is active.
       nav_msgs::msg::Path global_dwa_path_;
+      bool enable_reconnect_layer_;
       double look_ahead_distance_;
       double recompute_frequency_;
       double startup_replan_lock_distance_;
@@ -138,6 +139,8 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       rclcpp::Time last_successful_reconnect_time_;
       rclcpp::Time last_global_replan_time_;
       std::size_t consecutive_reconnect_failures_;
+      std::size_t route_progress_index_;
+      std::size_t connector_progress_index_;
       bool active_connector_latched_;
       geometry_msgs::msg::PoseStamped active_reconnect_goal_;
       std::size_t active_route_anchor_index_;
@@ -190,9 +193,10 @@ class DWA_GlobalPlanner : public rclcpp::Node {
         const nav_msgs::msg::Path & path,
         std::size_t pivot_index,
         double * yaw) const;
-      bool PrunePathPrefix(
+      bool PrunePathPrefixCausally(
         nav_msgs::msg::Path * path,
         const geometry_msgs::msg::PoseStamped & robot_pose,
+        std::size_t * progress_index,
         bool insert_robot_pose) const;
       bool ExtractCorridor(
         const nav_msgs::msg::Path & route_path,

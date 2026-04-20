@@ -16,7 +16,7 @@ p2p_move_base:
 global_plan_manager:
   ros__parameters:
     global_planner_action_name: "get_plan"
-    global_plan_query_frequency: 2.0                         # Route layer 查询频率（低频主路由）
+    global_plan_query_frequency: 0.1                         # Route layer should be event-driven / low-frequency, not polled like a local reconnect service
 
 global_planner:
   ros__parameters:
@@ -49,6 +49,7 @@ global_planner:
 # get_dwa_plan now acts as reconnect service (Connector layer), not default route source.
 dynamic_window_aware_global_planner:
   ros__parameters:
+    enable_reconnect_layer: false                           # D7.0 baseline reset: bypass reconnect/corridor/connector and publish route path only
     look_ahead_distance: 2.0                                # reconnect 目标参考距离（兼容旧参数）
     recompute_frequency: 2.0                                # reconnect 频率（兼容旧参数）
     reconnect_frequency: 2.0                                # Connector 层重接回频率
