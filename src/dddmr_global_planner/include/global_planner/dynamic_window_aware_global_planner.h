@@ -118,6 +118,8 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       nav_msgs::msg::Path global_path_;
       // Ephemeral connector path. This should only exist while reconnect is active.
       nav_msgs::msg::Path global_dwa_path_;
+      // When false, DWA publishes the raw global route and bypasses all
+      // reconnect/corridor/connector path rewriting.
       bool enable_reconnect_layer_;
       double look_ahead_distance_;
       double recompute_frequency_;
@@ -235,6 +237,7 @@ class DWA_GlobalPlanner : public rclcpp::Node {
         const geometry_msgs::msg::PoseStamped & pose) const;
       const char * PlannerModeToString(PlannerMode mode) const;
       const char * ReconnectResultToString(ReconnectResult result) const;
+      void ResetReconnectLayerState(const rclcpp::Time & now);
       void SwitchPlannerMode(
         PlannerMode next_mode,
         const std::string & reason,

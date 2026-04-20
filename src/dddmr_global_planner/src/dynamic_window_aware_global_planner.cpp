@@ -235,7 +235,10 @@ void DWA_GlobalPlanner::initial(
   }
 
   RCLCPP_INFO(this->get_logger(), "look_ahead_distance: %.2f", look_ahead_distance_);
-  RCLCPP_INFO(this->get_logger(), "enable_reconnect_layer: %d", enable_reconnect_layer_);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "reconnect layer: %s",
+    enable_reconnect_layer_ ? "enabled" : "disabled");
   RCLCPP_INFO(this->get_logger(), "reconnect_frequency: %.2f", recompute_frequency_);
   RCLCPP_INFO(this->get_logger(), "startup_replan_lock_distance: %.2f", startup_replan_lock_distance_);
   RCLCPP_INFO(
@@ -415,30 +418,44 @@ void DWA_GlobalPlanner::makePlan(
 
   auto result = std::make_shared<dddmr_sys_core::action::GetPlan::Result>();
   nav_msgs::msg::Path path_to_publish;
+  const rclcpp::Time now = clock_->now();
+  bool reconnect_layer_enabled = false;
+  bool using_connector_path = false;
   std::size_t progress_index = 0;
   {
     std::lock_guard<std::mutex> lock(plan_state_mutex_);
-    path_to_publish =
-      (!enable_reconnect_layer_ || global_dwa_path_.poses.empty()) ? global_path_ : global_dwa_path_;
-    progress_index =
-      (!enable_reconnect_layer_ || global_dwa_path_.poses.empty()) ?
-      route_progress_index_ :
-      connector_progress_index_;
+    reconnect_layer_enabled = enable_reconnect_layer_;
+    if (!reconnect_layer_enabled) {
+      path_to_publish = global_path_;
+    } else if (global_dwa_path_.poses.empty()) {
+      path_to_publish = global_path_;
+      progress_index = route_progress_index_;
+    } else {
+      path_to_publish = global_dwa_path_;
+      progress_index = connector_progress_index_;
+      using_connector_path = true;
+    }
   }
 
-  geometry_msgs::msg::PoseStamped start;
-  perception_3d_ros_->getGlobalPose(start);
-  if (!path_to_publish.poses.empty()) {
-    if (PrunePathPrefixCausally(&path_to_publish, start, &progress_index, true)) {
-      std::lock_guard<std::mutex> lock(plan_state_mutex_);
-      if (!enable_reconnect_layer_ || global_dwa_path_.poses.empty()) {
-        route_progress_index_ = progress_index;
-      } else {
-        connector_progress_index_ = progress_index;
+  if (!reconnect_layer_enabled) {
+    ResetReconnectLayerState(now);
+  } else {
+    geometry_msgs::msg::PoseStamped start;
+    perception_3d_ros_->getGlobalPose(start);
+    if (!path_to_publish.poses.empty()) {
+      if (PrunePathPrefixCausally(&path_to_publish, start, &progress_index, true)) {
+        std::lock_guard<std::mutex> lock(plan_state_mutex_);
+        if (using_connector_path) {
+          connector_progress_index_ = progress_index;
+        } else {
+          route_progress_index_ = progress_index;
+        }
       }
     }
   }
 
+  path_to_publish.header.frame_id = global_frame_;
+  path_to_publish.header.stamp = now;
   result->path = path_to_publish;
   pub_path_->publish(path_to_publish);
   goal_handle->succeed(result);
@@ -1083,6 +1100,47 @@ const char * DWA_GlobalPlanner::ReconnectResultToString(ReconnectResult result) 
   }
 }
 
+void DWA_GlobalPlanner::ResetReconnectLayerState(const rclcpp::Time & now)
+{
+  std::lock_guard<std::mutex> lock(plan_state_mutex_);
+  active_connector_latched_ = false;
+  active_route_anchor_index_ = 0;
+  active_connector_start_time_ = now;
+  active_connector_route_version_ = route_version_;
+  connector_progress_index_ = 0;
+
+  active_connector_path_.poses.clear();
+  active_connector_path_.header.frame_id = global_frame_;
+  active_connector_path_.header.stamp = now;
+
+  active_reconnect_goal_.header.frame_id = global_frame_;
+  active_reconnect_goal_.header.stamp = now;
+  active_reconnect_goal_.pose.position.x = 0.0;
+  active_reconnect_goal_.pose.position.y = 0.0;
+  active_reconnect_goal_.pose.position.z = 0.0;
+  active_reconnect_goal_.pose.orientation.x = 0.0;
+  active_reconnect_goal_.pose.orientation.y = 0.0;
+  active_reconnect_goal_.pose.orientation.z = 0.0;
+  active_reconnect_goal_.pose.orientation.w = 1.0;
+
+  active_connector_start_pose_.header.frame_id = global_frame_;
+  active_connector_start_pose_.header.stamp = now;
+  active_connector_start_pose_.pose.position.x = 0.0;
+  active_connector_start_pose_.pose.position.y = 0.0;
+  active_connector_start_pose_.pose.position.z = 0.0;
+  active_connector_start_pose_.pose.orientation.x = 0.0;
+  active_connector_start_pose_.pose.orientation.y = 0.0;
+  active_connector_start_pose_.pose.orientation.z = 0.0;
+  active_connector_start_pose_.pose.orientation.w = 1.0;
+
+  active_connector_has_goal_heading_ = false;
+  active_connector_preferred_turn_sign_ = 0;
+
+  global_dwa_path_.poses.clear();
+  global_dwa_path_.header.frame_id = global_frame_;
+  global_dwa_path_.header.stamp = now;
+}
+
 void DWA_GlobalPlanner::SwitchPlannerMode(
   PlannerMode next_mode,
   const std::string & reason,
@@ -1163,13 +1221,31 @@ void DWA_GlobalPlanner::determineDWAPlan()
     active_connector_preferred_turn_sign_snapshot = active_connector_preferred_turn_sign_;
   }
 
+  const rclcpp::Time now = clock_->now();
+
+  if (!enable_reconnect_layer_snapshot) {
+    ResetReconnectLayerState(now);
+
+    nav_msgs::msg::Path raw_route_path = route_snapshot;
+    raw_route_path.header.frame_id = global_frame_;
+    raw_route_path.header.stamp = now;
+    pub_path_->publish(raw_route_path);
+
+    RCLCPP_INFO_THROTTLE(
+      this->get_logger(), *clock_, 1000,
+      "reconnect layer disabled, publishing raw route path only");
+    SwitchPlannerMode(
+      PlannerMode::kRouteFollow,
+      "reconnect layer disabled, publishing raw route path only",
+      ReconnectResult::kSuccess);
+    return;
+  }
+
   geometry_msgs::msg::PoseStamped start;
   perception_3d_ros_->getGlobalPose(start);
   if (!IsFinitePose(start)) {
     return;
   }
-
-  const rclcpp::Time now = clock_->now();
 
   auto publish_path = [&](const nav_msgs::msg::Path & path)
     {
@@ -1187,34 +1263,16 @@ void DWA_GlobalPlanner::determineDWAPlan()
 
   auto clear_active_connector_latch = [&](const std::string & reason)
     {
-      std::lock_guard<std::mutex> lock(plan_state_mutex_);
-      const bool was_latched = active_connector_latched_;
+      bool was_latched = false;
+      {
+        std::lock_guard<std::mutex> lock(plan_state_mutex_);
+        was_latched = active_connector_latched_;
+      }
       // Connector lifecycle rule:
       // connector is ephemeral; once reconnect is no longer needed, the
       // system must fall back to route path instead of reusing stale connector
       // geometry.
-      active_connector_latched_ = false;
-      active_route_anchor_index_ = 0;
-      active_connector_start_time_ = now;
-      active_connector_route_version_ = route_version_;
-      connector_progress_index_ = 0;
-      active_connector_path_.poses.clear();
-      active_connector_path_.header.frame_id = global_frame_;
-      active_connector_path_.header.stamp = now;
-      active_reconnect_goal_.header.frame_id = global_frame_;
-      active_reconnect_goal_.header.stamp = now;
-      active_reconnect_goal_.pose.position.x = 0.0;
-      active_reconnect_goal_.pose.position.y = 0.0;
-      active_reconnect_goal_.pose.position.z = 0.0;
-      active_reconnect_goal_.pose.orientation.x = 0.0;
-      active_reconnect_goal_.pose.orientation.y = 0.0;
-      active_reconnect_goal_.pose.orientation.z = 0.0;
-      active_reconnect_goal_.pose.orientation.w = 1.0;
-      active_connector_has_goal_heading_ = false;
-      active_connector_preferred_turn_sign_ = 0;
-      global_dwa_path_.poses.clear();
-      global_dwa_path_.header.frame_id = global_frame_;
-      global_dwa_path_.header.stamp = now;
+      ResetReconnectLayerState(now);
       if (was_latched) {
         RCLCPP_INFO(
           this->get_logger(),
@@ -1361,19 +1419,6 @@ void DWA_GlobalPlanner::determineDWAPlan()
 
   const std::size_t max_reconnect_failures =
     static_cast<std::size_t>(std::ceil(max_reconnect_failures_before_global_replan_));
-
-  if (!enable_reconnect_layer_snapshot) {
-    clear_active_connector_latch("reconnect layer disabled");
-    publish_path(route_snapshot);
-    RCLCPP_INFO_THROTTLE(
-      this->get_logger(), *clock_, 1000,
-      "reconnect layer disabled, publishing route path only");
-    SwitchPlannerMode(
-      PlannerMode::kRouteFollow,
-      "reconnect layer disabled, publishing route path only",
-      ReconnectResult::kReusePrunedPath);
-    return;
-  }
 
   if (active_connector_latched_snapshot) {
     // Latched connector avoids chasing a moving reconnect anchor while the
