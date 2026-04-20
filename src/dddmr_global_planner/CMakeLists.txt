@@ -69,12 +69,24 @@ ament_target_dependencies(a_star_on_graph
   ${dependencies}
 )
 
+# forward_hybrid_a_star
+add_library(forward_hybrid_a_star SHARED
+  src/forward_hybrid_a_star.cpp
+)
+target_link_libraries(forward_hybrid_a_star
+  ${PCL_LIBRARIES}
+)
+ament_target_dependencies(forward_hybrid_a_star
+  ${dependencies}
+)
+
 # global_planner
 add_library(global_planner SHARED
   src/global_planner.cpp
 )
 target_link_libraries(global_planner
   a_star_on_graph
+  forward_hybrid_a_star
 )
 ament_target_dependencies(global_planner
   ${dependencies}
@@ -126,6 +138,7 @@ ament_target_dependencies(dummy_pc_publisher
 
 install(TARGETS
   a_star_on_graph
+  forward_hybrid_a_star
   global_planner
   dynamic_window_aware_global_planner
   ARCHIVE DESTINATION lib
@@ -161,6 +174,6 @@ install(PROGRAMS
 )
 
 ament_export_include_directories(include)
-ament_export_libraries(a_star_on_graph global_planner dynamic_window_aware_global_planner)
+ament_export_libraries(a_star_on_graph forward_hybrid_a_star global_planner dynamic_window_aware_global_planner)
 ament_export_dependencies(${dependencies})
 ament_package()

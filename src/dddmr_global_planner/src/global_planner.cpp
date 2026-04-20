@@ -115,6 +115,59 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   this->get_parameter("direct_path_distance_threshold", direct_path_distance_threshold_);
   RCLCPP_INFO(this->get_logger(), "direct_path_distance_threshold: %.2f", direct_path_distance_threshold_);
 
+  declare_parameter("use_forward_hybrid_astar", rclcpp::ParameterValue(true));
+  this->get_parameter("use_forward_hybrid_astar", use_forward_hybrid_astar_);
+  RCLCPP_INFO(this->get_logger(), "use_forward_hybrid_astar: %d", use_forward_hybrid_astar_);
+
+  declare_parameter("enable_direct_path_shortcut", rclcpp::ParameterValue(false));
+  this->get_parameter("enable_direct_path_shortcut", enable_direct_path_shortcut_);
+  RCLCPP_INFO(this->get_logger(), "enable_direct_path_shortcut: %d", enable_direct_path_shortcut_);
+
+  declare_parameter("hybrid_astar.wheelbase", rclcpp::ParameterValue(0.549185));
+  this->get_parameter("hybrid_astar.wheelbase", forward_hybrid_astar_config_.wheelbase);
+  declare_parameter("hybrid_astar.max_steer", rclcpp::ParameterValue(0.69));
+  this->get_parameter("hybrid_astar.max_steer", forward_hybrid_astar_config_.max_steer);
+  declare_parameter("hybrid_astar.heading_bin_count", rclcpp::ParameterValue(72));
+  this->get_parameter("hybrid_astar.heading_bin_count", forward_hybrid_astar_config_.heading_bin_count);
+  declare_parameter("hybrid_astar.primitive_length", rclcpp::ParameterValue(0.6));
+  this->get_parameter("hybrid_astar.primitive_length", forward_hybrid_astar_config_.primitive_length);
+  declare_parameter("hybrid_astar.primitive_step", rclcpp::ParameterValue(0.05));
+  this->get_parameter("hybrid_astar.primitive_step", forward_hybrid_astar_config_.primitive_step);
+  declare_parameter("hybrid_astar.projection_search_radius", rclcpp::ParameterValue(0.6));
+  this->get_parameter("hybrid_astar.projection_search_radius", forward_hybrid_astar_config_.projection_search_radius);
+  declare_parameter("hybrid_astar.goal_position_tolerance", rclcpp::ParameterValue(0.4));
+  this->get_parameter("hybrid_astar.goal_position_tolerance", forward_hybrid_astar_config_.goal_position_tolerance);
+  declare_parameter("hybrid_astar.goal_heading_tolerance", rclcpp::ParameterValue(0.35));
+  this->get_parameter("hybrid_astar.goal_heading_tolerance", forward_hybrid_astar_config_.goal_heading_tolerance);
+  declare_parameter("hybrid_astar.use_goal_heading", rclcpp::ParameterValue(false));
+  this->get_parameter("hybrid_astar.use_goal_heading", forward_hybrid_astar_config_.use_goal_heading);
+  declare_parameter("hybrid_astar.steering_penalty", rclcpp::ParameterValue(0.2));
+  this->get_parameter("hybrid_astar.steering_penalty", forward_hybrid_astar_config_.steering_penalty);
+  declare_parameter("hybrid_astar.steering_change_penalty", rclcpp::ParameterValue(0.3));
+  this->get_parameter("hybrid_astar.steering_change_penalty", forward_hybrid_astar_config_.steering_change_penalty);
+  declare_parameter("hybrid_astar.heading_change_penalty", rclcpp::ParameterValue(0.4));
+  this->get_parameter("hybrid_astar.heading_change_penalty", forward_hybrid_astar_config_.heading_change_penalty);
+  declare_parameter("hybrid_astar.obstacle_penalty_weight", rclcpp::ParameterValue(1.0));
+  this->get_parameter("hybrid_astar.obstacle_penalty_weight", forward_hybrid_astar_config_.obstacle_penalty_weight);
+  declare_parameter("hybrid_astar.heuristic_heading_weight", rclcpp::ParameterValue(0.2));
+  this->get_parameter("hybrid_astar.heuristic_heading_weight", forward_hybrid_astar_config_.heuristic_heading_weight);
+
+  RCLCPP_INFO(
+    this->get_logger(),
+    "hybrid_astar: wheelbase=%.6f max_steer=%.3f heading_bins=%d primitive_len=%.2f primitive_step=%.2f",
+    forward_hybrid_astar_config_.wheelbase,
+    forward_hybrid_astar_config_.max_steer,
+    forward_hybrid_astar_config_.heading_bin_count,
+    forward_hybrid_astar_config_.primitive_length,
+    forward_hybrid_astar_config_.primitive_step);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "hybrid_astar: goal_tol=(%.2f, %.2f) use_goal_heading=%d proj_radius=%.2f",
+    forward_hybrid_astar_config_.goal_position_tolerance,
+    forward_hybrid_astar_config_.goal_heading_tolerance,
+    forward_hybrid_astar_config_.use_goal_heading,
+    forward_hybrid_astar_config_.projection_search_radius);
+
   declare_parameter("use_pre_graph", rclcpp::ParameterValue(false));
   this->get_parameter("use_pre_graph", use_pre_graph_);
   RCLCPP_INFO(this->get_logger(), "use_pre_graph: %d", use_pre_graph_);    
@@ -164,6 +217,7 @@ GlobalPlanner::~GlobalPlanner(){
   tfl_.reset();
   a_star_planner_.reset();
   a_star_planner_pre_graph_.reset();
+  forward_hybrid_astar_planner_.reset();
   action_server_global_planner_.reset();
   kdtree_ground_.reset();
   kdtree_map_.reset();
@@ -201,10 +255,15 @@ void GlobalPlanner::cbClickedPoint(const geometry_msgs::msg::PointStamped::Share
   }
 
   geometry_msgs::msg::PoseStamped start, goal;
+  start.header.frame_id = global_frame_;
+  start.header.stamp = clock_->now();
+  goal.header.frame_id = global_frame_;
+  goal.header.stamp = clock_->now();
 
   goal.pose.position.x = clicked_goal->point.x;
   goal.pose.position.y = clicked_goal->point.y;
   goal.pose.position.z = clicked_goal->point.z;
+  goal.pose.orientation.w = 1.0;
 
   geometry_msgs::msg::TransformStamped transformStamped;
 
@@ -215,10 +274,12 @@ void GlobalPlanner::cbClickedPoint(const geometry_msgs::msg::PointStamped::Share
     start.pose.position.x = transformStamped.transform.translation.x;
     start.pose.position.y = transformStamped.transform.translation.y;
     start.pose.position.z = transformStamped.transform.translation.z;
+    start.pose.orientation = transformStamped.transform.rotation;
   }
   catch (tf2::TransformException& e)
   {
     RCLCPP_INFO(this->get_logger(), "Failed to transform pointcloud: %s", e.what());
+    return;
   }
   
   auto ros_path = makeROSPlan(start, goal);
@@ -699,19 +760,34 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
 nav_msgs::msg::Path GlobalPlanner::makeROSPlan(const geometry_msgs::msg::PoseStamped& start, const geometry_msgs::msg::PoseStamped& goal){
   
   std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
-  unsigned int start_id, goal_id;
+  unsigned int start_id = 0;
+  unsigned int goal_id = 0;
+  bool has_start_goal_id = false;
   std::vector<unsigned int> path;
-  std::vector<unsigned int> smoothed_path;
-  std::vector<unsigned int> smoothed_path_2nd;
   nav_msgs::msg::Path ros_path;
   ros_path.header.frame_id = global_frame_;
   ros_path.header.stamp = clock_->now();
 
-  if(buildStraightLinePlan(start, goal, ros_path)){
+  const bool allow_direct_shortcut =
+    enable_direct_path_shortcut_ && !use_forward_hybrid_astar_;
+  if(allow_direct_shortcut && buildStraightLinePlan(start, goal, ros_path)){
     return ros_path;
   }
 
-  if(getStartGoalID(start, goal, start_id, goal_id)){
+  if(use_forward_hybrid_astar_ && forward_hybrid_astar_planner_){
+    nav_msgs::msg::Path hybrid_path;
+    if(forward_hybrid_astar_planner_->MakePlan(start, goal, &hybrid_path)){
+      hybrid_path.header.frame_id = global_frame_;
+      hybrid_path.header.stamp = clock_->now();
+      return hybrid_path;
+    }
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger(), *clock_, 2000,
+      "Forward Hybrid A* failed, fallback to legacy A*.");
+  }
+
+  has_start_goal_id = getStartGoalID(start, goal, start_id, goal_id);
+  if(has_start_goal_id){
     if(!use_pre_graph_)
       a_star_planner_->getPath(start_id, goal_id, path);
     else
@@ -719,10 +795,14 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlan(const geometry_msgs::msg::PoseSta
   }
 
   if(path.empty()){
-    if(enable_detail_log_)
+    if(enable_detail_log_ && has_start_goal_id)
       RCLCPP_WARN(this->get_logger(), "No path found from: %u to %u", start_id, goal_id);
-    else
+    else if(enable_detail_log_)
+      RCLCPP_WARN(this->get_logger(), "No path found because start/goal projection failed.");
+    else if(has_start_goal_id)
       RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 5000, "No path found from: %u to %u", start_id, goal_id);
+    else
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 5000, "No path found because start/goal projection failed.");
     return ros_path;
   }
   else{
@@ -762,9 +842,23 @@ void GlobalPlanner::getStaticGraphFromPerception3D(){
       a_star_planner_pre_graph_ = std::make_shared<A_Star_on_PreGraph>(pcl_ground_, static_graph_, perception_3d_ros_, a_star_expanding_radius_);
       a_star_planner_pre_graph_->setupTurningWeight(turning_weight_);
     }
+
+    forward_hybrid_astar_planner_ = std::make_shared<ForwardHybridAStar>(
+      perception_3d_ros_, pcl_ground_, kdtree_ground_, this->get_logger());
+    forward_hybrid_astar_planner_->SetConfig(forward_hybrid_astar_config_);
+    forward_hybrid_astar_planner_->SetGlobalFrame(global_frame_);
   }
   else{
-    a_star_planner_->updateGraph(pcl_ground_);
+    if(!use_pre_graph_){
+      a_star_planner_->updateGraph(pcl_ground_);
+    }
+    else{
+      a_star_planner_pre_graph_->updateGraph(pcl_ground_, static_graph_);
+    }
+    if(forward_hybrid_astar_planner_){
+      forward_hybrid_astar_planner_->SetConfig(forward_hybrid_astar_config_);
+      forward_hybrid_astar_planner_->SetGlobalFrame(global_frame_);
+    }
   }
 
   pubWeight();

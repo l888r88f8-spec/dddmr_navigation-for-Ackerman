@@ -267,8 +267,6 @@ Visualization Manager:
           Value: false
         imu_link:
           Value: false
-        map:
-          Value: true
         odom:
           Value: true
         re_left_link:
@@ -287,27 +285,7 @@ Visualization Manager:
       Show Axes: true
       Show Names: true
       Tree:
-        map:
-          odom:
-            base_link:
-              fr_steer_left_link:
-                fr_left_link:
-                  {}
-              fr_steer_right_link:
-                fr_right_link:
-                  {}
-              re_left_link:
-                {}
-              re_right_link:
-                {}
-              sensor_rack_link:
-                {}
-              sensor_rack_second_layer_link:
-                imu_link:
-                  {}
-              sensor_rack_top_layer_link:
-                hesai_lidar:
-                  {}
+        {}
       Update Interval: 0
       Value: true
     - Class: rviz_default_plugins/MarkerArray
@@ -585,16 +563,16 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/XYOrbit
-      Distance: 20.794944763183594
+      Distance: 23.29033851623535
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 8.92940902709961
-        Y: 6.670976161956787
-        Z: 5.4232627007877454e-05
+        X: 10.377999305725098
+        Y: 5.032207489013672
+        Z: 6.47512570139952e-05
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false

@@ -51,6 +51,7 @@ type edge_t is inside here
 */
 #include <global_planner/a_star_on_pc.h>
 #include <global_planner/a_star_on_pre_graph.h>
+#include <global_planner/forward_hybrid_a_star.h>
 #include <set>
 #include <mutex>
 
@@ -121,6 +122,7 @@ class GlobalPlanner : public rclcpp::Node {
       std::shared_ptr<perception_3d::Perception3D_ROS> perception_3d_ros_;
       std::shared_ptr<A_Star_on_Graph> a_star_planner_;
       std::shared_ptr<A_Star_on_PreGraph> a_star_planner_pre_graph_;
+      std::shared_ptr<ForwardHybridAStar> forward_hybrid_astar_planner_;
 
       std::string global_frame_;
       std::string robot_frame_;
@@ -131,8 +133,11 @@ class GlobalPlanner : public rclcpp::Node {
       bool enable_detail_log_;
       double a_star_expanding_radius_;
       double direct_path_distance_threshold_;
+      bool use_forward_hybrid_astar_;
+      bool enable_direct_path_shortcut_;
       size_t static_ground_size_;
       bool use_pre_graph_;
+      ForwardHybridAStar::Config forward_hybrid_astar_config_;
       
       /*Original point cloud*/
       pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_ground_;

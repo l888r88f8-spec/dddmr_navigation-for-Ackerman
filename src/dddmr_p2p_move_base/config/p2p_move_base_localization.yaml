@@ -20,9 +20,26 @@ global_plan_manager:
 
 global_planner:
   ros__parameters:
-    turning_weight: 0.1                                     # 全局路径转折惩罚，越大越偏向平滑路径
+    turning_weight: 0.0                                     # 全局路径转折惩罚，越大越偏向平滑路径
     enable_detail_log: false
     a_star_expanding_radius: 0.5
+    use_forward_hybrid_astar: true
+    enable_direct_path_shortcut: false
+    hybrid_astar:
+      wheelbase: 0.549185
+      max_steer: 0.69
+      heading_bin_count: 72
+      primitive_length: 0.6
+      primitive_step: 0.05
+      projection_search_radius: 0.6
+      goal_position_tolerance: 0.4
+      goal_heading_tolerance: 0.35
+      use_goal_heading: false
+      steering_penalty: 0.2
+      steering_change_penalty: 0.3
+      heading_change_penalty: 0.4
+      obstacle_penalty_weight: 1.0
+      heuristic_heading_weight: 0.2
 
 #if we use get_dwa_plan in global_plan_manager, we setup parameters for dwa_global_planner
 dynamic_window_aware_global_planner:
@@ -198,7 +215,7 @@ trajectory_generators:
     
     ackermann_simple:
       plugin: "trajectory_generators::AckermannSimpleTrajectoryGeneratorTheory"
-      max_vel_x: 1.0                                         # 允许的最大前进速度
+      max_vel_x: 0.6                                         # 允许的最大前进速度
       min_vel_x: 0.05                                        # 最小采样前进速度，越小越容易低速贴近目标
       max_vel_theta: 5.0                                     # 角速度上限，实际还会被阿克曼转角几何进一步限制
       min_vel_theta: 0.0
