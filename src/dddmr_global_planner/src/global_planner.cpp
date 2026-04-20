@@ -39,6 +39,8 @@ GlobalPlanner::GlobalPlanner(const std::string& name)
     : Node(name) 
 {
   clock_ = this->get_clock();
+  debug_goal_seq_ = 0;
+  debug_route_version_ = 0;
 }
 
 rclcpp_action::GoalResponse GlobalPlanner::handle_goal(
@@ -207,6 +209,9 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
       std::bind(&GlobalPlanner::cbClickedPoint, this, std::placeholders::_1), sub_options);
   
   pub_path_ = this->create_publisher<nav_msgs::msg::Path>("global_path", 1);
+  pub_raw_route_path_ = this->create_publisher<nav_msgs::msg::Path>(
+    "/debug/raw_route_path",
+    rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
   pub_static_graph_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("static_graph", rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
   pub_weighted_pc_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("weighted_ground", rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
 
@@ -730,6 +735,28 @@ bool GlobalPlanner::getStartGoalID(const geometry_msgs::msg::PoseStamped& start,
 
 }
 
+void GlobalPlanner::publishRawRouteDebugPath(
+  const nav_msgs::msg::Path & path,
+  std::size_t goal_seq,
+  std::size_t route_version,
+  const std::string & source_label)
+{
+  nav_msgs::msg::Path debug_path = path;
+  debug_path.header.frame_id = global_frame_;
+  debug_path.header.stamp = clock_->now();
+  for(auto & pose : debug_path.poses){
+    pose.header = debug_path.header;
+  }
+  pub_raw_route_path_->publish(debug_path);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "raw_route_path published, route_version=%zu, goal_seq=%zu, source=%s, poses=%zu",
+    route_version,
+    goal_seq,
+    source_label.c_str(),
+    debug_path.poses.size());
+}
+
 void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle){
   
   //@get goal and start
@@ -751,17 +778,21 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
     return;
   }
 
+  const std::size_t goal_seq = ++debug_goal_seq_;
   geometry_msgs::msg::PoseStamped start;
   perception_3d_ros_->getGlobalPose(start);
 
   auto ros_path = makeROSPlan(start, goal->goal, false, false, 0);
 
   if(ros_path.poses.empty()){
+    publishRawRouteDebugPath(ros_path, goal_seq, debug_route_version_, "get_plan_failed");
     global_plan_result_->path = ros_path;
     goal_handle->abort(global_plan_result_);
   }
   else{
     //postSmoothPath(path, smoothed_path);
+    const std::size_t route_version = ++debug_route_version_;
+    publishRawRouteDebugPath(ros_path, goal_seq, route_version, "get_plan");
     pub_path_->publish(ros_path);
     global_plan_result_->path = ros_path;
     goal_handle->succeed(global_plan_result_);

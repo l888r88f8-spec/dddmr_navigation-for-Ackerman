@@ -79,6 +79,7 @@ type edge_t is inside here
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <string>
 
 namespace global_planner
 {
@@ -162,8 +163,11 @@ class GlobalPlanner : public rclcpp::Node {
       rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr clicked_point_sub_;
       
       rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path_;
+      rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_raw_route_path_;
       rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_static_graph_;
       rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_weighted_pc_;
+      std::size_t debug_goal_seq_;
+      std::size_t debug_route_version_;
 
       /*cb*/
       rclcpp::TimerBase::SharedPtr perception_3d_check_timer_;
@@ -190,6 +194,11 @@ class GlobalPlanner : public rclcpp::Node {
         nav_msgs::msg::Path& ros_path);
       bool clearCurrentHandleIfMatches(
         const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle);
+      void publishRawRouteDebugPath(
+        const nav_msgs::msg::Path & path,
+        std::size_t goal_seq,
+        std::size_t route_version,
+        const std::string & source_label);
 
       void pubStaticGraph();
       void getROSPath(std::vector<unsigned int>& path_id, nav_msgs::msg::Path& ros_path);

@@ -45,7 +45,11 @@
 
 #include "dddmr_sys_core/action/get_plan.hpp"
 
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <mutex>
+#include <string>
+#include <vector>
 
 // chrono_literals handles user-defined time durations (e.g. 500ms) 
 using namespace std::chrono_literals;
@@ -66,10 +70,17 @@ private:
   
   std::string global_planner_action_name_;
   double global_plan_query_frequency_;
+  bool freeze_route_per_goal_;
   geometry_msgs::msg::PoseStamped goal_;
   bool is_planning_;
   bool got_first_goal_;
+  bool goal_plan_attempted_;
+  bool goal_plan_failed_;
+  std::size_t goal_seq_;
+  std::size_t route_version_;
   nav_msgs::msg::Path global_path_;
+  nav_msgs::msg::Path frozen_route_;
+  std::string route_source_label_;
 
   rclcpp::CallbackGroup::SharedPtr tf_listener_group_;
   rclcpp::CallbackGroup::SharedPtr timer_group_;
@@ -92,9 +103,13 @@ public:
   void initial();
   void setGoal(const geometry_msgs::msg::PoseStamped& goal);
   void resume();
-  void stop();
+  void stop(const std::string & reason = "goal finished/canceled/failed");
   bool hasPlan();
-  void copyPlan(std::vector<geometry_msgs::msg::PoseStamped>& plan);
+  void copyPlan(
+    std::vector<geometry_msgs::msg::PoseStamped>& plan,
+    std::size_t * route_version = nullptr,
+    std::size_t * goal_seq = nullptr,
+    std::string * source_label = nullptr);
 
 };
 }  // namespace p2p_move_base

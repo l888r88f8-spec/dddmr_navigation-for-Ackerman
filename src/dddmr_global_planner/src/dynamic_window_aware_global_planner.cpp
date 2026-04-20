@@ -138,6 +138,9 @@ void DWA_GlobalPlanner::initial(
   declare_parameter("enable_reconnect_layer", rclcpp::ParameterValue(false));
   this->get_parameter("enable_reconnect_layer", enable_reconnect_layer_);
 
+  declare_parameter("freeze_route_per_goal", rclcpp::ParameterValue(true));
+  this->get_parameter("freeze_route_per_goal", freeze_route_per_goal_);
+
   double legacy_recompute_frequency = 10.0;
   declare_parameter("recompute_frequency", rclcpp::ParameterValue(10.0));
   this->get_parameter("recompute_frequency", legacy_recompute_frequency);
@@ -217,10 +220,14 @@ void DWA_GlobalPlanner::initial(
     const rclcpp::Time now = clock_->now();
     last_successful_reconnect_time_ = now;
     last_global_replan_time_ = now;
+    goal_seq_ = 0;
     active_connector_latched_ = false;
     active_route_anchor_index_ = 0;
     active_connector_start_time_ = now;
     active_connector_route_version_ = 0;
+    raw_route_.poses.clear();
+    raw_route_.header.frame_id = global_frame_;
+    raw_route_.header.stamp = now;
     active_connector_path_.poses.clear();
     active_connector_path_.header.frame_id = global_frame_;
     active_connector_path_.header.stamp = now;
@@ -239,6 +246,7 @@ void DWA_GlobalPlanner::initial(
     this->get_logger(),
     "reconnect layer: %s",
     enable_reconnect_layer_ ? "enabled" : "disabled");
+  RCLCPP_INFO(this->get_logger(), "freeze_route_per_goal: %d", freeze_route_per_goal_);
   RCLCPP_INFO(this->get_logger(), "reconnect_frequency: %.2f", recompute_frequency_);
   RCLCPP_INFO(this->get_logger(), "startup_replan_lock_distance: %.2f", startup_replan_lock_distance_);
   RCLCPP_INFO(
@@ -265,6 +273,9 @@ void DWA_GlobalPlanner::initial(
     connector_timeout_sec_);
 
   pub_path_ = this->create_publisher<nav_msgs::msg::Path>("awared_global_path", 1);
+  pub_raw_route_path_ = this->create_publisher<nav_msgs::msg::Path>(
+    "/debug/raw_route_path",
+    rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
 
   action_server_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
@@ -345,8 +356,16 @@ void DWA_GlobalPlanner::makePlan(
 
     nav_msgs::msg::Path route_path = global_planner_->makeROSPlan(start, goal_handle->get_goal()->goal);
     auto result = std::make_shared<dddmr_sys_core::action::GetPlan::Result>();
+    std::size_t goal_seq = 0;
+    std::size_t route_version = 0;
 
     if (route_path.poses.empty()) {
+      {
+        std::lock_guard<std::mutex> lock(plan_state_mutex_);
+        ++goal_seq_;
+        goal_seq = goal_seq_;
+      }
+      PublishRawRouteDebugPath(route_path, "get_dwa_plan_failed", route_version_, goal_seq);
       result->path = route_path;
       goal_handle->abort(result);
       SwitchPlannerMode(
@@ -363,6 +382,8 @@ void DWA_GlobalPlanner::makePlan(
     {
       std::lock_guard<std::mutex> lock(plan_state_mutex_);
       current_goal_ = new_goal_;
+      ++goal_seq_;
+      raw_route_ = route_path;
       global_path_ = route_path;
       global_dwa_path_.poses.clear();
       global_dwa_path_.header = global_path_.header;
@@ -405,7 +426,11 @@ void DWA_GlobalPlanner::makePlan(
       active_reconnect_goal_.pose.orientation.w = 1.0;
       active_connector_has_goal_heading_ = false;
       active_connector_preferred_turn_sign_ = 0;
+      goal_seq = goal_seq_;
+      route_version = route_version_;
     }
+
+    PublishRawRouteDebugPath(route_path, "get_dwa_plan_raw_route", route_version, goal_seq);
 
     result->path = route_path;
     goal_handle->succeed(result);
@@ -1141,6 +1166,28 @@ void DWA_GlobalPlanner::ResetReconnectLayerState(const rclcpp::Time & now)
   global_dwa_path_.header.stamp = now;
 }
 
+void DWA_GlobalPlanner::PublishRawRouteDebugPath(
+  const nav_msgs::msg::Path & path,
+  const std::string & source_label,
+  std::size_t route_version,
+  std::size_t goal_seq)
+{
+  nav_msgs::msg::Path debug_path = path;
+  debug_path.header.frame_id = global_frame_;
+  debug_path.header.stamp = clock_->now();
+  for(auto & pose : debug_path.poses){
+    pose.header = debug_path.header;
+  }
+  pub_raw_route_path_->publish(debug_path);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "raw_route_path published, route_version=%zu, goal_seq=%zu, source=%s, poses=%zu",
+    route_version,
+    goal_seq,
+    source_label.c_str(),
+    debug_path.poses.size());
+}
+
 void DWA_GlobalPlanner::SwitchPlannerMode(
   PlannerMode next_mode,
   const std::string & reason,
@@ -1187,6 +1234,8 @@ void DWA_GlobalPlanner::determineDWAPlan()
   nav_msgs::msg::Path connector_snapshot;
   geometry_msgs::msg::PoseStamped goal_snapshot;
   bool enable_reconnect_layer_snapshot = false;
+  bool freeze_route_per_goal_snapshot = false;
+  std::size_t goal_seq_snapshot = 0;
   std::size_t route_version_snapshot = 0;
   std::size_t route_progress_index_snapshot = 0;
   std::size_t connector_progress_index_snapshot = 0;
@@ -1208,6 +1257,8 @@ void DWA_GlobalPlanner::determineDWAPlan()
     connector_snapshot = global_dwa_path_;
     goal_snapshot = current_goal_;
     enable_reconnect_layer_snapshot = enable_reconnect_layer_;
+    freeze_route_per_goal_snapshot = freeze_route_per_goal_;
+    goal_seq_snapshot = goal_seq_;
     route_version_snapshot = route_version_;
     route_progress_index_snapshot = route_progress_index_;
     connector_progress_index_snapshot = connector_progress_index_;
@@ -1343,6 +1394,16 @@ void DWA_GlobalPlanner::determineDWAPlan()
 
   auto trigger_route_replan = [&](const std::string & reason) -> bool
     {
+      if (freeze_route_per_goal_snapshot) {
+        RCLCPP_INFO_THROTTLE(
+          this->get_logger(), *clock_, 2000,
+          "freeze route for current goal, skip internal route refresh, route_version=%zu, goal_seq=%zu, reason=%s",
+          route_version_snapshot,
+          goal_seq_snapshot,
+          reason.c_str());
+        return false;
+      }
+
       constexpr double kMinGlobalReplanIntervalSec = 2.0;
       double elapsed_sec = 0.0;
       {

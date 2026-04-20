@@ -107,6 +107,7 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       rclcpp::TimerBase::SharedPtr threading_timer_;
       
       rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path_;
+      rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_raw_route_path_;
       
       std::shared_ptr<perception_3d::Perception3D_ROS> perception_3d_ros_;
       std::shared_ptr<global_planner::GlobalPlanner> global_planner_;
@@ -115,12 +116,14 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       std::string robot_frame_;
       geometry_msgs::msg::PoseStamped new_goal_;
       geometry_msgs::msg::PoseStamped current_goal_;
+      nav_msgs::msg::Path raw_route_;
       nav_msgs::msg::Path global_path_;
       // Ephemeral connector path. This should only exist while reconnect is active.
       nav_msgs::msg::Path global_dwa_path_;
       // When false, DWA publishes the raw global route and bypasses all
       // reconnect/corridor/connector path rewriting.
       bool enable_reconnect_layer_;
+      bool freeze_route_per_goal_;
       double look_ahead_distance_;
       double recompute_frequency_;
       double startup_replan_lock_distance_;
@@ -143,6 +146,7 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       std::size_t consecutive_reconnect_failures_;
       std::size_t route_progress_index_;
       std::size_t connector_progress_index_;
+      std::size_t goal_seq_;
       bool active_connector_latched_;
       geometry_msgs::msg::PoseStamped active_reconnect_goal_;
       std::size_t active_route_anchor_index_;
@@ -237,6 +241,11 @@ class DWA_GlobalPlanner : public rclcpp::Node {
         const geometry_msgs::msg::PoseStamped & pose) const;
       const char * PlannerModeToString(PlannerMode mode) const;
       const char * ReconnectResultToString(ReconnectResult result) const;
+      void PublishRawRouteDebugPath(
+        const nav_msgs::msg::Path & path,
+        const std::string & source_label,
+        std::size_t route_version,
+        std::size_t goal_seq);
       void ResetReconnectLayerState(const rclcpp::Time & now);
       void SwitchPlannerMode(
         PlannerMode next_mode,

@@ -40,6 +40,9 @@ Local_Planner::Local_Planner(const std::string& name): Node(name)
   clock_ = this->get_clock();
   got_odom_ = false;
   last_valid_prune_plan_ = clock_->now();
+  route_version_ = 0;
+  goal_seq_ = 0;
+  route_source_label_ = "planner_result";
 }
 
 void Local_Planner::initial(
@@ -134,9 +137,17 @@ void Local_Planner::initial(
   global_frame_ = perception_3d_ros_->getGlobalUtils()->getGblFrame();
   parseCuboid(); //after robot_frame is got
   
+  const auto debug_path_qos =
+    rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable();
   pub_robot_cuboid_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("robot_cuboid", 1);  
   pub_aggregate_observation_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("aggregated_pc", 1);  
   pub_prune_plan_ = this->create_publisher<nav_msgs::msg::Path>("prune_plan", 1);
+  pub_route_sent_to_local_ =
+    this->create_publisher<nav_msgs::msg::Path>("/debug/route_sent_to_local", debug_path_qos);
+  pub_local_pruned_path_ =
+    this->create_publisher<nav_msgs::msg::Path>("/debug/local_pruned_path", debug_path_qos);
+  pub_best_trajectory_path_ =
+    this->create_publisher<nav_msgs::msg::Path>("/debug/best_trajectory", debug_path_qos);
   pub_accepted_trajectory_pose_array_ = this->create_publisher<geometry_msgs::msg::PoseArray>("accepted_trajectory", 1);
   pub_best_trajectory_pose_ = this->create_publisher<geometry_msgs::msg::PoseArray>("best_trajectory", 2);
   pub_trajectory_pose_array_ = this->create_publisher<geometry_msgs::msg::PoseArray>("trajectory", 2);
@@ -171,6 +182,80 @@ Local_Planner::~Local_Planner(){
   trajectories_.reset();
   tf2Buffer_.reset();
 
+}
+
+nav_msgs::msg::Path Local_Planner::buildPathFromPlan(
+  const std::vector<geometry_msgs::msg::PoseStamped> & poses) const
+{
+  nav_msgs::msg::Path path;
+  path.header.frame_id = global_frame_;
+  path.header.stamp = clock_->now();
+  path.poses.reserve(poses.size());
+  for(const auto & pose : poses){
+    geometry_msgs::msg::PoseStamped pose_stamped = pose;
+    pose_stamped.header = path.header;
+    path.poses.push_back(pose_stamped);
+  }
+  return path;
+}
+
+nav_msgs::msg::Path Local_Planner::buildPathFromTrajectory(
+  const base_trajectory::Trajectory & traj) const
+{
+  nav_msgs::msg::Path path;
+  path.header.frame_id = global_frame_;
+  path.header.stamp = clock_->now();
+  path.poses.reserve(traj.getPointsSize());
+  for(unsigned int i = 0; i < traj.getPointsSize(); ++i){
+    geometry_msgs::msg::PoseStamped pose_stamped;
+    pose_stamped.header = path.header;
+    pose_stamped.pose = traj.getPoint(i).pose;
+    path.poses.push_back(pose_stamped);
+  }
+  return path;
+}
+
+void Local_Planner::publishDebugPath(
+  const nav_msgs::msg::Path & path,
+  const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr & publisher,
+  const std::string & stage_label,
+  std::size_t route_version,
+  std::size_t goal_seq,
+  const std::string & source_label,
+  bool throttle_log) const
+{
+  if(!publisher){
+    return;
+  }
+
+  nav_msgs::msg::Path output = path;
+  output.header.frame_id = global_frame_;
+  output.header.stamp = clock_->now();
+  for(auto & pose : output.poses){
+    pose.header = output.header;
+  }
+  publisher->publish(output);
+
+  if(throttle_log){
+    RCLCPP_INFO_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "%s published, route_version=%zu, goal_seq=%zu, source=%s, poses=%zu",
+      stage_label.c_str(),
+      route_version,
+      goal_seq,
+      source_label.c_str(),
+      output.poses.size());
+  }
+  else{
+    RCLCPP_INFO(
+      this->get_logger().get_child(name_),
+      "%s published, route_version=%zu, goal_seq=%zu, source=%s, poses=%zu",
+      stage_label.c_str(),
+      route_version,
+      goal_seq,
+      source_label.c_str(),
+      output.poses.size());
+  }
 }
 
 void Local_Planner::parseCuboid(){
@@ -345,15 +430,51 @@ bool Local_Planner::isGoalReached(){
     return false;
 }
 
-void Local_Planner::setPlan(const std::vector<geometry_msgs::msg::PoseStamped>& orig_global_plan) {
+void Local_Planner::setPlan(
+  const std::vector<geometry_msgs::msg::PoseStamped>& orig_global_plan,
+  std::size_t route_version,
+  std::size_t goal_seq,
+  const std::string & source_label)
+{
+  if(
+    !global_plan_.empty() &&
+    route_version_ == route_version &&
+    goal_seq_ == goal_seq &&
+    route_source_label_ == source_label)
+  {
+    RCLCPP_INFO_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 5000,
+      "Reuse delivered route for local planner, route_version=%zu, goal_seq=%zu, source=%s",
+      route_version,
+      goal_seq,
+      source_label.c_str());
+    return;
+  }
+
+  publishDebugPath(
+    buildPathFromPlan(orig_global_plan),
+    pub_route_sent_to_local_,
+    "route_sent_to_local",
+    route_version,
+    goal_seq,
+    source_label,
+    false);
 
   if(orig_global_plan.size()<3){
-    RCLCPP_ERROR(this->get_logger().get_child(name_), "Size of global plan is smaller than 3.");
+    RCLCPP_ERROR(
+      this->get_logger().get_child(name_),
+      "Size of global plan is smaller than 3, route_version=%zu, goal_seq=%zu, source=%s",
+      route_version,
+      goal_seq,
+      source_label.c_str());
     return;
   }
 
   global_plan_.clear();
   global_plan_ = orig_global_plan;
+  route_version_ = route_version;
+  goal_seq_ = goal_seq;
+  route_source_label_ = source_label;
 
   pcl_global_plan_.reset(new pcl::PointCloud<pcl::PointXYZ>);
   for(auto gbl_it = global_plan_.begin(); gbl_it!=global_plan_.end();gbl_it++){
@@ -366,7 +487,13 @@ void Local_Planner::setPlan(const std::vector<geometry_msgs::msg::PoseStamped>& 
 
   kdtree_global_plan_.reset(new pcl::KdTreeFLANN<pcl::PointXYZ>());
   kdtree_global_plan_->setInputCloud (pcl_global_plan_);
-  RCLCPP_INFO_THROTTLE(this->get_logger().get_child(name_), *clock_, 10000, "Recieve new global plan.");
+  RCLCPP_INFO(
+    this->get_logger().get_child(name_),
+    "Receive new global plan, route_version=%zu, goal_seq=%zu, source=%s, poses=%zu",
+    route_version_,
+    goal_seq_,
+    route_source_label_.c_str(),
+    global_plan_.size());
 }
 
 double Local_Planner::getDistanceBTWPoseStamp(const geometry_msgs::msg::PoseStamped& a, const geometry_msgs::msg::PoseStamped& b){
@@ -401,11 +528,22 @@ geometry_msgs::msg::TransformStamped Local_Planner::getGlobalPose(){
 
 void Local_Planner::prunePlan(double forward_distance, double backward_distance){
 
-  if(pcl_global_plan_->points.size()<3)
-    return;
-
   prune_plan_.poses.clear();
   pcl_prune_plan_.clear();
+  prune_plan_.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
+  prune_plan_.header.stamp = clock_->now();
+
+  if(pcl_global_plan_->points.size()<3){
+    publishDebugPath(
+      prune_plan_,
+      pub_local_pruned_path_,
+      "local_pruned_path",
+      route_version_,
+      goal_seq_,
+      route_source_label_,
+      true);
+    return;
+  }
 
   std::vector<int> pointIdxNKNSearch(1);
   std::vector<float> pointNKNSquaredDistance(1);
@@ -416,6 +554,14 @@ void Local_Planner::prunePlan(double forward_distance, double backward_distance)
 
   if ( kdtree_global_plan_->nearestKSearch (robot_pose, 1, pointIdxNKNSearch, pointNKNSquaredDistance) <= 0 ){
     RCLCPP_DEBUG(this->get_logger().get_child(name_), "Ready to fix some exception here.");
+    publishDebugPath(
+      prune_plan_,
+      pub_local_pruned_path_,
+      "local_pruned_path",
+      route_version_,
+      goal_seq_,
+      route_source_label_,
+      true);
     return;
   }
 
@@ -423,6 +569,14 @@ void Local_Planner::prunePlan(double forward_distance, double backward_distance)
   if(sqrt(pointNKNSquaredDistance[0])>1.0){
     RCLCPP_DEBUG(this->get_logger().get_child(name_), "Deviate from plan, fix some exception here.");
     //@ consider to clear prune_plan in model_shared_data?
+    publishDebugPath(
+      prune_plan_,
+      pub_local_pruned_path_,
+      "local_pruned_path",
+      route_version_,
+      goal_seq_,
+      route_source_label_,
+      true);
     return;
   }
 
@@ -465,11 +619,20 @@ void Local_Planner::prunePlan(double forward_distance, double backward_distance)
       break;
   }
   
-  prune_plan_.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
-  prune_plan_.header.stamp = clock_->now();
+  for(auto & pose : prune_plan_.poses){
+    pose.header = prune_plan_.header;
+  }
   if(debug_publish_prune_plan_ && pub_prune_plan_->get_subscription_count() > 0){
     pub_prune_plan_->publish(prune_plan_);
   }
+  publishDebugPath(
+    prune_plan_,
+    pub_local_pruned_path_,
+    "local_pruned_path",
+    route_version_,
+    goal_seq_,
+    route_source_label_,
+    true);
   last_valid_prune_plan_ = clock_->now();
   //RCLCPP_DEBUG(this->get_logger().get_child(name_), "%lu",prune_plan_.poses.size());
 }
@@ -560,6 +723,23 @@ void Local_Planner::getBestTrajectory(std::string traj_gen_name, base_trajectory
     best_pose_arr.header.stamp = clock_->now();
     pub_best_trajectory_pose_->publish(best_pose_arr);
   }
+
+  nav_msgs::msg::Path best_trajectory_path;
+  if(best_traj.cost_ >= 0){
+    best_trajectory_path = buildPathFromTrajectory(best_traj);
+  }
+  else{
+    best_trajectory_path.header.frame_id = global_frame_;
+    best_trajectory_path.header.stamp = clock_->now();
+  }
+  publishDebugPath(
+    best_trajectory_path,
+    pub_best_trajectory_path_,
+    "best_trajectory",
+    route_version_,
+    goal_seq_,
+    route_source_label_,
+    true);
 
 }
 

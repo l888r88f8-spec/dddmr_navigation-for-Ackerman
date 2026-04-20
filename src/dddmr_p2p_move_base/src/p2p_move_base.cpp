@@ -239,7 +239,7 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
 
       RCLCPP_INFO(this->get_logger(), "P2P move base preempted.");
       publishZeroVelocity();
-      GPM_->stop();
+      GPM_->stop("goal preempted");
       return;
     }
 
@@ -253,7 +253,7 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
       goal_handle->canceled(result);
       RCLCPP_INFO(this->get_logger(), "P2P move base cancelled.");
       publishZeroVelocity();
-      GPM_->stop();
+      GPM_->stop("goal canceled");
       return;
     }
 
@@ -268,7 +268,7 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
 
     //if we're done, then we'll return from execute
     if(done){
-      GPM_->stop();
+      GPM_->stop("goal finished/canceled/failed");
       return;
     }
     
@@ -277,7 +277,7 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
     //if(FSM_->isCurrentDecision("d_controlling") && r.cycleTime() > ros::Duration(1 / FSM_->controller_frequency_))
     //  ROS_WARN("Control loop missed its desired rate of %.4fHz... the loop actually took %.4f seconds", FSM_->controller_frequency_, r.cycleTime().toSec());
   }
-  GPM_->stop();
+  GPM_->stop("goal finished/canceled/failed");
 }
 
 bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> goal_handle){
@@ -306,7 +306,10 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       //@see: decision_planning
       std::vector<geometry_msgs::msg::PoseStamped> plan;
       if(GPM_->hasPlan()){
-        GPM_->copyPlan(plan);
+        std::size_t route_version = 0;
+        std::size_t goal_seq = 0;
+        std::string source_label;
+        GPM_->copyPlan(plan, &route_version, &goal_seq, &source_label);
         //if the planner fails or returns a zero length plan, planning failed
         if(plan.empty()){
           RCLCPP_DEBUG(this->get_logger(), "Failed to find a plan to point (%.2f, %.2f, %.2f)", 
@@ -315,7 +318,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
         }
         else{
           FSM_->last_valid_plan_ = clock_->now();
-          LP_->setPlan(plan);
+          LP_->setPlan(plan, route_version, goal_seq, source_label);
           FSM_->setDecision("d_align_heading");  
         }
       }
@@ -506,8 +509,11 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       //@ update global plan
       if(GPM_->hasPlan()){
         std::vector<geometry_msgs::msg::PoseStamped> plan;
-        GPM_->copyPlan(plan);
-        LP_->setPlan(plan);
+        std::size_t route_version = 0;
+        std::size_t goal_seq = 0;
+        std::string source_label;
+        GPM_->copyPlan(plan, &route_version, &goal_seq, &source_label);
+        LP_->setPlan(plan, route_version, goal_seq, source_label);
       }
       //@Behavior for oscillation here
       
@@ -640,8 +646,11 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       //@ update global plan
       if(GPM_->hasPlan()){
         std::vector<geometry_msgs::msg::PoseStamped> plan;
-        GPM_->copyPlan(plan);
-        LP_->setPlan(plan);
+        std::size_t route_version = 0;
+        std::size_t goal_seq = 0;
+        std::string source_label;
+        GPM_->copyPlan(plan, &route_version, &goal_seq, &source_label);
+        LP_->setPlan(plan, route_version, goal_seq, source_label);
       }
       base_trajectory::Trajectory best_traj;
       dddmr_sys_core::PlannerState PS = LP_->computeVelocityCommand(drive_trajectory_generator_name_, best_traj);

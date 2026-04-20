@@ -51,9 +51,13 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
+#include <nav_msgs/msg/path.hpp>
 
 //@planner state
 #include <dddmr_sys_core/dddmr_enum_states.h>
+
+#include <string>
+#include <vector>
 
 namespace local_planner {
 
@@ -69,7 +73,11 @@ class Local_Planner : public rclcpp::Node {
 
       ~Local_Planner();
 
-      void setPlan(const std::vector<geometry_msgs::msg::PoseStamped>& orig_global_plan);
+      void setPlan(
+        const std::vector<geometry_msgs::msg::PoseStamped>& orig_global_plan,
+        std::size_t route_version = 0,
+        std::size_t goal_seq = 0,
+        const std::string & source_label = "planner_result");
       dddmr_sys_core::PlannerState computeVelocityCommand(std::string traj_gen_name, base_trajectory::Trajectory& best_traj);
       void getBestTrajectory(std::string traj_gen_name, base_trajectory::Trajectory& best_traj);
 
@@ -131,6 +139,9 @@ class Local_Planner : public rclcpp::Node {
       rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_robot_cuboid_;
       rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_aggregate_observation_;
       rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_prune_plan_;
+      rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_route_sent_to_local_;
+      rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_local_pruned_path_;
+      rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_best_trajectory_path_;
       rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_accepted_trajectory_pose_array_;
       rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_best_trajectory_pose_;
       rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_trajectory_pose_array_;
@@ -170,6 +181,22 @@ class Local_Planner : public rclcpp::Node {
       double controller_frequency_;
 
       rclcpp::Time control_loop_time_;
+      std::size_t route_version_;
+      std::size_t goal_seq_;
+      std::string route_source_label_;
+
+      nav_msgs::msg::Path buildPathFromPlan(
+        const std::vector<geometry_msgs::msg::PoseStamped> & poses) const;
+      nav_msgs::msg::Path buildPathFromTrajectory(
+        const base_trajectory::Trajectory & traj) const;
+      void publishDebugPath(
+        const nav_msgs::msg::Path & path,
+        const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr & publisher,
+        const std::string & stage_label,
+        std::size_t route_version,
+        std::size_t goal_seq,
+        const std::string & source_label,
+        bool throttle_log) const;
 
     protected:
 
