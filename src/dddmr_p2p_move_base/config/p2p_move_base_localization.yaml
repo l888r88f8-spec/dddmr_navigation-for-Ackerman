@@ -57,6 +57,9 @@ dynamic_window_aware_global_planner:
     reconnect_deviation_threshold: 0.7                      # 偏离 Corridor 超过该阈值触发接回
     reconnect_heading_threshold: 1.3                        # 朝向偏差超过该阈值触发接回
     max_reconnect_failures_before_global_replan: 3.0        # 连续接回失败后触发 Route 层重算
+    connector_goal_tolerance: 0.4                           # 到达 latched reconnect goal 的释放阈值
+    connector_commit_distance: 1.5                          # 连接段执行到该距离后允许释放 latch
+    connector_timeout_sec: 4.0                              # connector 锁定超时保护
     startup_replan_lock_distance: 0.8                       # 起步阶段锁定重规划距离，避免首段接入弧反复翻边
     startup_replan_lock_offtrack_tolerance: 0.0             # 机器人偏离当前DWA路径超过该距离时解除锁定
     preferred_turn_sign_lookahead_distance: 1.8             # 从机器人当前未走路径前视窗口估计转向偏好

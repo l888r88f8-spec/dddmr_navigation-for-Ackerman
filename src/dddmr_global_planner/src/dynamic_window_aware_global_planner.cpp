@@ -191,6 +191,18 @@ void DWA_GlobalPlanner::initial(
   this->get_parameter("max_force_goal_heading_angle", max_force_goal_heading_angle_);
   max_force_goal_heading_angle_ = std::clamp(max_force_goal_heading_angle_, 0.0, kPi);
 
+  declare_parameter("connector_goal_tolerance", rclcpp::ParameterValue(0.4));
+  this->get_parameter("connector_goal_tolerance", connector_goal_tolerance_);
+  connector_goal_tolerance_ = std::max(connector_goal_tolerance_, 0.05);
+
+  declare_parameter("connector_commit_distance", rclcpp::ParameterValue(1.5));
+  this->get_parameter("connector_commit_distance", connector_commit_distance_);
+  connector_commit_distance_ = std::max(connector_commit_distance_, 0.1);
+
+  declare_parameter("connector_timeout_sec", rclcpp::ParameterValue(4.0));
+  this->get_parameter("connector_timeout_sec", connector_timeout_sec_);
+  connector_timeout_sec_ = std::max(connector_timeout_sec_, 0.1);
+
   {
     std::lock_guard<std::mutex> lock(plan_state_mutex_);
     planner_mode_ = PlannerMode::kRouteFollow;
@@ -200,6 +212,21 @@ void DWA_GlobalPlanner::initial(
     const rclcpp::Time now = clock_->now();
     last_successful_reconnect_time_ = now;
     last_global_replan_time_ = now;
+    active_connector_latched_ = false;
+    active_route_anchor_index_ = 0;
+    active_connector_start_time_ = now;
+    active_connector_route_version_ = 0;
+    active_connector_path_.poses.clear();
+    active_connector_path_.header.frame_id = global_frame_;
+    active_connector_path_.header.stamp = now;
+    active_connector_has_goal_heading_ = false;
+    active_connector_preferred_turn_sign_ = 0;
+    active_reconnect_goal_.header.frame_id = global_frame_;
+    active_reconnect_goal_.header.stamp = now;
+    active_reconnect_goal_.pose.orientation.w = 1.0;
+    active_connector_start_pose_.header.frame_id = global_frame_;
+    active_connector_start_pose_.header.stamp = now;
+    active_connector_start_pose_.pose.orientation.w = 1.0;
   }
 
   RCLCPP_INFO(this->get_logger(), "look_ahead_distance: %.2f", look_ahead_distance_);
@@ -221,6 +248,12 @@ void DWA_GlobalPlanner::initial(
     this->get_logger(),
     "max_reconnect_failures_before_global_replan: %.0f",
     max_reconnect_failures_before_global_replan_);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "connector_goal_tolerance: %.2f, connector_commit_distance: %.2f, connector_timeout_sec: %.2f",
+    connector_goal_tolerance_,
+    connector_commit_distance_,
+    connector_timeout_sec_);
 
   pub_path_ = this->create_publisher<nav_msgs::msg::Path>("awared_global_path", 1);
 
@@ -344,6 +377,15 @@ void DWA_GlobalPlanner::makePlan(
       last_global_replan_time_ = now;
       last_successful_reconnect_time_ = now;
       planner_mode_ = PlannerMode::kRouteFollow;
+      active_connector_latched_ = false;
+      active_route_anchor_index_ = 0;
+      active_connector_start_time_ = now;
+      active_connector_route_version_ = route_version_;
+      active_connector_path_.poses.clear();
+      active_connector_path_.header.frame_id = global_frame_;
+      active_connector_path_.header.stamp = now;
+      active_connector_has_goal_heading_ = false;
+      active_connector_preferred_turn_sign_ = 0;
     }
 
     result->path = route_path;
@@ -830,6 +872,50 @@ bool DWA_GlobalPlanner::ShouldLockStartupReplan(
   return progressed < startup_replan_lock_distance_;
 }
 
+double DWA_GlobalPlanner::ComputeDistanceToPath(
+  const nav_msgs::msg::Path & path,
+  const geometry_msgs::msg::PoseStamped & pose) const
+{
+  if (path.poses.empty()) {
+    return std::numeric_limits<double>::infinity();
+  }
+
+  const std::size_t nearest_index = FindNearestPathIndex(path, pose);
+  if (nearest_index >= path.poses.size()) {
+    return std::numeric_limits<double>::infinity();
+  }
+
+  const double dx = path.poses[nearest_index].pose.position.x - pose.pose.position.x;
+  const double dy = path.poses[nearest_index].pose.position.y - pose.pose.position.y;
+  return std::hypot(dx, dy);
+}
+
+double DWA_GlobalPlanner::EstimateProgressAlongPath(
+  const nav_msgs::msg::Path & path,
+  const geometry_msgs::msg::PoseStamped & pose) const
+{
+  if (path.poses.size() < 2) {
+    return 0.0;
+  }
+
+  const std::size_t nearest_index = FindNearestPathIndex(path, pose);
+  if (nearest_index == 0 || nearest_index >= path.poses.size()) {
+    return 0.0;
+  }
+
+  double progressed = 0.0;
+  for (std::size_t i = 1; i <= nearest_index && i < path.poses.size(); ++i) {
+    const auto & p0 = path.poses[i - 1].pose.position;
+    const auto & p1 = path.poses[i].pose.position;
+    const double segment_length = std::hypot(p1.x - p0.x, p1.y - p0.y);
+    if (!std::isfinite(segment_length)) {
+      continue;
+    }
+    progressed += segment_length;
+  }
+  return progressed;
+}
+
 const char * DWA_GlobalPlanner::PlannerModeToString(PlannerMode mode) const
 {
   switch (mode) {
@@ -915,6 +1001,15 @@ void DWA_GlobalPlanner::determineDWAPlan()
   nav_msgs::msg::Path route_snapshot;
   nav_msgs::msg::Path connector_snapshot;
   geometry_msgs::msg::PoseStamped goal_snapshot;
+  std::size_t route_version_snapshot = 0;
+  bool active_connector_latched_snapshot = false;
+  geometry_msgs::msg::PoseStamped active_reconnect_goal_snapshot;
+  std::size_t active_route_anchor_index_snapshot = 0;
+  rclcpp::Time active_connector_start_time_snapshot(0, 0, RCL_ROS_TIME);
+  std::size_t active_connector_route_version_snapshot = 0;
+  nav_msgs::msg::Path active_connector_path_snapshot;
+  bool active_connector_has_goal_heading_snapshot = false;
+  int active_connector_preferred_turn_sign_snapshot = 0;
 
   {
     std::lock_guard<std::mutex> lock(plan_state_mutex_);
@@ -924,6 +1019,15 @@ void DWA_GlobalPlanner::determineDWAPlan()
     route_snapshot = global_path_;
     connector_snapshot = global_dwa_path_;
     goal_snapshot = current_goal_;
+    route_version_snapshot = route_version_;
+    active_connector_latched_snapshot = active_connector_latched_;
+    active_reconnect_goal_snapshot = active_reconnect_goal_;
+    active_route_anchor_index_snapshot = active_route_anchor_index_;
+    active_connector_start_time_snapshot = active_connector_start_time_;
+    active_connector_route_version_snapshot = active_connector_route_version_;
+    active_connector_path_snapshot = active_connector_path_;
+    active_connector_has_goal_heading_snapshot = active_connector_has_goal_heading_;
+    active_connector_preferred_turn_sign_snapshot = active_connector_preferred_turn_sign_;
   }
 
   geometry_msgs::msg::PoseStamped start;
@@ -960,6 +1064,24 @@ void DWA_GlobalPlanner::determineDWAPlan()
     {
       std::lock_guard<std::mutex> lock(plan_state_mutex_);
       global_dwa_path_ = path;
+    };
+
+  auto clear_active_connector_latch = [&](const std::string & reason)
+    {
+      std::lock_guard<std::mutex> lock(plan_state_mutex_);
+      const bool was_latched = active_connector_latched_;
+      active_connector_latched_ = false;
+      active_route_anchor_index_ = 0;
+      active_connector_start_time_ = now;
+      active_connector_route_version_ = route_version_;
+      active_connector_path_.poses.clear();
+      active_connector_path_.header.frame_id = global_frame_;
+      active_connector_path_.header.stamp = now;
+      active_connector_has_goal_heading_ = false;
+      active_connector_preferred_turn_sign_ = 0;
+      if (was_latched) {
+        RCLCPP_INFO(this->get_logger(), "Release latched connector: %s", reason.c_str());
+      }
     };
 
   auto set_reconnect_failure_count = [&](std::size_t count)
@@ -1017,6 +1139,15 @@ void DWA_GlobalPlanner::determineDWAPlan()
         connector_version_ = 0;
         consecutive_reconnect_failures_ = 0;
         last_global_replan_time_ = now;
+        active_connector_latched_ = false;
+        active_route_anchor_index_ = 0;
+        active_connector_start_time_ = now;
+        active_connector_route_version_ = route_version_;
+        active_connector_path_.poses.clear();
+        active_connector_path_.header.frame_id = global_frame_;
+        active_connector_path_.header.stamp = now;
+        active_connector_has_goal_heading_ = false;
+        active_connector_preferred_turn_sign_ = 0;
 
         pcl_global_path_->points.clear();
         for (const auto & pose : global_path_.poses) {
@@ -1038,6 +1169,143 @@ void DWA_GlobalPlanner::determineDWAPlan()
       return true;
     };
 
+  const std::size_t max_reconnect_failures =
+    static_cast<std::size_t>(std::ceil(max_reconnect_failures_before_global_replan_));
+
+  if (active_connector_latched_snapshot) {
+    // Latched connector avoids chasing a moving reconnect anchor while the
+    // robot is executing the current reconnect maneuver.
+    bool should_release_latch = false;
+    std::string release_reason;
+
+    if (active_connector_route_version_snapshot != route_version_snapshot) {
+      should_release_latch = true;
+      release_reason = "route version changed";
+    } else if (ComputeDistanceToPath(active_connector_path_snapshot, start) >
+      reconnect_deviation_threshold_ * 2.5)
+    {
+      should_release_latch = true;
+      release_reason = "robot deviated from active connector";
+    } else {
+      const double distance_to_goal = std::hypot(
+        active_reconnect_goal_snapshot.pose.position.x - start.pose.position.x,
+        active_reconnect_goal_snapshot.pose.position.y - start.pose.position.y);
+      if (std::isfinite(distance_to_goal) && distance_to_goal < connector_goal_tolerance_) {
+        should_release_latch = true;
+        release_reason = "reached active reconnect goal";
+      }
+    }
+
+    if (!should_release_latch) {
+      const double connector_progress =
+        EstimateProgressAlongPath(active_connector_path_snapshot, start);
+      if (std::isfinite(connector_progress) && connector_progress >= connector_commit_distance_) {
+        should_release_latch = true;
+        release_reason = "connector commit distance reached";
+      }
+    }
+
+    if (!should_release_latch) {
+      const double elapsed = (now - active_connector_start_time_snapshot).seconds();
+      if (std::isfinite(elapsed) && elapsed > connector_timeout_sec_) {
+        should_release_latch = true;
+        release_reason = "connector latch timeout";
+      }
+    }
+
+    if (should_release_latch) {
+      clear_active_connector_latch(release_reason);
+      active_connector_latched_snapshot = false;
+      active_connector_path_snapshot.poses.clear();
+      connector_snapshot = route_snapshot;
+      PrunePathPrefix(&connector_snapshot, start, true);
+      SwitchPlannerMode(
+        PlannerMode::kRouteFollow,
+        std::string("release connector latch: ") + release_reason,
+        ReconnectResult::kReusePrunedPath);
+    } else {
+      nav_msgs::msg::Path locked_path = connector_snapshot;
+      if (locked_path.poses.empty() || !PrunePathPrefix(&locked_path, start, true)) {
+        nav_msgs::msg::Path retry_connector = global_planner_->makeROSPlan(
+          start,
+          active_reconnect_goal_snapshot,
+          false,
+          active_connector_has_goal_heading_snapshot,
+          active_connector_preferred_turn_sign_snapshot);
+
+        if (retry_connector.poses.empty()) {
+          const std::size_t failure_count = get_reconnect_failure_count() + 1;
+          set_reconnect_failure_count(failure_count);
+
+          if (failure_count >= max_reconnect_failures &&
+            trigger_route_replan("latched connector failed repeatedly"))
+          {
+            return;
+          }
+
+          clear_active_connector_latch("latched connector replan failed");
+          nav_msgs::msg::Path fallback_path = route_snapshot;
+          if (PrunePathPrefix(&fallback_path, start, true)) {
+            store_connector_path(fallback_path);
+            publish_path(fallback_path);
+            SwitchPlannerMode(
+              PlannerMode::kRouteFollow,
+              "latched connector failed, fallback to route",
+              ReconnectResult::kConnectorFailed);
+          } else {
+            SwitchPlannerMode(
+              PlannerMode::kSafeStop,
+              "latched connector failed and fallback route invalid",
+              ReconnectResult::kConnectorFailed);
+          }
+          return;
+        }
+
+        nav_msgs::msg::Path composed_full =
+          ComposeConnectorWithRouteTail(
+          retry_connector,
+          route_snapshot,
+          active_route_anchor_index_snapshot);
+        nav_msgs::msg::Path composed_to_publish = composed_full;
+        if (composed_full.poses.empty() || !PrunePathPrefix(&composed_to_publish, start, true)) {
+          clear_active_connector_latch("latched connector compose failed");
+          SwitchPlannerMode(
+            PlannerMode::kRouteFollow,
+            "latched connector compose failed, release latch",
+            ReconnectResult::kConnectorFailed);
+          store_connector_path(route_snapshot);
+          publish_path(route_snapshot);
+          return;
+        }
+
+        {
+          std::lock_guard<std::mutex> lock(plan_state_mutex_);
+          global_dwa_path_ = composed_to_publish;
+          active_connector_path_ = composed_full;
+          ++connector_version_;
+          consecutive_reconnect_failures_ = 0;
+          last_successful_reconnect_time_ = now;
+        }
+
+        publish_path(composed_to_publish);
+        SwitchPlannerMode(
+          PlannerMode::kLockConnector,
+          "refresh connector path to latched goal",
+          ReconnectResult::kSuccess);
+        return;
+      }
+
+      set_reconnect_failure_count(0);
+      store_connector_path(locked_path);
+      publish_path(locked_path);
+      SwitchPlannerMode(
+        PlannerMode::kLockConnector,
+        "keep latched connector",
+        ReconnectResult::kSuccess);
+      return;
+    }
+  }
+
   if (!connector_snapshot.poses.empty() && ShouldLockStartupReplan(connector_snapshot, start)) {
     store_connector_path(connector_snapshot);
     publish_path(connector_snapshot);
@@ -1055,7 +1323,7 @@ void DWA_GlobalPlanner::determineDWAPlan()
     const std::size_t failure_count = get_reconnect_failure_count() + 1;
     set_reconnect_failure_count(failure_count);
 
-    if (failure_count >= static_cast<std::size_t>(max_reconnect_failures_before_global_replan_) &&
+    if (failure_count >= max_reconnect_failures &&
       trigger_route_replan("corridor extraction failed repeatedly"))
     {
       return;
@@ -1085,6 +1353,7 @@ void DWA_GlobalPlanner::determineDWAPlan()
 
   if (!reconnect_required) {
     set_reconnect_failure_count(0);
+    clear_active_connector_latch("corridor tracking became feasible");
 
     nav_msgs::msg::Path follow_path =
       !connector_snapshot.poses.empty() ? connector_snapshot : route_snapshot;
@@ -1164,7 +1433,7 @@ void DWA_GlobalPlanner::determineDWAPlan()
     const std::size_t failure_count = get_reconnect_failure_count() + 1;
     set_reconnect_failure_count(failure_count);
 
-    if (failure_count >= static_cast<std::size_t>(max_reconnect_failures_before_global_replan_) &&
+    if (failure_count >= max_reconnect_failures &&
       trigger_route_replan("connector planning failed repeatedly"))
     {
       return;
@@ -1188,9 +1457,10 @@ void DWA_GlobalPlanner::determineDWAPlan()
     return;
   }
 
-  nav_msgs::msg::Path composed_path =
+  nav_msgs::msg::Path composed_path_full =
     ComposeConnectorWithRouteTail(connector_path, route_snapshot, route_anchor_index);
-  if (composed_path.poses.empty() || !PrunePathPrefix(&composed_path, start, true)) {
+  nav_msgs::msg::Path composed_path_to_publish = composed_path_full;
+  if (composed_path_full.poses.empty() || !PrunePathPrefix(&composed_path_to_publish, start, true)) {
     const std::size_t failure_count = get_reconnect_failure_count() + 1;
     set_reconnect_failure_count(failure_count);
 
@@ -1205,25 +1475,26 @@ void DWA_GlobalPlanner::determineDWAPlan()
 
   {
     std::lock_guard<std::mutex> lock(plan_state_mutex_);
-    global_dwa_path_ = composed_path;
+    global_dwa_path_ = composed_path_to_publish;
+    active_connector_latched_ = true;
+    active_reconnect_goal_ = reconnect_goal;
+    active_route_anchor_index_ = route_anchor_index;
+    active_connector_start_time_ = now;
+    active_connector_route_version_ = route_version_snapshot;
+    active_connector_path_ = composed_path_full;
+    active_connector_start_pose_ = start;
+    active_connector_has_goal_heading_ = force_use_goal_heading;
+    active_connector_preferred_turn_sign_ = preferred_turn_sign;
     ++connector_version_;
     consecutive_reconnect_failures_ = 0;
     last_successful_reconnect_time_ = now;
   }
 
-  publish_path(composed_path);
-
-  if (ShouldLockStartupReplan(composed_path, start)) {
-    SwitchPlannerMode(
-      PlannerMode::kLockConnector,
-      "new connector generated and startup lock active",
-      ReconnectResult::kSuccess);
-  } else {
-    SwitchPlannerMode(
-      PlannerMode::kRouteFollow,
-      "connector refreshed successfully",
-      ReconnectResult::kSuccess);
-  }
+  publish_path(composed_path_to_publish);
+  SwitchPlannerMode(
+    PlannerMode::kLockConnector,
+    "new connector latched to fixed reconnect goal",
+    ReconnectResult::kSuccess);
 }
 
 }  // namespace global_planner

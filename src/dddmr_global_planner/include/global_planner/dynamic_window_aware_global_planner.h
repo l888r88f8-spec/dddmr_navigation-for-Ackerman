@@ -129,11 +129,23 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       double preferred_turn_sign_lookahead_distance_;
       double min_force_goal_heading_distance_;
       double max_force_goal_heading_angle_;
+      double connector_goal_tolerance_;
+      double connector_commit_distance_;
+      double connector_timeout_sec_;
       std::size_t route_version_;
       std::size_t connector_version_;
       rclcpp::Time last_successful_reconnect_time_;
       rclcpp::Time last_global_replan_time_;
       std::size_t consecutive_reconnect_failures_;
+      bool active_connector_latched_;
+      geometry_msgs::msg::PoseStamped active_reconnect_goal_;
+      std::size_t active_route_anchor_index_;
+      rclcpp::Time active_connector_start_time_;
+      std::size_t active_connector_route_version_;
+      nav_msgs::msg::Path active_connector_path_;
+      geometry_msgs::msg::PoseStamped active_connector_start_pose_;
+      bool active_connector_has_goal_heading_;
+      int active_connector_preferred_turn_sign_;
 
       enum class PlannerMode
       {
@@ -210,6 +222,12 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       bool ShouldLockStartupReplan(
         const nav_msgs::msg::Path & dwa_path,
         const geometry_msgs::msg::PoseStamped & robot_pose) const;
+      double ComputeDistanceToPath(
+        const nav_msgs::msg::Path & path,
+        const geometry_msgs::msg::PoseStamped & pose) const;
+      double EstimateProgressAlongPath(
+        const nav_msgs::msg::Path & path,
+        const geometry_msgs::msg::PoseStamped & pose) const;
       const char * PlannerModeToString(PlannerMode mode) const;
       const char * ReconnectResultToString(ReconnectResult result) const;
       void SwitchPlannerMode(
