@@ -120,6 +120,9 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       double recompute_frequency_;
       double startup_replan_lock_distance_;
       double startup_replan_lock_offtrack_tolerance_;
+      double preferred_turn_sign_lookahead_distance_;
+      double min_force_goal_heading_distance_;
+      double max_force_goal_heading_angle_;
       
       pcl::KdTreeFLANN<pcl::PointXYZ>::Ptr kdtree_global_path_; 
       pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_global_path_;
@@ -132,7 +135,16 @@ class DWA_GlobalPlanner : public rclcpp::Node {
         const nav_msgs::msg::Path & path,
         std::size_t pivot_index,
         double * yaw) const;
-      int EstimatePreferredTurnSign(const nav_msgs::msg::Path & path) const;
+      bool ExtractPoseYaw(
+        const geometry_msgs::msg::PoseStamped & pose,
+        double * yaw) const;
+      std::size_t FindNearestPathIndex(
+        const nav_msgs::msg::Path & path,
+        const geometry_msgs::msg::PoseStamped & pose) const;
+      int EstimatePreferredTurnSignAhead(
+        const nav_msgs::msg::Path & path,
+        std::size_t start_index,
+        double max_forward_distance) const;
       bool ShouldLockStartupReplan(
         const nav_msgs::msg::Path & dwa_path,
         const geometry_msgs::msg::PoseStamped & robot_pose) const;

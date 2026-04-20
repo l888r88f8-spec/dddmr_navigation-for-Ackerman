@@ -153,6 +153,16 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   this->get_parameter("hybrid_astar.heuristic_heading_weight", forward_hybrid_astar_config_.heuristic_heading_weight);
   declare_parameter("hybrid_astar.turn_side_hysteresis_penalty", rclcpp::ParameterValue(0.8));
   this->get_parameter("hybrid_astar.turn_side_hysteresis_penalty", forward_hybrid_astar_config_.turn_side_hysteresis_penalty);
+  declare_parameter("hybrid_astar.rearward_check_distance", rclcpp::ParameterValue(1.5));
+  this->get_parameter("hybrid_astar.rearward_check_distance", forward_hybrid_astar_config_.rearward_check_distance);
+  declare_parameter("hybrid_astar.rearward_allowance", rclcpp::ParameterValue(0.05));
+  this->get_parameter("hybrid_astar.rearward_allowance", forward_hybrid_astar_config_.rearward_allowance);
+  declare_parameter("hybrid_astar.rearward_excursion_penalty", rclcpp::ParameterValue(4.0));
+  this->get_parameter("hybrid_astar.rearward_excursion_penalty", forward_hybrid_astar_config_.rearward_excursion_penalty);
+  declare_parameter("hybrid_astar.rearward_hard_reject_distance", rclcpp::ParameterValue(0.20));
+  this->get_parameter(
+    "hybrid_astar.rearward_hard_reject_distance",
+    forward_hybrid_astar_config_.rearward_hard_reject_distance);
 
   RCLCPP_INFO(
     this->get_logger(),

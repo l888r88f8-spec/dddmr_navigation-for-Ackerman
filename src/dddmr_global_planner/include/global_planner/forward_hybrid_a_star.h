@@ -42,6 +42,10 @@ public:
     double obstacle_penalty_weight = 1.0;
     double heuristic_heading_weight = 0.2;
     double turn_side_hysteresis_penalty = 0.8;
+    double rearward_check_distance = 1.5;
+    double rearward_allowance = 0.05;
+    double rearward_excursion_penalty = 4.0;
+    double rearward_hard_reject_distance = 0.20;
   };
 
   explicit ForwardHybridAStar(
@@ -113,6 +117,7 @@ private:
     double path_length = 0.0;
     double heading_change = 0.0;
     double obstacle_penalty = 0.0;
+    double rearward_penalty = 0.0;
   };
 
   static constexpr std::size_t kInvalidStateId = std::numeric_limits<std::size_t>::max();
@@ -171,6 +176,9 @@ private:
   bool RolloutPrimitive(
     const NodeRecord & parent,
     int primitive_index,
+    double planning_start_x,
+    double planning_start_y,
+    double planning_start_yaw,
     PrimitiveResult * primitive_result,
     std::vector<SamplePose> * sampled_poses) const;
 

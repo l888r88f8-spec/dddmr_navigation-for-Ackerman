@@ -30,6 +30,10 @@
 */
 #include <global_planner/dynamic_window_aware_global_planner.h>
 
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2/LinearMath/Quaternion.h>
+
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -37,6 +41,22 @@ using namespace std::chrono_literals;
 
 namespace global_planner
 {
+
+namespace
+{
+constexpr double kPi = 3.14159265358979323846;
+
+double NormalizeAngle(double angle)
+{
+  while (angle > kPi) {
+    angle -= 2.0 * kPi;
+  }
+  while (angle <= -kPi) {
+    angle += 2.0 * kPi;
+  }
+  return angle;
+}
+}  // namespace
 
 DWA_GlobalPlanner::DWA_GlobalPlanner(const std::string& name)
     : Node(name) 
@@ -113,6 +133,29 @@ void DWA_GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3
     this->get_logger(),
     "startup_replan_lock_offtrack_tolerance: %.2f",
     startup_replan_lock_offtrack_tolerance_);
+  declare_parameter("preferred_turn_sign_lookahead_distance", rclcpp::ParameterValue(1.8));
+  this->get_parameter(
+    "preferred_turn_sign_lookahead_distance",
+    preferred_turn_sign_lookahead_distance_);
+  preferred_turn_sign_lookahead_distance_ = std::max(preferred_turn_sign_lookahead_distance_, 0.5);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "preferred_turn_sign_lookahead_distance: %.2f",
+    preferred_turn_sign_lookahead_distance_);
+  declare_parameter("min_force_goal_heading_distance", rclcpp::ParameterValue(3.0));
+  this->get_parameter("min_force_goal_heading_distance", min_force_goal_heading_distance_);
+  min_force_goal_heading_distance_ = std::max(min_force_goal_heading_distance_, 0.0);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "min_force_goal_heading_distance: %.2f",
+    min_force_goal_heading_distance_);
+  declare_parameter("max_force_goal_heading_angle", rclcpp::ParameterValue(1.75));
+  this->get_parameter("max_force_goal_heading_angle", max_force_goal_heading_angle_);
+  max_force_goal_heading_angle_ = std::clamp(max_force_goal_heading_angle_, 0.0, kPi);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "max_force_goal_heading_angle: %.2f",
+    max_force_goal_heading_angle_);
   
   pub_path_ = this->create_publisher<nav_msgs::msg::Path>("awared_global_path", 1);
 
@@ -291,13 +334,88 @@ bool DWA_GlobalPlanner::ComputePathTangentYaw(
   return false;
 }
 
-int DWA_GlobalPlanner::EstimatePreferredTurnSign(const nav_msgs::msg::Path & path) const
+bool DWA_GlobalPlanner::ExtractPoseYaw(
+  const geometry_msgs::msg::PoseStamped & pose,
+  double * yaw) const
 {
-  if (path.poses.size() < 3) {
+  if (yaw == nullptr) {
+    return false;
+  }
+  const auto & q_msg = pose.pose.orientation;
+  if (!std::isfinite(q_msg.x) || !std::isfinite(q_msg.y) ||
+    !std::isfinite(q_msg.z) || !std::isfinite(q_msg.w))
+  {
+    return false;
+  }
+  const double norm =
+    q_msg.x * q_msg.x + q_msg.y * q_msg.y + q_msg.z * q_msg.z + q_msg.w * q_msg.w;
+  if (norm < 1e-9) {
+    return false;
+  }
+  tf2::Quaternion q(q_msg.x, q_msg.y, q_msg.z, q_msg.w);
+  q.normalize();
+  double roll = 0.0;
+  double pitch = 0.0;
+  double yaw_value = 0.0;
+  tf2::Matrix3x3(q).getRPY(roll, pitch, yaw_value);
+  if (!std::isfinite(yaw_value)) {
+    return false;
+  }
+  *yaw = NormalizeAngle(yaw_value);
+  return true;
+}
+
+std::size_t DWA_GlobalPlanner::FindNearestPathIndex(
+  const nav_msgs::msg::Path & path,
+  const geometry_msgs::msg::PoseStamped & pose) const
+{
+  if (path.poses.empty()) {
     return 0;
   }
 
-  for (std::size_t i = 0; i + 2 < path.poses.size(); ++i) {
+  std::size_t nearest_index = 0;
+  double nearest_sq = std::numeric_limits<double>::infinity();
+  for (std::size_t i = 0; i < path.poses.size(); ++i) {
+    const double dx = path.poses[i].pose.position.x - pose.pose.position.x;
+    const double dy = path.poses[i].pose.position.y - pose.pose.position.y;
+    const double distance_sq = dx * dx + dy * dy;
+    if (distance_sq < nearest_sq) {
+      nearest_sq = distance_sq;
+      nearest_index = i;
+    }
+  }
+  return nearest_index;
+}
+
+int DWA_GlobalPlanner::EstimatePreferredTurnSignAhead(
+  const nav_msgs::msg::Path & path,
+  std::size_t start_index,
+  double max_forward_distance) const
+{
+  // Estimate turn-side preference from the untraversed local path segment.
+  // Do not use historical curvature in the already-traversed path prefix.
+  if (path.poses.size() < 3 || start_index >= path.poses.size()) {
+    return 0;
+  }
+  max_forward_distance = std::max(max_forward_distance, 0.0);
+
+  std::size_t end_index = start_index;
+  double accumulated_distance = 0.0;
+  while (end_index + 1 < path.poses.size() && accumulated_distance < max_forward_distance) {
+    const auto & p0 = path.poses[end_index].pose.position;
+    const auto & p1 = path.poses[end_index + 1].pose.position;
+    const double segment_length = std::hypot(p1.x - p0.x, p1.y - p0.y);
+    if (!std::isfinite(segment_length)) {
+      break;
+    }
+    accumulated_distance += segment_length;
+    ++end_index;
+  }
+  if (end_index <= start_index + 1) {
+    return 0;
+  }
+
+  for (std::size_t i = start_index; i + 2 <= end_index; ++i) {
     const auto & p0 = path.poses[i].pose.position;
     const auto & p1 = path.poses[i + 1].pose.position;
     const auto & p2 = path.poses[i + 2].pose.position;
@@ -492,9 +610,33 @@ void DWA_GlobalPlanner::determineDWAPlan(){
       "Failed to compute tangent yaw for DWA pivot, fallback to position-only heading.");
   }
 
-  const int preferred_turn_sign = EstimatePreferredTurnSign(global_dwa_path_snapshot);
+  int preferred_turn_sign = 0;
+  if (!global_dwa_path_snapshot.poses.empty()) {
+    const std::size_t nearest_index =
+      FindNearestPathIndex(global_dwa_path_snapshot, start);
+    preferred_turn_sign = EstimatePreferredTurnSignAhead(
+      global_dwa_path_snapshot,
+      nearest_index,
+      preferred_turn_sign_lookahead_distance_);
+  }
+
+  bool force_use_goal_heading = false;
+  if (has_tangent_yaw) {
+    double start_yaw = 0.0;
+    if (ExtractPoseYaw(start, &start_yaw)) {
+      const double dx = dwa_goal.pose.position.x - start.pose.position.x;
+      const double dy = dwa_goal.pose.position.y - start.pose.position.y;
+      const double start_goal_distance = std::hypot(dx, dy);
+      const double heading_error = std::abs(NormalizeAngle(tangent_yaw - start_yaw));
+      force_use_goal_heading =
+        std::isfinite(start_goal_distance) &&
+        std::isfinite(heading_error) &&
+        start_goal_distance > min_force_goal_heading_distance_ &&
+        heading_error < max_force_goal_heading_angle_;
+    }
+  }
   nav_msgs::msg::Path dwa_path = global_planner_->makeROSPlan(
-    start, dwa_goal, false, has_tangent_yaw, preferred_turn_sign);
+    start, dwa_goal, false, force_use_goal_heading, preferred_turn_sign);
   dwa_path.header.frame_id = global_frame_;
   dwa_path.header.stamp = clock_->now();
 

@@ -57,6 +57,13 @@ void ForwardHybridAStar::SetConfig(const Config & config)
   config_.goal_position_tolerance = std::max(config_.goal_position_tolerance, 1e-3);
   config_.goal_heading_tolerance = std::max(config_.goal_heading_tolerance, 1e-3);
   config_.turn_side_hysteresis_penalty = std::max(config_.turn_side_hysteresis_penalty, 0.0);
+  config_.rearward_check_distance = std::max(config_.rearward_check_distance, 0.0);
+  config_.rearward_allowance = std::max(config_.rearward_allowance, 0.0);
+  config_.rearward_excursion_penalty = std::max(config_.rearward_excursion_penalty, 0.0);
+  config_.rearward_hard_reject_distance = std::max(config_.rearward_hard_reject_distance, 0.0);
+  if (config_.rearward_hard_reject_distance < config_.rearward_allowance) {
+    config_.rearward_hard_reject_distance = config_.rearward_allowance;
+  }
 
   primitive_steers_.clear();
   primitive_steers_.reserve(5);
@@ -447,6 +454,7 @@ double ForwardHybridAStar::ComputeTransitionCost(
     (std::abs(steer - parent_steer) / steer_norm);
   cost += config_.heading_change_penalty * primitive_result.heading_change;
   cost += config_.obstacle_penalty_weight * primitive_result.obstacle_penalty;
+  cost += primitive_result.rearward_penalty;
 
   // Hysteresis for turn-side stability: penalize selecting the opposite side
   // on the first non-zero steering decision.
@@ -465,6 +473,9 @@ double ForwardHybridAStar::ComputeTransitionCost(
 bool ForwardHybridAStar::RolloutPrimitive(
   const NodeRecord & parent,
   int primitive_index,
+  double planning_start_x,
+  double planning_start_y,
+  double planning_start_yaw,
   PrimitiveResult * primitive_result,
   std::vector<SamplePose> * sampled_poses) const
 {
@@ -498,6 +509,7 @@ bool ForwardHybridAStar::RolloutPrimitive(
 
   double heading_change = 0.0;
   double obstacle_penalty_sum = 0.0;
+  double rearward_penalty_sum = 0.0;
   std::size_t sample_count = 0;
   std::size_t end_ground_index = parent.ground_index;
   double end_projected_z = z;
@@ -530,6 +542,22 @@ bool ForwardHybridAStar::RolloutPrimitive(
       return false;
     }
 
+    // Rearward excursion is evaluated in the current planning-start frame.
+    // It suppresses local reconnect arcs that fold into the vehicle rear side.
+    const double dx_start = x - planning_start_x;
+    const double dy_start = y - planning_start_y;
+    const double distance_from_start = std::hypot(dx_start, dy_start);
+    if (distance_from_start <= config_.rearward_check_distance) {
+      const double x_local =
+        std::cos(planning_start_yaw) * dx_start + std::sin(planning_start_yaw) * dy_start;
+      if (x_local < -config_.rearward_hard_reject_distance) {
+        return false;
+      }
+      if (x_local < -config_.rearward_allowance) {
+        rearward_penalty_sum += config_.rearward_excursion_penalty;
+      }
+    }
+
     if (sampled_poses != nullptr) {
       sampled_poses->push_back(SamplePose{x, y, sample_z, yaw});
     }
@@ -558,6 +586,8 @@ bool ForwardHybridAStar::RolloutPrimitive(
   primitive_result->heading_change = heading_change;
   primitive_result->obstacle_penalty =
     sample_count > 0 ? obstacle_penalty_sum / static_cast<double>(sample_count) : 0.0;
+  primitive_result->rearward_penalty =
+    sample_count > 0 ? rearward_penalty_sum / static_cast<double>(sample_count) : 0.0;
 
   return true;
 }
@@ -697,7 +727,15 @@ bool ForwardHybridAStar::ReconstructPath(
 
     PrimitiveResult primitive_result;
     std::vector<SamplePose> sampled_poses;
-    if (!RolloutPrimitive(*parent, child->primitive_index, &primitive_result, &sampled_poses)) {
+    if (!RolloutPrimitive(
+        *parent,
+        child->primitive_index,
+        start_node->x,
+        start_node->y,
+        start_node->yaw,
+        &primitive_result,
+        &sampled_poses))
+    {
       AppendPose(child->x, child->y, child->z, child->yaw, ros_path);
       continue;
     }
@@ -915,7 +953,15 @@ bool ForwardHybridAStar::MakePlan(
       ++primitive_index)
     {
       PrimitiveResult primitive_result;
-      if (!RolloutPrimitive(current, primitive_index, &primitive_result, nullptr)) {
+      if (!RolloutPrimitive(
+          current,
+          primitive_index,
+          start.pose.position.x,
+          start.pose.position.y,
+          start_yaw,
+          &primitive_result,
+          nullptr))
+      {
         continue;
       }
 
