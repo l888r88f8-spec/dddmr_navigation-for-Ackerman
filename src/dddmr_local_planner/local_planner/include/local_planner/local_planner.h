@@ -259,6 +259,38 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
         const std::string & source_label,
         bool throttle_log) const;
 
+      struct ControllerContext
+      {
+        pcl::PointCloud<pcl::PointXYZI>::Ptr aggregate_observation;
+        pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr aggregate_observation_kdtree;
+        std::vector<perception_3d::PerceptionOpinion> opinions;
+        double current_allowed_max_linear_speed = -1.0;
+      };
+
+      dddmr_sys_core::PlannerState prepareControllerContext(
+        ControllerContext * context);
+      dddmr_sys_core::PlannerState evaluatePerceptionOpinions(
+        const std::vector<perception_3d::PerceptionOpinion> & opinions) const;
+      void updateCriticSharedData(
+        const pcl::PointCloud<pcl::PointXYZI>::Ptr & aggregate_observation,
+        const pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr & aggregate_observation_kdtree);
+      bool selectLookaheadPose(
+        double lookahead_distance,
+        geometry_msgs::msg::PoseStamped * lookahead_pose) const;
+      bool buildGoalAlignmentReference(tf2::Transform * reference_pose) const;
+      double getDistanceToGoal() const;
+      double getMaxAckermannCurvature() const;
+      pcl::PointCloud<pcl::PointXYZ> transformRobotCuboid(
+        const geometry_msgs::msg::PoseStamped & pose) const;
+      base_trajectory::cuboid_min_max_t computeCuboidMinMax(
+        const pcl::PointCloud<pcl::PointXYZ> & cuboid) const;
+      base_trajectory::Trajectory buildPredictedTrajectory(
+        double linear_velocity,
+        double angular_velocity) const;
+      dddmr_sys_core::PlannerState computeRppControlCommand(
+        const std::string & controller_name,
+        geometry_msgs::msg::Twist * cmd_vel);
+
     protected:
 
       std::shared_ptr<tf2_ros::TransformListener> tfl_;
@@ -268,6 +300,23 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       nav_msgs::msg::Path prune_plan_;
       pcl::PointCloud<pcl::PointXYZI> pcl_prune_plan_; //@ will be copied to perception_ros, so do not use shared_ptr
       std::string name_;
+      std::string controller_backend_;
+      std::string rpp_critic_trajectory_generator_name_;
+      std::vector<pcl::PointXYZ> robot_cuboid_vertices_;
+      double rpp_nominal_linear_speed_;
+      double rpp_min_linear_speed_;
+      double rpp_alignment_linear_speed_;
+      double rpp_goal_slowdown_distance_;
+      double rpp_min_lookahead_distance_;
+      double rpp_max_lookahead_distance_;
+      double rpp_lookahead_time_;
+      double rpp_alignment_lookahead_distance_;
+      double rpp_max_lateral_accel_;
+      double rpp_prediction_horizon_sec_;
+      double rpp_prediction_step_sec_;
+      double rpp_wheelbase_;
+      double rpp_max_steer_;
+      double rpp_max_angular_velocity_;
       
 };
 

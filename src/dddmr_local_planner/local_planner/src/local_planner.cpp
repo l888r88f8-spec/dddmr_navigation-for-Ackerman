@@ -35,6 +35,19 @@
 #include <limits>
 
 namespace local_planner {
+namespace
+{
+std::string normalizeControllerBackend(const std::string & backend)
+{
+  if(backend == "regulated_pure_pursuit" || backend == "rpp"){
+    return "regulated_pure_pursuit";
+  }
+  if(backend == "legacy_rollout" || backend == "legacy"){
+    return "legacy_rollout";
+  }
+  return backend;
+}
+}
 
 Local_Planner::Local_Planner(const std::string& name): Node(name)
 {
@@ -54,6 +67,22 @@ Local_Planner::Local_Planner(const std::string& name): Node(name)
   last_heading_reference_valid_ = false;
   heading_reference_stale_cycles_ = 0;
   consecutive_heading_reference_failure_cycles_ = 0;
+  controller_backend_ = "legacy_rollout";
+  rpp_critic_trajectory_generator_name_ = "ackermann_simple";
+  rpp_nominal_linear_speed_ = 1.0;
+  rpp_min_linear_speed_ = 0.15;
+  rpp_alignment_linear_speed_ = 0.25;
+  rpp_goal_slowdown_distance_ = 1.5;
+  rpp_min_lookahead_distance_ = 1.0;
+  rpp_max_lookahead_distance_ = 3.0;
+  rpp_lookahead_time_ = 1.5;
+  rpp_alignment_lookahead_distance_ = 1.0;
+  rpp_max_lateral_accel_ = 1.5;
+  rpp_prediction_horizon_sec_ = 1.5;
+  rpp_prediction_step_sec_ = 0.1;
+  rpp_wheelbase_ = 0.55;
+  rpp_max_steer_ = 0.69;
+  rpp_max_angular_velocity_ = 1.2;
 }
 
 void Local_Planner::initial(
@@ -211,6 +240,68 @@ void Local_Planner::initial(
   declare_parameter("controller_frequency", rclcpp::ParameterValue(10.0));
   this->get_parameter("controller_frequency", controller_frequency_);
   RCLCPP_INFO(this->get_logger(), "controller_frequency: %.2f", controller_frequency_);
+
+  declare_parameter("controller_backend", rclcpp::ParameterValue("legacy_rollout"));
+  this->get_parameter("controller_backend", controller_backend_);
+  controller_backend_ = normalizeControllerBackend(controller_backend_);
+  if(controller_backend_ != "legacy_rollout" &&
+     controller_backend_ != "regulated_pure_pursuit")
+  {
+    RCLCPP_WARN(
+      this->get_logger(),
+      "unknown controller_backend '%s', fallback to legacy_rollout",
+      controller_backend_.c_str());
+    controller_backend_ = "legacy_rollout";
+  }
+  RCLCPP_INFO(this->get_logger(), "controller_backend: %s", controller_backend_.c_str());
+
+  declare_parameter("rpp.critic_trajectory_generator_name", rclcpp::ParameterValue("ackermann_simple"));
+  this->get_parameter("rpp.critic_trajectory_generator_name", rpp_critic_trajectory_generator_name_);
+  declare_parameter("rpp.nominal_linear_speed", rclcpp::ParameterValue(1.0));
+  this->get_parameter("rpp.nominal_linear_speed", rpp_nominal_linear_speed_);
+  declare_parameter("rpp.min_linear_speed", rclcpp::ParameterValue(0.15));
+  this->get_parameter("rpp.min_linear_speed", rpp_min_linear_speed_);
+  declare_parameter("rpp.alignment_linear_speed", rclcpp::ParameterValue(0.25));
+  this->get_parameter("rpp.alignment_linear_speed", rpp_alignment_linear_speed_);
+  declare_parameter("rpp.goal_slowdown_distance", rclcpp::ParameterValue(1.5));
+  this->get_parameter("rpp.goal_slowdown_distance", rpp_goal_slowdown_distance_);
+  declare_parameter("rpp.min_lookahead_distance", rclcpp::ParameterValue(1.0));
+  this->get_parameter("rpp.min_lookahead_distance", rpp_min_lookahead_distance_);
+  declare_parameter("rpp.max_lookahead_distance", rclcpp::ParameterValue(3.0));
+  this->get_parameter("rpp.max_lookahead_distance", rpp_max_lookahead_distance_);
+  declare_parameter("rpp.lookahead_time", rclcpp::ParameterValue(1.5));
+  this->get_parameter("rpp.lookahead_time", rpp_lookahead_time_);
+  declare_parameter("rpp.alignment_lookahead_distance", rclcpp::ParameterValue(1.0));
+  this->get_parameter("rpp.alignment_lookahead_distance", rpp_alignment_lookahead_distance_);
+  declare_parameter("rpp.max_lateral_accel", rclcpp::ParameterValue(1.5));
+  this->get_parameter("rpp.max_lateral_accel", rpp_max_lateral_accel_);
+  declare_parameter("rpp.prediction_horizon_sec", rclcpp::ParameterValue(1.5));
+  this->get_parameter("rpp.prediction_horizon_sec", rpp_prediction_horizon_sec_);
+  declare_parameter("rpp.prediction_step_sec", rclcpp::ParameterValue(0.1));
+  this->get_parameter("rpp.prediction_step_sec", rpp_prediction_step_sec_);
+  declare_parameter("rpp.wheelbase", rclcpp::ParameterValue(0.55));
+  this->get_parameter("rpp.wheelbase", rpp_wheelbase_);
+  declare_parameter("rpp.max_steer", rclcpp::ParameterValue(0.69));
+  this->get_parameter("rpp.max_steer", rpp_max_steer_);
+  declare_parameter("rpp.max_angular_velocity", rclcpp::ParameterValue(1.2));
+  this->get_parameter("rpp.max_angular_velocity", rpp_max_angular_velocity_);
+  if(controller_backend_ == "regulated_pure_pursuit"){
+    RCLCPP_INFO(this->get_logger(), "rpp.critic_trajectory_generator_name: %s", rpp_critic_trajectory_generator_name_.c_str());
+    RCLCPP_INFO(this->get_logger(), "rpp.nominal_linear_speed: %.2f", rpp_nominal_linear_speed_);
+    RCLCPP_INFO(this->get_logger(), "rpp.min_linear_speed: %.2f", rpp_min_linear_speed_);
+    RCLCPP_INFO(this->get_logger(), "rpp.alignment_linear_speed: %.2f", rpp_alignment_linear_speed_);
+    RCLCPP_INFO(this->get_logger(), "rpp.goal_slowdown_distance: %.2f", rpp_goal_slowdown_distance_);
+    RCLCPP_INFO(this->get_logger(), "rpp.min_lookahead_distance: %.2f", rpp_min_lookahead_distance_);
+    RCLCPP_INFO(this->get_logger(), "rpp.max_lookahead_distance: %.2f", rpp_max_lookahead_distance_);
+    RCLCPP_INFO(this->get_logger(), "rpp.lookahead_time: %.2f", rpp_lookahead_time_);
+    RCLCPP_INFO(this->get_logger(), "rpp.alignment_lookahead_distance: %.2f", rpp_alignment_lookahead_distance_);
+    RCLCPP_INFO(this->get_logger(), "rpp.max_lateral_accel: %.2f", rpp_max_lateral_accel_);
+    RCLCPP_INFO(this->get_logger(), "rpp.prediction_horizon_sec: %.2f", rpp_prediction_horizon_sec_);
+    RCLCPP_INFO(this->get_logger(), "rpp.prediction_step_sec: %.2f", rpp_prediction_step_sec_);
+    RCLCPP_INFO(this->get_logger(), "rpp.wheelbase: %.2f", rpp_wheelbase_);
+    RCLCPP_INFO(this->get_logger(), "rpp.max_steer: %.2f", rpp_max_steer_);
+    RCLCPP_INFO(this->get_logger(), "rpp.max_angular_velocity: %.2f", rpp_max_angular_velocity_);
+  }
 
   declare_parameter("debug_publish.robot_cuboid", rclcpp::ParameterValue(false));
   this->get_parameter("debug_publish.robot_cuboid", debug_publish_robot_cuboid_);
@@ -376,6 +467,319 @@ void Local_Planner::publishDebugPath(
       local_route_progress_index_,
       output.poses.size());
   }
+}
+
+dddmr_sys_core::PlannerState Local_Planner::prepareControllerContext(
+  ControllerContext * context)
+{
+  if(context == nullptr){
+    return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
+  }
+
+  auto * stacked_perception = perception_3d_ros_ ? perception_3d_ros_->getStackedPerception() : nullptr;
+  auto perception_shared_data = perception_3d_ros_ ? perception_3d_ros_->getSharedDataPtr() : nullptr;
+
+  if(!got_odom_){
+    RCLCPP_ERROR(this->get_logger().get_child(name_), "Odom is not received.");
+    return dddmr_sys_core::TF_FAIL;
+  }
+
+  if(!stacked_perception || !perception_shared_data){
+    RCLCPP_ERROR(this->get_logger().get_child(name_), "Perception 3D shared data is not ready.");
+    return dddmr_sys_core::PERCEPTION_MALFUNCTION;
+  }
+
+  if(!stacked_perception->isSensorOK()){
+    RCLCPP_ERROR(this->get_logger().get_child(name_), "Perception 3D is not ok.");
+    return dddmr_sys_core::PERCEPTION_MALFUNCTION;
+  }
+
+  control_loop_time_ = clock_->now();
+  bool have_usable_prune_plan = false;
+
+  {
+    std::unique_lock<perception_3d::StackedPerception::mutex_t> pct_lock(*(stacked_perception->getMutex()));
+    have_usable_prune_plan = prunePlan(forward_prune_, backward_prune_);
+    perception_shared_data->pcl_prune_plan_ = pcl_prune_plan_;
+    context->aggregate_observation = perception_shared_data->aggregate_observation_;
+    context->aggregate_observation_kdtree = perception_shared_data->aggregate_observation_kdtree_;
+    context->current_allowed_max_linear_speed = perception_shared_data->current_allowed_max_linear_speed_;
+    context->opinions = stacked_perception->getOpinions();
+  }
+
+  if(!context->aggregate_observation){
+    context->aggregate_observation = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+  }
+
+  if(debug_publish_aggregated_pc_ && pub_aggregate_observation_->get_subscription_count() > 0){
+    sensor_msgs::msg::PointCloud2 ros2_aggregate_onservation;
+    pcl::toROSMsg(*context->aggregate_observation, ros2_aggregate_onservation);
+    pub_aggregate_observation_->publish(ros2_aggregate_onservation);
+  }
+
+  if((clock_->now()-trans_gbl2b_.header.stamp).seconds() > 2.0){
+    RCLCPP_ERROR(this->get_logger().get_child(name_), "TF out of date in local planner, the local planner wont go further.");
+    return dddmr_sys_core::TF_FAIL;
+  }
+
+  if(!have_usable_prune_plan){
+    const bool deviation_timeout =
+      (clock_->now() - last_valid_prune_plan_).seconds() >= prune_plane_timeout_;
+    const bool deviation_distance =
+      last_robot_to_route_distance_ > causal_prune_max_lateral_distance_;
+    const bool deviation_confirmed =
+      consecutive_prune_failure_cycles_ > max_prune_failure_cycles_ &&
+      deviation_timeout &&
+      deviation_distance;
+
+    if(deviation_confirmed){
+      RCLCPP_FATAL(
+        this->get_logger().get_child(name_),
+        "deviation confirmed after consecutive prune failures, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f",
+        route_version_,
+        goal_seq_,
+        route_source_label_.c_str(),
+        local_route_progress_index_,
+        consecutive_prune_failure_cycles_,
+        last_robot_to_route_distance_);
+      RCLCPP_FATAL(
+        this->get_logger().get_child(name_),
+        "deviation from route reference exceeded tolerance, controller returns PRUNE_PLAN_FAIL.");
+      return dddmr_sys_core::PRUNE_PLAN_FAIL;
+    }
+
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "transient prune failure, not treating as deviation yet, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f",
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str(),
+      local_route_progress_index_,
+      consecutive_prune_failure_cycles_,
+      last_robot_to_route_distance_);
+    return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
+  }
+
+  return dddmr_sys_core::TRAJECTORY_FOUND;
+}
+
+dddmr_sys_core::PlannerState Local_Planner::evaluatePerceptionOpinions(
+  const std::vector<perception_3d::PerceptionOpinion> & opinions) const
+{
+  for(auto opinion_it = opinions.begin(); opinion_it != opinions.end(); ++opinion_it){
+    if((*opinion_it) == perception_3d::PATH_BLOCKED_WAIT){
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger().get_child(name_), *clock_, 5000,
+        "Found the prune plan is blocked, go to wait state.");
+      return dddmr_sys_core::PATH_BLOCKED_WAIT;
+    }
+    if((*opinion_it) == perception_3d::PATH_BLOCKED_REPLANNING){
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger().get_child(name_), *clock_, 5000,
+        "Found the prune plan is blocked, go to replanning.");
+      return dddmr_sys_core::PATH_BLOCKED_REPLANNING;
+    }
+  }
+  return dddmr_sys_core::TRAJECTORY_FOUND;
+}
+
+void Local_Planner::updateCriticSharedData(
+  const pcl::PointCloud<pcl::PointXYZI>::Ptr & aggregate_observation,
+  const pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr & aggregate_observation_kdtree)
+{
+  mpc_critics_ros_->getSharedDataPtr()->robot_pose_ = trans_gbl2b_;
+  mpc_critics_ros_->getSharedDataPtr()->robot_state_ = robot_state_;
+  mpc_critics_ros_->getSharedDataPtr()->pcl_perception_ = aggregate_observation;
+  mpc_critics_ros_->getSharedDataPtr()->pcl_perception_kdtree_ = aggregate_observation_kdtree;
+  mpc_critics_ros_->getSharedDataPtr()->prune_plan_ = prune_plan_;
+  mpc_critics_ros_->updateSharedData();
+}
+
+bool Local_Planner::selectLookaheadPose(
+  double lookahead_distance,
+  geometry_msgs::msg::PoseStamped * lookahead_pose) const
+{
+  if(lookahead_pose == nullptr || prune_plan_.poses.empty()){
+    return false;
+  }
+
+  const double robot_x = trans_gbl2b_.transform.translation.x;
+  const double robot_y = trans_gbl2b_.transform.translation.y;
+  std::size_t closest_index = 0;
+  double closest_distance = std::numeric_limits<double>::infinity();
+
+  for(std::size_t i = 0; i < prune_plan_.poses.size(); ++i){
+    const double dx = prune_plan_.poses[i].pose.position.x - robot_x;
+    const double dy = prune_plan_.poses[i].pose.position.y - robot_y;
+    const double distance = std::sqrt(dx * dx + dy * dy);
+    if(distance < closest_distance){
+      closest_distance = distance;
+      closest_index = i;
+    }
+  }
+
+  double accumulated_distance = 0.0;
+  geometry_msgs::msg::PoseStamped previous_pose = prune_plan_.poses[closest_index];
+  for(std::size_t i = closest_index; i < prune_plan_.poses.size(); ++i){
+    if(i > closest_index){
+      accumulated_distance += getDistanceBTWPoseStamp(previous_pose, prune_plan_.poses[i]);
+      previous_pose = prune_plan_.poses[i];
+    }
+
+    if(accumulated_distance + 1e-6 < lookahead_distance && i + 1 < prune_plan_.poses.size()){
+      continue;
+    }
+
+    const double robot_yaw = getRobotYaw();
+    const double dx = prune_plan_.poses[i].pose.position.x - robot_x;
+    const double dy = prune_plan_.poses[i].pose.position.y - robot_y;
+    const double x_local =
+      std::cos(robot_yaw) * dx + std::sin(robot_yaw) * dy;
+    if(x_local > 0.05 || i + 1 == prune_plan_.poses.size()){
+      *lookahead_pose = prune_plan_.poses[i];
+      return true;
+    }
+  }
+
+  *lookahead_pose = prune_plan_.poses.back();
+  return true;
+}
+
+bool Local_Planner::buildGoalAlignmentReference(tf2::Transform * reference_pose) const
+{
+  if(reference_pose == nullptr || global_plan_.empty()){
+    return false;
+  }
+
+  if(buildHeadingReferenceFromPoseOrientation(global_plan_.back(), reference_pose)){
+    return true;
+  }
+
+  if(global_plan_.size() < 2){
+    return false;
+  }
+
+  const std::size_t start_index = global_plan_.size() >= 2 ? global_plan_.size() - 2 : 0;
+  return buildHeadingReferenceFromPlan(
+    global_plan_,
+    start_index,
+    std::max(0.05, min_heading_reference_length_),
+    reference_pose);
+}
+
+double Local_Planner::getDistanceToGoal() const
+{
+  if(global_plan_.empty()){
+    return std::numeric_limits<double>::infinity();
+  }
+
+  const auto & goal_pose = global_plan_.back();
+  const double dx = trans_gbl2b_.transform.translation.x - goal_pose.pose.position.x;
+  const double dy = trans_gbl2b_.transform.translation.y - goal_pose.pose.position.y;
+  const double dz = trans_gbl2b_.transform.translation.z - goal_pose.pose.position.z;
+  return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+double Local_Planner::getMaxAckermannCurvature() const
+{
+  return std::tan(rpp_max_steer_) / std::max(rpp_wheelbase_, 1e-6);
+}
+
+pcl::PointCloud<pcl::PointXYZ> Local_Planner::transformRobotCuboid(
+  const geometry_msgs::msg::PoseStamped & pose) const
+{
+  pcl::PointCloud<pcl::PointXYZ> cuboid;
+  cuboid.reserve(robot_cuboid_vertices_.size());
+
+  tf2::Quaternion q;
+  tf2::fromMsg(pose.pose.orientation, q);
+  double roll = 0.0;
+  double pitch = 0.0;
+  double yaw = 0.0;
+  tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+  const double cos_yaw = std::cos(yaw);
+  const double sin_yaw = std::sin(yaw);
+
+  for(const auto & vertex : robot_cuboid_vertices_){
+    pcl::PointXYZ transformed_point;
+    transformed_point.x =
+      pose.pose.position.x + cos_yaw * vertex.x - sin_yaw * vertex.y;
+    transformed_point.y =
+      pose.pose.position.y + sin_yaw * vertex.x + cos_yaw * vertex.y;
+    transformed_point.z = pose.pose.position.z + vertex.z;
+    cuboid.push_back(transformed_point);
+  }
+
+  return cuboid;
+}
+
+base_trajectory::cuboid_min_max_t Local_Planner::computeCuboidMinMax(
+  const pcl::PointCloud<pcl::PointXYZ> & cuboid) const
+{
+  pcl::PointXYZ min_pt;
+  pcl::PointXYZ max_pt;
+  min_pt.x = min_pt.y = min_pt.z = std::numeric_limits<float>::max();
+  max_pt.x = max_pt.y = max_pt.z = -std::numeric_limits<float>::max();
+
+  for(const auto & point : cuboid.points){
+    min_pt.x = std::min(min_pt.x, point.x);
+    min_pt.y = std::min(min_pt.y, point.y);
+    min_pt.z = std::min(min_pt.z, point.z);
+    max_pt.x = std::max(max_pt.x, point.x);
+    max_pt.y = std::max(max_pt.y, point.y);
+    max_pt.z = std::max(max_pt.z, point.z);
+  }
+
+  return {min_pt, max_pt};
+}
+
+base_trajectory::Trajectory Local_Planner::buildPredictedTrajectory(
+  double linear_velocity,
+  double angular_velocity) const
+{
+  const double time_step = std::max(0.02, rpp_prediction_step_sec_);
+  const double horizon = std::max(time_step, rpp_prediction_horizon_sec_);
+  const unsigned int steps =
+    std::max<unsigned int>(2, static_cast<unsigned int>(std::ceil(horizon / time_step)) + 1);
+
+  base_trajectory::Trajectory trajectory(
+    linear_velocity,
+    0.0,
+    angular_velocity,
+    time_step,
+    steps);
+  trajectory.cost_ = 0.0;
+
+  double x = trans_gbl2b_.transform.translation.x;
+  double y = trans_gbl2b_.transform.translation.y;
+  double z = trans_gbl2b_.transform.translation.z;
+  double yaw = getRobotYaw();
+
+  for(unsigned int i = 0; i < steps; ++i){
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header.frame_id = global_frame_;
+    pose.header.stamp = clock_->now();
+    pose.pose.position.x = x;
+    pose.pose.position.y = y;
+    pose.pose.position.z = z;
+    tf2::Quaternion q;
+    q.setRPY(0.0, 0.0, yaw);
+    q.normalize();
+    pose.pose.orientation = tf2::toMsg(q);
+
+    auto cuboid = transformRobotCuboid(pose);
+    trajectory.addPoint(pose, cuboid, computeCuboidMinMax(cuboid));
+
+    if(i + 1 >= steps){
+      break;
+    }
+
+    x += linear_velocity * std::cos(yaw + angular_velocity * time_step * 0.5) * time_step;
+    y += linear_velocity * std::sin(yaw + angular_velocity * time_step * 0.5) * time_step;
+    yaw += angular_velocity * time_step;
+  }
+
+  return trajectory;
 }
 
 void Local_Planner::resetLocalRouteTrackingState()
@@ -854,6 +1258,20 @@ void Local_Planner::parseCuboid(){
     pt.x = p[0];pt.y = p[1];pt.z = p[2];
     marker_edge_.points.push_back(pt);
   }
+
+  robot_cuboid_vertices_.clear();
+  const std::vector<std::string> collision_model_order = {
+    "cuboid.blb", "cuboid.brb", "cuboid.blt", "cuboid.flb",
+    "cuboid.brt", "cuboid.frt", "cuboid.flt", "cuboid.frb"};
+  robot_cuboid_vertices_.reserve(collision_model_order.size());
+  for(const auto & name : collision_model_order){
+    const auto & p = cuboid_vertex_parameter_map[name];
+    pcl::PointXYZ pt;
+    pt.x = p[0];
+    pt.y = p[1];
+    pt.z = p[2];
+    robot_cuboid_vertices_.push_back(pt);
+  }
 }
 
 void Local_Planner::cbOdom(const nav_msgs::msg::Odometry::SharedPtr msg)
@@ -861,8 +1279,14 @@ void Local_Planner::cbOdom(const nav_msgs::msg::Odometry::SharedPtr msg)
   robot_state_ = *msg;
   updateGlobalPose();
   if(compute_best_trajectory_in_odomCb_){
-    base_trajectory::Trajectory best_traj;
-    computeVelocityCommand("differential_drive_simple", best_traj);
+    if(controller_backend_ == "regulated_pure_pursuit"){
+      geometry_msgs::msg::Twist cmd_vel;
+      computeRppControlCommand("rpp_preview", &cmd_vel);
+    }
+    else{
+      base_trajectory::Trajectory best_traj;
+      computeVelocityCommand("differential_drive_simple", best_traj);
+    }
   }
   got_odom_ = true;
 }
@@ -1339,101 +1763,10 @@ void Local_Planner::getBestTrajectory(std::string traj_gen_name, base_trajectory
 }
 
 dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string traj_gen_name, base_trajectory::Trajectory& best_traj){
-  auto* stacked_perception = perception_3d_ros_ ? perception_3d_ros_->getStackedPerception() : nullptr;
-  auto perception_shared_data = perception_3d_ros_ ? perception_3d_ros_->getSharedDataPtr() : nullptr;
-  
-  if(!got_odom_){
-    RCLCPP_ERROR(this->get_logger().get_child(name_), "Odom is not received.");
-    return dddmr_sys_core::TF_FAIL;
-  }
-
-  if(!stacked_perception || !perception_shared_data){
-    RCLCPP_ERROR(this->get_logger().get_child(name_), "Perception 3D shared data is not ready.");
-    return dddmr_sys_core::PERCEPTION_MALFUNCTION;
-  }
-
-  if(!stacked_perception->isSensorOK()){
-    RCLCPP_ERROR(this->get_logger().get_child(name_), "Perception 3D is not ok.");
-    return dddmr_sys_core::PERCEPTION_MALFUNCTION;
-  }
-    
-
-  //for timing that gives real time even in simulation
-  control_loop_time_ = clock_->now();
-
-  pcl::PointCloud<pcl::PointXYZI>::Ptr aggregate_observation;
-  pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr aggregate_observation_kdtree;
-  std::vector<perception_3d::PerceptionOpinion> opinions;
-  double current_allowed_max_linear_speed = -1.0;
-  bool have_usable_prune_plan = false;
-
-  {
-    std::unique_lock<perception_3d::StackedPerception::mutex_t> pct_lock(*(stacked_perception->getMutex()));
-
-    //@ forward_prune_/backward_prune_: should adapt to vehicle speed.
-    //@ prune plan are used by trajectory_generators/perception
-    //@ prune plan has to come after mutex lock, because global_plan_ros_sub_ reset global plan kd tree
-    have_usable_prune_plan = prunePlan(forward_prune_, backward_prune_);
-    perception_shared_data->pcl_prune_plan_ = pcl_prune_plan_;
-    aggregate_observation = perception_shared_data->aggregate_observation_;
-    aggregate_observation_kdtree = perception_shared_data->aggregate_observation_kdtree_;
-    current_allowed_max_linear_speed = perception_shared_data->current_allowed_max_linear_speed_;
-    opinions = stacked_perception->getOpinions();
-  }
-
-  if(!aggregate_observation){
-    aggregate_observation = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
-  }
-
-  if(debug_publish_aggregated_pc_ && pub_aggregate_observation_->get_subscription_count() > 0){
-    sensor_msgs::msg::PointCloud2 ros2_aggregate_onservation;
-    pcl::toROSMsg(*aggregate_observation, ros2_aggregate_onservation);
-    pub_aggregate_observation_->publish(ros2_aggregate_onservation);
-  }
-  if((clock_->now()-trans_gbl2b_.header.stamp).seconds() > 2.0){
-    RCLCPP_ERROR(this->get_logger().get_child(name_), "TF out of date in local planner, the local planner wont go further.");
-    return dddmr_sys_core::TF_FAIL;
-  }
-
-  //@ TODO: Compute cuboid of each pose and send to determineIsPathBlock
-  //perception_3d_ros_->getStackedPerception()->determineIsPathBlock(pcl_prune_plan_);
-
-  if(!have_usable_prune_plan){
-    const bool deviation_timeout =
-      (clock_->now() - last_valid_prune_plan_).seconds() >= prune_plane_timeout_;
-    const bool deviation_distance =
-      last_robot_to_route_distance_ > causal_prune_max_lateral_distance_;
-    const bool deviation_confirmed =
-      consecutive_prune_failure_cycles_ > max_prune_failure_cycles_ &&
-      deviation_timeout &&
-      deviation_distance;
-
-    if(deviation_confirmed){
-      RCLCPP_FATAL(
-        this->get_logger().get_child(name_),
-        "deviation confirmed after consecutive prune failures, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f",
-        route_version_,
-        goal_seq_,
-        route_source_label_.c_str(),
-        local_route_progress_index_,
-        consecutive_prune_failure_cycles_,
-        last_robot_to_route_distance_);
-      RCLCPP_FATAL(
-        this->get_logger().get_child(name_),
-        "deviation from route reference exceeded tolerance, computeVelocityCommand() returns false.");
-      return dddmr_sys_core::PRUNE_PLAN_FAIL;
-    }
-
-    RCLCPP_WARN_THROTTLE(
-      this->get_logger().get_child(name_), *clock_, 2000,
-      "transient prune failure, not treating as deviation yet, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f",
-      route_version_,
-      goal_seq_,
-      route_source_label_.c_str(),
-      local_route_progress_index_,
-      consecutive_prune_failure_cycles_,
-      last_robot_to_route_distance_);
-    return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
+  ControllerContext context;
+  const auto context_state = prepareControllerContext(&context);
+  if(context_state != dddmr_sys_core::TRAJECTORY_FOUND){
+    return context_state;
   }
 
   //Do not create a function to set the parameters unless a nice structure is found
@@ -1443,7 +1776,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   trajectory_generators_ros_->getSharedDataPtr()->prune_plan_ = prune_plan_;
   //@ change max speed from perception shared data framework
   trajectory_generators_ros_->getSharedDataPtr()->current_allowed_max_linear_speed_ 
-                  = current_allowed_max_linear_speed;
+                  = context.current_allowed_max_linear_speed;
 
   trajectory_generators_ros_->initializeTheories_wi_Shared_data();
 
@@ -1494,18 +1827,14 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   
 
   //@Update data for critics
-  std::unique_lock<mpc_critics::StackedScoringModel::model_mutex_t> critics_lock(*(mpc_critics_ros_->getStackedScoringModelPtr()->getMutex()));
-  //@ unless we come up with a better strcuture
-  //@ keep below for easy migration for ROS2
-  mpc_critics_ros_->getSharedDataPtr()->robot_pose_ = trans_gbl2b_;
-  mpc_critics_ros_->getSharedDataPtr()->robot_state_ = robot_state_;
-  mpc_critics_ros_->getSharedDataPtr()->pcl_perception_ = aggregate_observation;
-  mpc_critics_ros_->getSharedDataPtr()->pcl_perception_kdtree_ = aggregate_observation_kdtree;
-  mpc_critics_ros_->getSharedDataPtr()->prune_plan_ = prune_plan_;
-  //@ Below function transform prune_plane from nav::msg to pcl type
-  //@ Below function generate kd-tree using aggregate observation
-  mpc_critics_ros_->updateSharedData();
-  getBestTrajectory(traj_gen_name, best_traj);
+  {
+    std::unique_lock<mpc_critics::StackedScoringModel::model_mutex_t> critics_lock(
+      *(mpc_critics_ros_->getStackedScoringModelPtr()->getMutex()));
+    updateCriticSharedData(
+      context.aggregate_observation,
+      context.aggregate_observation_kdtree);
+    getBestTrajectory(traj_gen_name, best_traj);
+  }
 
   auto t_diff = clock_->now() - control_loop_time_;
   RCLCPP_DEBUG(this->get_logger().get_child(name_), "Full control cycle time: %.9f", t_diff.seconds());
@@ -1514,18 +1843,10 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   //   RCLCPP_WARN(this->get_logger().get_child(name_), "Local planner control time exceed expect time: %.2f but is %.2f", 1./controller_frequency_, t_diff.seconds());
   // }
   
-  //@Loop opinions
-  for(auto opinion_it=opinions.begin(); opinion_it!=opinions.end();opinion_it++){
-    if((*opinion_it)==perception_3d::PATH_BLOCKED_WAIT){
-      RCLCPP_WARN_THROTTLE(this->get_logger().get_child(name_), *clock_, 5000, "Found the prune plan is blocked, go to wait state.");
-      return dddmr_sys_core::PATH_BLOCKED_WAIT;
-    }
-    else if((*opinion_it)==perception_3d::PATH_BLOCKED_REPLANNING){
-      RCLCPP_WARN_THROTTLE(this->get_logger().get_child(name_), *clock_, 5000, "Found the prune plan is blocked, go to replanning.");
-      return dddmr_sys_core::PATH_BLOCKED_REPLANNING;      
-    }
+  const auto opinion_state = evaluatePerceptionOpinions(context.opinions);
+  if(opinion_state != dddmr_sys_core::TRAJECTORY_FOUND){
+    return opinion_state;
   }
-
 
   if(best_traj.cost_<0){
     RCLCPP_WARN_THROTTLE(this->get_logger().get_child(name_), *clock_, 5000, "All trajectories are rejected by critics.");
@@ -1541,6 +1862,178 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
 }
 
+dddmr_sys_core::PlannerState Local_Planner::computeRppControlCommand(
+  const std::string & controller_name,
+  geometry_msgs::msg::Twist * cmd_vel)
+{
+  ControllerContext context;
+  const auto context_state = prepareControllerContext(&context);
+  if(context_state != dddmr_sys_core::TRAJECTORY_FOUND){
+    return context_state;
+  }
+
+  const bool goal_alignment_mode = isGoalReached();
+  const double distance_to_goal = getDistanceToGoal();
+  double linear_speed_cap = rpp_nominal_linear_speed_;
+  if(context.current_allowed_max_linear_speed > 0.0){
+    linear_speed_cap = std::min(linear_speed_cap, context.current_allowed_max_linear_speed);
+  }
+
+  if(goal_alignment_mode){
+    linear_speed_cap = std::min(linear_speed_cap, rpp_alignment_linear_speed_);
+  }
+  else if(distance_to_goal < rpp_goal_slowdown_distance_ && rpp_goal_slowdown_distance_ > 1e-3){
+    const double ratio = std::max(0.0, std::min(1.0, distance_to_goal / rpp_goal_slowdown_distance_));
+    const double slowdown_floor = std::min(rpp_min_linear_speed_, linear_speed_cap);
+    linear_speed_cap = slowdown_floor + (linear_speed_cap - slowdown_floor) * ratio;
+  }
+
+  if(linear_speed_cap <= 1e-3){
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "RPP speed cap collapsed to zero, route_version=%zu, goal_seq=%zu, source=%s",
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str());
+    return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
+  }
+
+  const double max_curvature = getMaxAckermannCurvature();
+  double curvature = 0.0;
+  if(goal_alignment_mode){
+    tf2::Transform reference_pose;
+    if(!buildGoalAlignmentReference(&reference_pose)){
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger().get_child(name_), *clock_, 2000,
+        "RPP goal alignment reference is unavailable, route_version=%zu, goal_seq=%zu, source=%s",
+        route_version_,
+        goal_seq_,
+        route_source_label_.c_str());
+      return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
+    }
+
+    const double heading_error = getShortestAngleFromPose2RobotHeading(reference_pose);
+    mpc_critics_ros_->getSharedDataPtr()->heading_deviation_ = heading_error;
+    curvature =
+      2.0 * std::sin(heading_error) / std::max(0.05, rpp_alignment_lookahead_distance_);
+  }
+  else{
+    const double current_speed = std::fabs(robot_state_.twist.twist.linear.x);
+    double lookahead_distance = std::max(
+      rpp_min_lookahead_distance_,
+      current_speed * rpp_lookahead_time_);
+    lookahead_distance = std::min(lookahead_distance, rpp_max_lookahead_distance_);
+
+    geometry_msgs::msg::PoseStamped lookahead_pose;
+    if(!selectLookaheadPose(lookahead_distance, &lookahead_pose)){
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger().get_child(name_), *clock_, 2000,
+        "RPP lookahead target is unavailable, route_version=%zu, goal_seq=%zu, source=%s",
+        route_version_,
+        goal_seq_,
+        route_source_label_.c_str());
+      return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
+    }
+
+    const double robot_yaw = getRobotYaw();
+    const double dx = lookahead_pose.pose.position.x - trans_gbl2b_.transform.translation.x;
+    const double dy = lookahead_pose.pose.position.y - trans_gbl2b_.transform.translation.y;
+    const double x_local = std::cos(robot_yaw) * dx + std::sin(robot_yaw) * dy;
+    const double y_local = -std::sin(robot_yaw) * dx + std::cos(robot_yaw) * dy;
+    const double distance_sq = x_local * x_local + y_local * y_local;
+
+    if(distance_sq < 1e-6 || x_local <= 0.05){
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger().get_child(name_), *clock_, 2000,
+        "RPP lookahead target is not reachable in front of the robot, controller=%s, route_version=%zu, goal_seq=%zu, source=%s",
+        controller_name.c_str(),
+        route_version_,
+        goal_seq_,
+        route_source_label_.c_str());
+      return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
+    }
+
+    curvature = (2.0 * y_local) / distance_sq;
+  }
+
+  curvature = std::max(-max_curvature, std::min(max_curvature, curvature));
+
+  double linear_velocity = linear_speed_cap;
+  if(std::fabs(curvature) > 1e-6 && rpp_max_lateral_accel_ > 0.0){
+    linear_velocity = std::min(
+      linear_velocity,
+      std::sqrt(rpp_max_lateral_accel_ / std::fabs(curvature)));
+  }
+  if(std::fabs(curvature) > 1e-6 && rpp_max_angular_velocity_ > 0.0){
+    linear_velocity = std::min(
+      linear_velocity,
+      rpp_max_angular_velocity_ / std::fabs(curvature));
+  }
+
+  const double min_linear_speed =
+    std::min(goal_alignment_mode ? rpp_alignment_linear_speed_ : rpp_min_linear_speed_, linear_speed_cap);
+  linear_velocity = std::max(min_linear_speed, std::min(linear_velocity, linear_speed_cap));
+  const double angular_velocity =
+    std::max(-rpp_max_angular_velocity_,
+      std::min(rpp_max_angular_velocity_, linear_velocity * curvature));
+
+  auto predicted_traj = buildPredictedTrajectory(linear_velocity, angular_velocity);
+  {
+    std::unique_lock<mpc_critics::StackedScoringModel::model_mutex_t> critics_lock(
+      *(mpc_critics_ros_->getStackedScoringModelPtr()->getMutex()));
+    updateCriticSharedData(
+      context.aggregate_observation,
+      context.aggregate_observation_kdtree);
+    mpc_critics_ros_->scoreTrajectory(rpp_critic_trajectory_generator_name_, predicted_traj);
+  }
+
+  publishDebugPath(
+    buildPathFromTrajectory(predicted_traj),
+    pub_best_trajectory_path_,
+    "best_control_trajectory",
+    route_version_,
+    goal_seq_,
+    route_source_label_,
+    true);
+
+  if(debug_publish_best_trajectory_ && pub_best_trajectory_pose_->get_subscription_count() > 0){
+    geometry_msgs::msg::PoseArray best_pose_arr;
+    pcl::PointCloud<pcl::PointXYZ> cuboids_pcl;
+    trajectory2posearray_cuboids(predicted_traj, best_pose_arr, cuboids_pcl);
+    best_pose_arr.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
+    best_pose_arr.header.stamp = clock_->now();
+    pub_best_trajectory_pose_->publish(best_pose_arr);
+  }
+
+  const auto opinion_state = evaluatePerceptionOpinions(context.opinions);
+  if(opinion_state != dddmr_sys_core::TRAJECTORY_FOUND){
+    return opinion_state;
+  }
+
+  if(predicted_traj.cost_ < 0.0){
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "RPP control trajectory was rejected by critics, controller=%s, route_version=%zu, goal_seq=%zu, source=%s, cost=%.2f",
+      controller_name.c_str(),
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str(),
+      predicted_traj.cost_);
+    return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
+  }
+
+  if(cmd_vel != nullptr){
+    cmd_vel->linear.x = linear_velocity;
+    cmd_vel->linear.y = 0.0;
+    cmd_vel->linear.z = 0.0;
+    cmd_vel->angular.x = 0.0;
+    cmd_vel->angular.y = 0.0;
+    cmd_vel->angular.z = angular_velocity;
+  }
+
+  return dddmr_sys_core::TRAJECTORY_FOUND;
+}
+
 dddmr_sys_core::PlannerState Local_Planner::computeControlCommand(
   const std::string & controller_name,
   geometry_msgs::msg::Twist * cmd_vel)
@@ -1552,6 +2045,10 @@ dddmr_sys_core::PlannerState Local_Planner::computeControlCommand(
     cmd_vel->angular.x = 0.0;
     cmd_vel->angular.y = 0.0;
     cmd_vel->angular.z = 0.0;
+  }
+
+  if(controller_backend_ == "regulated_pure_pursuit"){
+    return computeRppControlCommand(controller_name, cmd_vel);
   }
 
   base_trajectory::Trajectory best_traj;

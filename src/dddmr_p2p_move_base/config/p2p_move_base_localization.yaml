@@ -8,8 +8,8 @@ p2p_move_base:
     control_failure_patience: 10.0                           # controller 连续失败多久后判定超时
     max_recovery_attempts: 10                                # recovery action 的最大尝试次数
     blocked_wait_patience: 10.0                              # blocked wait 状态最长持续时间
-    tracking_controller_name: "ackermann_simple"             # route tracking 主控制器，当前使用 Ackermann rollout
-    alignment_controller_name: "ackermann_heading_rotate_shortest" # 起步/末端对齐控制器；名字沿用插件实现，但语义上已不是“原地旋转状态”
+    tracking_controller_name: "ackermann_simple"             # legacy_rollout 时为 rollout generator；切到 RPP 时可改成语义化标签如 rpp_tracking
+    alignment_controller_name: "ackermann_heading_rotate_shortest" # legacy_rollout 时为对齐 generator；切到 RPP 时可改成语义化标签如 rpp_alignment
     recovery_action_name: ""
 
 ### 全局规划器和感知层参数
@@ -129,6 +129,7 @@ perception_3d_global:
 local_planner:
   ros__parameters:
     odom_topic: /lio_sam/localization/odometry               # 局部规划使用的位姿/速度来源
+    controller_backend: "legacy_rollout"                     # 可选: legacy_rollout / regulated_pure_pursuit
     # Ackermann rollout uses sim_time=2.0 and max_vel_x=3.0, so a 3 m prune
     # horizon makes the critics prefer short / slow trajectories. Keep the
     # local target farther ahead so faster valid rollouts are not penalized.
@@ -155,6 +156,22 @@ local_planner:
     goal_alignment:
       heading_tolerance: 5.0                                 # 末端对齐容差，单位 rad；设大表示基本不要求末端转正
     controller_frequency: 15.0                               # 局部规划器内部控制频率
+    rpp:
+      critic_trajectory_generator_name: "ackermann_simple"   # RPP 候选轨迹复用哪套 critic 链做碰撞/路径一致性验证
+      nominal_linear_speed: 1.0                              # RPP 常规巡航速度
+      min_linear_speed: 0.15                                 # RPP 正常跟踪的最低前进速度
+      alignment_linear_speed: 0.25                           # RPP 末端朝向对齐时的低速前进速度
+      goal_slowdown_distance: 1.5                            # 距目标多近开始主动降速
+      min_lookahead_distance: 1.0                            # RPP 最小前视距离
+      max_lookahead_distance: 3.0                            # RPP 最大前视距离
+      lookahead_time: 1.5                                    # 根据当前速度换算前视距离的时间尺度
+      alignment_lookahead_distance: 1.0                      # 末端朝向对齐时使用的等效前视距离
+      max_lateral_accel: 1.5                                 # 曲率调速的横向加速度上限
+      prediction_horizon_sec: 1.5                            # RPP 单一候选轨迹的前向预测时长
+      prediction_step_sec: 0.1                               # RPP 候选轨迹离散步长
+      wheelbase: 0.549185                                    # Ackermann 轴距，用于曲率上限
+      max_steer: 0.69                                        # 最大转角，用于曲率上限
+      max_angular_velocity: 1.2                              # 输出角速度上限
     debug_publish:
       robot_cuboid: false                                    # 调试车体包络，可视化时再打开
       aggregated_pc: false                                   # 聚合障碍点云很重，默认关闭
