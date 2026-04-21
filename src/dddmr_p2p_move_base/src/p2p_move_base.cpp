@@ -39,6 +39,7 @@ P2PMoveBase::P2PMoveBase(std::string name): Node(name)
   clock_ = this->get_clock();
   is_recoverying_ = false;
   is_recoverying_succeed_ = false;
+  terminal_goal_reason_ = "goal failed";
 }
 
 rclcpp_action::GoalResponse P2PMoveBase::handle_goal(
@@ -292,6 +293,7 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
   FSM_->current_goal_ = move_base_goal->target_pose;
   route_manager_->setGoal(FSM_->current_goal_);
   route_manager_->resume();
+  terminal_goal_reason_ = "goal failed";
 
   while(rclcpp::ok()){
 
@@ -304,6 +306,7 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
 
       RCLCPP_INFO(this->get_logger(), "P2P move base preempted.");
       publishZeroVelocity();
+      terminal_goal_reason_ = "goal preempted";
       route_manager_->stop("goal preempted");
       return;
     }
@@ -318,6 +321,7 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
       goal_handle->canceled(result);
       RCLCPP_INFO(this->get_logger(), "P2P move base cancelled.");
       publishZeroVelocity();
+      terminal_goal_reason_ = "goal canceled";
       route_manager_->stop("goal canceled");
       return;
     }
@@ -333,7 +337,7 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
 
     //if we're done, then we'll return from execute
     if(done){
-      route_manager_->stop("goal finished/canceled/failed");
+      route_manager_->stop(terminal_goal_reason_);
       return;
     }
     
@@ -342,7 +346,7 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
     //if(FSM_->isCurrentDecision("d_controlling") && r.cycleTime() > ros::Duration(1 / FSM_->controller_frequency_))
     //  ROS_WARN("Control loop missed its desired rate of %.4fHz... the loop actually took %.4f seconds", FSM_->controller_frequency_, r.cycleTime().toSec());
   }
-  route_manager_->stop("goal finished/canceled/failed");
+  route_manager_->stop(terminal_goal_reason_);
 }
 
 bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> goal_handle){
@@ -490,7 +494,8 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
 
   if(FSM_->isPhase(FSM::NavigationPhase::kGoalAlignment)){
     if(route_controller_->isGoalHeadingSatisfied()){
-      RCLCPP_INFO(this->get_logger(), "goal lifecycle complete");
+      terminal_goal_reason_ = "goal succeeded";
+      RCLCPP_INFO(this->get_logger(), "goal succeeded");
       auto result = std::make_shared<dddmr_sys_core::action::PToPMoveBase::Result>();
       goal_handle->succeed(result);
       publishZeroVelocity();
@@ -569,9 +574,10 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
     }
 
     if(FSM_->recovery_attempt_count_ >= FSM_->max_recovery_attempts_){
+      terminal_goal_reason_ = "goal failed";
       RCLCPP_ERROR(
         this->get_logger(),
-        "route orchestration failed after %d recovery attempts",
+        "goal failed after %d recovery attempts",
         FSM_->recovery_attempt_count_);
       auto result = std::make_shared<dddmr_sys_core::action::PToPMoveBase::Result>();
       goal_handle->abort(result);
@@ -587,7 +593,8 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       return false;
     }
 
-    RCLCPP_ERROR(this->get_logger(), "recovery action failed");
+    terminal_goal_reason_ = "recovery failed";
+    RCLCPP_ERROR(this->get_logger(), "recovery failed");
     auto result = std::make_shared<dddmr_sys_core::action::PToPMoveBase::Result>();
     goal_handle->abort(result);
     publishZeroVelocity();

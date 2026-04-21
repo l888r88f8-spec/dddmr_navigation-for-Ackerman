@@ -35,6 +35,14 @@
 
 namespace p2p_move_base
 {
+namespace
+{
+bool is_failure_termination_reason(const std::string & reason)
+{
+  return reason == "goal failed" || reason == "recovery failed";
+}
+}
+
 P2PGlobalPlanManager::P2PGlobalPlanManager(std::string name)
 : Node(name),
   name_(name),
@@ -160,22 +168,40 @@ void P2PGlobalPlanManager::stop(const std::string & reason){
   }
 
   if(freeze_route_per_goal_ && should_log_release){
-    RCLCPP_INFO(
-      this->get_logger(),
-      "release frozen route because %s, goal_seq=%zu, route_version=%zu",
-      reason.c_str(),
-      goal_seq,
-      route_version);
+    if(is_failure_termination_reason(reason)){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "release frozen route after %s, goal_seq=%zu, route_version=%zu",
+        reason.c_str(),
+        goal_seq,
+        route_version);
+    }
+    else{
+      RCLCPP_INFO(
+        this->get_logger(),
+        "release frozen route after %s, goal_seq=%zu, route_version=%zu",
+        reason.c_str(),
+        goal_seq,
+        route_version);
+    }
   }
 
   if(should_deactivate_threading){
     auto goal_msg = dddmr_sys_core::action::GetPlan::Goal();
     goal_msg.activate_threading = false;
     auto send_goal_options = rclcpp_action::Client<dddmr_sys_core::action::GetPlan>::SendGoalOptions();
+    const auto request_goal_seq = goal_seq;
     send_goal_options.goal_response_callback =
-      std::bind(&P2PGlobalPlanManager::global_planner_client_goal_response_callback, this, std::placeholders::_1);
+      [this](const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::GetPlan>::SharedPtr & goal_handle)
+      {
+        global_planner_client_goal_response_callback(goal_handle, false);
+      };
     send_goal_options.result_callback =
-      std::bind(&P2PGlobalPlanManager::global_planner_client_result_callback, this, std::placeholders::_1);
+      [this, request_goal_seq](
+        const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::GetPlan>::WrappedResult & result)
+      {
+        global_planner_client_result_callback(result, false, request_goal_seq);
+      };
     global_planner_client_ptr_->async_send_goal(goal_msg, send_goal_options);
   }
 
@@ -208,6 +234,7 @@ void P2PGlobalPlanManager::queryThread(){
 
     goal_msg.goal = goal_;
     goal_msg.activate_threading = true;
+    goal_seq = goal_seq_;
     is_planning_ = true;
     route_requested_for_goal_ = true;
     should_send_goal = true;
@@ -218,33 +245,82 @@ void P2PGlobalPlanManager::queryThread(){
   }
 
   auto send_goal_options = rclcpp_action::Client<dddmr_sys_core::action::GetPlan>::SendGoalOptions();
+  const auto request_goal_seq = goal_seq;
   
   send_goal_options.goal_response_callback =
-    std::bind(&P2PGlobalPlanManager::global_planner_client_goal_response_callback, this, std::placeholders::_1);
+    [this](const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::GetPlan>::SharedPtr & goal_handle)
+    {
+      global_planner_client_goal_response_callback(goal_handle, true);
+    };
   send_goal_options.result_callback =
-    std::bind(&P2PGlobalPlanManager::global_planner_client_result_callback, this, std::placeholders::_1);
+    [this, request_goal_seq](
+      const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::GetPlan>::WrappedResult & result)
+    {
+      global_planner_client_result_callback(result, true, request_goal_seq);
+    };
   
   global_planner_client_ptr_->async_send_goal(goal_msg, send_goal_options);
 
 }
 
-void P2PGlobalPlanManager::global_planner_client_goal_response_callback(const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::GetPlan>::SharedPtr & goal_handle)
+void P2PGlobalPlanManager::global_planner_client_goal_response_callback(
+  const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::GetPlan>::SharedPtr & goal_handle,
+  bool is_route_request)
 {
+  const auto * request_label =
+    is_route_request ? "route request" : "route manager deactivation request";
   if (!goal_handle) {
     if(route_request_frequency_>2)
-      RCLCPP_ERROR_THROTTLE(this->get_logger(), *clock_, 5000, "route request was rejected by: %s", route_action_name_.c_str());
+      RCLCPP_ERROR_THROTTLE(
+        this->get_logger(), *clock_, 5000,
+        "%s was rejected by: %s",
+        request_label,
+        route_action_name_.c_str());
     else
-      RCLCPP_ERROR(this->get_logger(), "route request was rejected by: %s", route_action_name_.c_str());
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "%s was rejected by: %s",
+        request_label,
+        route_action_name_.c_str());
   } else {
     if(route_request_frequency_>2)
-      RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 5000, "route request accepted by: %s, waiting for result", route_action_name_.c_str());
+      RCLCPP_INFO_THROTTLE(
+        this->get_logger(), *clock_, 5000,
+        "%s accepted by: %s, waiting for result",
+        request_label,
+        route_action_name_.c_str());
     else
-      RCLCPP_INFO(this->get_logger(), "route request accepted by: %s, waiting for result", route_action_name_.c_str()); 
+      RCLCPP_INFO(
+        this->get_logger(),
+        "%s accepted by: %s, waiting for result",
+        request_label,
+        route_action_name_.c_str());
   }
 }
 
-void P2PGlobalPlanManager::global_planner_client_result_callback(const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::GetPlan>::WrappedResult & result)
+void P2PGlobalPlanManager::global_planner_client_result_callback(
+  const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::GetPlan>::WrappedResult & result,
+  bool is_route_request,
+  std::size_t request_goal_seq)
 {
+  if(!is_route_request){
+    switch (result.code) {
+      case rclcpp_action::ResultCode::SUCCEEDED:
+        RCLCPP_INFO(this->get_logger(), "route manager deactivation request finished");
+        break;
+      case rclcpp_action::ResultCode::ABORTED:
+        RCLCPP_WARN(this->get_logger(), "route manager deactivation request was aborted");
+        break;
+      case rclcpp_action::ResultCode::CANCELED:
+        RCLCPP_WARN(this->get_logger(), "route manager deactivation request was canceled");
+        break;
+      default:
+        RCLCPP_WARN(this->get_logger(), "route manager deactivation request returned unknown result code");
+        break;
+    }
+    return;
+  }
+
   switch (result.code) {
     case rclcpp_action::ResultCode::SUCCEEDED:
       break;
@@ -263,36 +339,50 @@ void P2PGlobalPlanManager::global_planner_client_result_callback(const rclcpp_ac
   std::size_t goal_seq = 0;
   std::size_t route_version = 0;
   std::size_t pose_count = 0;
+  bool ignore_stale_result = false;
 
   {
     std::unique_lock<std::mutex> lock(access_);
-    freeze_current_goal = freeze_route_per_goal_;
-    succeeded_with_route =
-      result.code == rclcpp_action::ResultCode::SUCCEEDED &&
-      result.result != nullptr &&
-      !result.result->path.poses.empty();
-
-    if(succeeded_with_route){
-      active_route_ = result.result->path;
-      ++route_version_;
-      route_source_label_ = freeze_route_per_goal_ ? "frozen_route" : "planner_result";
-      if(freeze_route_per_goal_){
-        frozen_route_ = active_route_;
-      }
-      route_request_failed_ = false;
-      pose_count = active_route_.poses.size();
+    if(!got_first_goal_ || request_goal_seq != goal_seq_){
+      ignore_stale_result = true;
     }
     else{
-      active_route_.poses.clear();
-      frozen_route_.poses.clear();
-      route_source_label_.clear();
-      route_requested_for_goal_ = false;
-      route_request_failed_ = true;
-    }
+      freeze_current_goal = freeze_route_per_goal_;
+      succeeded_with_route =
+        result.code == rclcpp_action::ResultCode::SUCCEEDED &&
+        result.result != nullptr &&
+        !result.result->path.poses.empty();
 
-    goal_seq = goal_seq_;
-    route_version = route_version_;
-    is_planning_ = false;
+      if(succeeded_with_route){
+        active_route_ = result.result->path;
+        ++route_version_;
+        route_source_label_ = freeze_route_per_goal_ ? "frozen_route" : "planner_result";
+        if(freeze_route_per_goal_){
+          frozen_route_ = active_route_;
+        }
+        route_request_failed_ = false;
+        pose_count = active_route_.poses.size();
+      }
+      else{
+        active_route_.poses.clear();
+        frozen_route_.poses.clear();
+        route_source_label_.clear();
+        route_requested_for_goal_ = false;
+        route_request_failed_ = true;
+      }
+
+      goal_seq = goal_seq_;
+      route_version = route_version_;
+      is_planning_ = false;
+    }
+  }
+
+  if(ignore_stale_result){
+    RCLCPP_INFO(
+      this->get_logger(),
+      "ignore stale route result for inactive goal, request_goal_seq=%zu",
+      request_goal_seq);
+    return;
   }
 
   if(succeeded_with_route){
@@ -316,7 +406,7 @@ void P2PGlobalPlanManager::global_planner_client_result_callback(const rclcpp_ac
   else if(freeze_current_goal){
     RCLCPP_WARN(
       this->get_logger(),
-      "release frozen route because goal failed, goal_seq=%zu, route_version=%zu",
+      "release frozen route because route request failed, goal_seq=%zu, route_version=%zu",
       goal_seq,
       route_version);
   }

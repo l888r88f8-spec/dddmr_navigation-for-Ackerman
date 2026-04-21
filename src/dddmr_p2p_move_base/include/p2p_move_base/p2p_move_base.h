@@ -103,6 +103,7 @@ class P2PMoveBase : public rclcpp::Node {
 
     bool executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> goal_handle);
     bool syncRouteReferenceFromManager(const std::string & consumer_label);
+    std::string terminal_goal_reason_;
 
     bool is_active(
       const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> handle) const

@@ -89,8 +89,13 @@ private:
   rclcpp::TimerBase::SharedPtr loop_timer_;
 
   rclcpp_action::Client<dddmr_sys_core::action::GetPlan>::SharedPtr global_planner_client_ptr_;
-  void global_planner_client_goal_response_callback(const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::GetPlan>::SharedPtr & goal_handle);
-  void global_planner_client_result_callback(const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::GetPlan>::WrappedResult & result);
+  void global_planner_client_goal_response_callback(
+    const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::GetPlan>::SharedPtr & goal_handle,
+    bool is_route_request);
+  void global_planner_client_result_callback(
+    const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::GetPlan>::WrappedResult & result,
+    bool is_route_request,
+    std::size_t request_goal_seq);
   
 
 public:
@@ -103,7 +108,7 @@ public:
   void initial();
   void setGoal(const geometry_msgs::msg::PoseStamped& goal);
   void resume();
-  void stop(const std::string & reason = "goal finished/canceled/failed");
+  void stop(const std::string & reason = "goal stopped");
   bool hasRoute();
   bool hasPlan(){return hasRoute();}
   void copyRoute(
