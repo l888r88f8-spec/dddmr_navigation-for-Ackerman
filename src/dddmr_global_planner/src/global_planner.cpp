@@ -30,6 +30,9 @@
 */
 #include <global_planner/global_planner.h>
 
+#include <algorithm>
+#include <limits>
+
 using namespace std::chrono_literals;
 
 namespace global_planner
@@ -125,6 +128,36 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   this->get_parameter("enable_direct_path_shortcut", enable_direct_path_shortcut_);
   RCLCPP_INFO(this->get_logger(), "enable_direct_path_shortcut: %d", enable_direct_path_shortcut_);
 
+  declare_parameter("entry_connector.enable", rclcpp::ParameterValue(true));
+  this->get_parameter("entry_connector.enable", enable_entry_connector_);
+  RCLCPP_INFO(this->get_logger(), "entry_connector.enable: %d", enable_entry_connector_);
+
+  declare_parameter("entry_connector.min_anchor_distance", rclcpp::ParameterValue(2.5));
+  this->get_parameter(
+    "entry_connector.min_anchor_distance",
+    entry_connector_min_anchor_distance_);
+  declare_parameter("entry_connector.max_anchor_distance", rclcpp::ParameterValue(4.0));
+  this->get_parameter(
+    "entry_connector.max_anchor_distance",
+    entry_connector_max_anchor_distance_);
+  if(entry_connector_max_anchor_distance_ < entry_connector_min_anchor_distance_){
+    std::swap(entry_connector_max_anchor_distance_, entry_connector_min_anchor_distance_);
+  }
+  RCLCPP_INFO(
+    this->get_logger(),
+    "entry_connector anchor distance window: [%.2f, %.2f]",
+    entry_connector_min_anchor_distance_,
+    entry_connector_max_anchor_distance_);
+
+  declare_parameter("entry_connector.force_goal_heading", rclcpp::ParameterValue(true));
+  this->get_parameter(
+    "entry_connector.force_goal_heading",
+    entry_connector_force_goal_heading_);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "entry_connector.force_goal_heading: %d",
+    entry_connector_force_goal_heading_);
+
   declare_parameter("hybrid_astar.wheelbase", rclcpp::ParameterValue(0.549185));
   this->get_parameter("hybrid_astar.wheelbase", forward_hybrid_astar_config_.wheelbase);
   declare_parameter("hybrid_astar.max_steer", rclcpp::ParameterValue(0.69));
@@ -211,6 +244,9 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   pub_path_ = this->create_publisher<nav_msgs::msg::Path>("global_path", 1);
   pub_raw_route_path_ = this->create_publisher<nav_msgs::msg::Path>(
     "/debug/raw_route_path",
+    rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
+  pub_frozen_route_path_ = this->create_publisher<nav_msgs::msg::Path>(
+    "/debug/frozen_route_path",
     rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
   pub_static_graph_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("static_graph", rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
   pub_weighted_pc_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("weighted_ground", rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
@@ -299,14 +335,62 @@ void GlobalPlanner::cbClickedPoint(const geometry_msgs::msg::PointStamped::Share
     return;
   }
   
-  auto ros_path = makeROSPlan(start, goal, true, false, 0);
-  if(ros_path.poses.empty()){
+  const std::size_t goal_seq = ++debug_goal_seq_;
+  nav_msgs::msg::Path raw_route;
+  nav_msgs::msg::Path frozen_route;
+  std::size_t anchor_index = 0;
+  double anchor_distance = 0.0;
+  std::size_t connector_pose_count = 0;
+  bool connector_used_fallback = false;
+  {
+    std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
+    if(!buildFrozenRouteWithEntryConnectorLocked(
+         start,
+         goal,
+         &raw_route,
+         &frozen_route,
+         &anchor_index,
+         &anchor_distance,
+         &connector_pose_count,
+         &connector_used_fallback))
+    {
+      frozen_route = raw_route;
+    }
+  }
+
+  if(raw_route.poses.empty()){
     RCLCPP_WARN(this->get_logger(), "No path found for clicked goal.");
     return;
   }
 
-  pub_path_->publish(ros_path);
-  RCLCPP_INFO(this->get_logger(), "Path found for clicked goal.");
+  const std::size_t route_version = ++debug_route_version_;
+  publishRawRouteDebugPath(raw_route, goal_seq, route_version, "clicked_goal_raw_route");
+  if(!connector_used_fallback && connector_pose_count > 0){
+    RCLCPP_INFO(
+      this->get_logger(),
+      "entry connector generated successfully, anchor_index=%zu, anchor_distance=%.2f, connector_poses=%zu, route_tail_poses=%zu, frozen_route_poses=%zu",
+      anchor_index,
+      anchor_distance,
+      connector_pose_count,
+      raw_route.poses.size() > anchor_index ? raw_route.poses.size() - anchor_index : 0,
+      frozen_route.poses.size());
+  }
+  else if(enable_entry_connector_){
+    RCLCPP_WARN(
+      this->get_logger(),
+      "entry connector fallback used, anchor_index=%zu, anchor_distance=%.2f, raw_route_poses=%zu, frozen_route_poses=%zu",
+      anchor_index,
+      anchor_distance,
+      raw_route.poses.size(),
+      frozen_route.poses.size());
+  }
+  publishFrozenRouteDebugPath(
+    frozen_route,
+    goal_seq,
+    route_version,
+    connector_used_fallback ? "clicked_goal_frozen_route_fallback" : "clicked_goal_frozen_route");
+  pub_path_->publish(frozen_route);
+  RCLCPP_INFO(this->get_logger(), "Frozen route found for clicked goal.");
 
 }
 
@@ -757,6 +841,408 @@ void GlobalPlanner::publishRawRouteDebugPath(
     debug_path.poses.size());
 }
 
+void GlobalPlanner::publishFrozenRouteDebugPath(
+  const nav_msgs::msg::Path & path,
+  std::size_t goal_seq,
+  std::size_t route_version,
+  const std::string & source_label)
+{
+  nav_msgs::msg::Path debug_path = path;
+  debug_path.header.frame_id = global_frame_;
+  debug_path.header.stamp = clock_->now();
+  for(auto & pose : debug_path.poses){
+    pose.header = debug_path.header;
+  }
+  pub_frozen_route_path_->publish(debug_path);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "frozen_route_path published, route_version=%zu, goal_seq=%zu, source=%s, poses=%zu",
+    route_version,
+    goal_seq,
+    source_label.c_str(),
+    debug_path.poses.size());
+}
+
+std::vector<double> GlobalPlanner::computePathArcLengths(const nav_msgs::msg::Path & path) const
+{
+  std::vector<double> arc_lengths;
+  arc_lengths.reserve(path.poses.size());
+  double accumulated_distance = 0.0;
+  for(std::size_t i = 0; i < path.poses.size(); ++i){
+    if(i > 0){
+      const double dx =
+        path.poses[i].pose.position.x - path.poses[i - 1].pose.position.x;
+      const double dy =
+        path.poses[i].pose.position.y - path.poses[i - 1].pose.position.y;
+      const double dz =
+        path.poses[i].pose.position.z - path.poses[i - 1].pose.position.z;
+      accumulated_distance += std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    arc_lengths.push_back(accumulated_distance);
+  }
+  return arc_lengths;
+}
+
+std::vector<std::size_t> GlobalPlanner::selectEntryAnchorCandidates(
+  const nav_msgs::msg::Path & raw_route,
+  const std::vector<double> & arc_lengths,
+  const geometry_msgs::msg::PoseStamped & start) const
+{
+  std::vector<std::size_t> preferred_candidates;
+  std::vector<std::size_t> secondary_candidates;
+  std::vector<std::size_t> fallback_candidates;
+  if(raw_route.poses.size() < 2 || arc_lengths.size() != raw_route.poses.size()){
+    return fallback_candidates;
+  }
+
+  double start_yaw = 0.0;
+  bool has_start_yaw = false;
+  const auto & q_msg = start.pose.orientation;
+  const double start_quaternion_norm =
+    q_msg.x * q_msg.x + q_msg.y * q_msg.y + q_msg.z * q_msg.z + q_msg.w * q_msg.w;
+  if(std::isfinite(start_quaternion_norm) && start_quaternion_norm > 1e-9){
+    tf2::Quaternion q(q_msg.x, q_msg.y, q_msg.z, q_msg.w);
+    q.normalize();
+    double roll = 0.0;
+    double pitch = 0.0;
+    tf2::Matrix3x3(q).getRPY(roll, pitch, start_yaw);
+    has_start_yaw = std::isfinite(start_yaw);
+  }
+
+  for(std::size_t i = 1; i < raw_route.poses.size(); ++i){
+    const double anchor_distance = arc_lengths[i];
+    if(!std::isfinite(anchor_distance) || anchor_distance < 0.3){
+      continue;
+    }
+
+    const double dx = raw_route.poses[i].pose.position.x - start.pose.position.x;
+    const double dy = raw_route.poses[i].pose.position.y - start.pose.position.y;
+    const double x_local =
+      has_start_yaw ? (std::cos(start_yaw) * dx + std::sin(start_yaw) * dy) : dx;
+    const bool is_forward_half_plane = !has_start_yaw || x_local >= -0.25;
+
+    if(anchor_distance >= entry_connector_min_anchor_distance_ &&
+       anchor_distance <= entry_connector_max_anchor_distance_)
+    {
+      if(is_forward_half_plane){
+        preferred_candidates.push_back(i);
+      }
+      else{
+        secondary_candidates.push_back(i);
+      }
+      continue;
+    }
+
+    if(anchor_distance > 0.5){
+      fallback_candidates.push_back(i);
+    }
+  }
+
+  auto sort_by_farther_first =
+    [&arc_lengths](std::vector<std::size_t> * indices) {
+      std::sort(
+        indices->begin(),
+        indices->end(),
+        [&arc_lengths](std::size_t lhs, std::size_t rhs) {
+          return arc_lengths[lhs] > arc_lengths[rhs];
+        });
+    };
+
+  sort_by_farther_first(&preferred_candidates);
+  sort_by_farther_first(&secondary_candidates);
+  sort_by_farther_first(&fallback_candidates);
+
+  std::vector<std::size_t> candidate_indices;
+  auto append_unique =
+    [&candidate_indices](const std::vector<std::size_t> & source) {
+      for(const std::size_t index : source){
+        if(std::find(candidate_indices.begin(), candidate_indices.end(), index) ==
+           candidate_indices.end())
+        {
+          candidate_indices.push_back(index);
+        }
+      }
+    };
+
+  append_unique(preferred_candidates);
+  append_unique(secondary_candidates);
+  if(candidate_indices.empty()){
+    append_unique(fallback_candidates);
+  }
+
+  if(candidate_indices.empty()){
+    candidate_indices.push_back(raw_route.poses.size() - 1);
+  }
+
+  return candidate_indices;
+}
+
+bool GlobalPlanner::buildAnchorPoseFromRoute(
+  const nav_msgs::msg::Path & raw_route,
+  std::size_t anchor_index,
+  geometry_msgs::msg::PoseStamped * anchor_pose,
+  double * anchor_yaw) const
+{
+  if(anchor_pose == nullptr || anchor_yaw == nullptr || raw_route.poses.empty()){
+    return false;
+  }
+
+  anchor_index = std::min(anchor_index, raw_route.poses.size() - 1);
+  std::size_t tangent_start_index = anchor_index;
+  std::size_t tangent_end_index = anchor_index;
+  constexpr double kMinTangentDistance = 0.15;
+
+  for(std::size_t i = anchor_index; i > 0; --i){
+    const double dx =
+      raw_route.poses[anchor_index].pose.position.x - raw_route.poses[i - 1].pose.position.x;
+    const double dy =
+      raw_route.poses[anchor_index].pose.position.y - raw_route.poses[i - 1].pose.position.y;
+    const double dz =
+      raw_route.poses[anchor_index].pose.position.z - raw_route.poses[i - 1].pose.position.z;
+    if(std::sqrt(dx * dx + dy * dy + dz * dz) >= kMinTangentDistance){
+      tangent_start_index = i - 1;
+      break;
+    }
+  }
+
+  for(std::size_t i = anchor_index + 1; i < raw_route.poses.size(); ++i){
+    const double dx =
+      raw_route.poses[i].pose.position.x - raw_route.poses[anchor_index].pose.position.x;
+    const double dy =
+      raw_route.poses[i].pose.position.y - raw_route.poses[anchor_index].pose.position.y;
+    const double dz =
+      raw_route.poses[i].pose.position.z - raw_route.poses[anchor_index].pose.position.z;
+    if(std::sqrt(dx * dx + dy * dy + dz * dz) >= kMinTangentDistance){
+      tangent_end_index = i;
+      break;
+    }
+  }
+
+  if(tangent_start_index == tangent_end_index){
+    return false;
+  }
+
+  const double dx =
+    raw_route.poses[tangent_end_index].pose.position.x -
+    raw_route.poses[tangent_start_index].pose.position.x;
+  const double dy =
+    raw_route.poses[tangent_end_index].pose.position.y -
+    raw_route.poses[tangent_start_index].pose.position.y;
+  if(std::hypot(dx, dy) < 1e-6){
+    return false;
+  }
+
+  *anchor_yaw = std::atan2(dy, dx);
+  tf2::Quaternion q;
+  q.setRPY(0.0, 0.0, *anchor_yaw);
+
+  *anchor_pose = raw_route.poses[anchor_index];
+  anchor_pose->header.frame_id = global_frame_;
+  anchor_pose->header.stamp = clock_->now();
+  anchor_pose->pose.orientation.x = q.getX();
+  anchor_pose->pose.orientation.y = q.getY();
+  anchor_pose->pose.orientation.z = q.getZ();
+  anchor_pose->pose.orientation.w = q.getW();
+  return true;
+}
+
+nav_msgs::msg::Path GlobalPlanner::composeEntryConnectorWithRouteTail(
+  const nav_msgs::msg::Path & entry_connector,
+  const nav_msgs::msg::Path & raw_route,
+  std::size_t anchor_index) const
+{
+  nav_msgs::msg::Path composed_path;
+  composed_path.header.frame_id = global_frame_;
+  composed_path.header.stamp = clock_->now();
+
+  auto append_pose =
+    [&composed_path](geometry_msgs::msg::PoseStamped pose) {
+      pose.header = composed_path.header;
+      composed_path.poses.push_back(pose);
+    };
+
+  for(const auto & pose : entry_connector.poses){
+    append_pose(pose);
+  }
+
+  if(raw_route.poses.empty()){
+    return composed_path;
+  }
+
+  anchor_index = std::min(anchor_index, raw_route.poses.size() - 1);
+  constexpr double kDedupDistance = 0.05;
+  for(std::size_t i = anchor_index; i < raw_route.poses.size(); ++i){
+    if(!composed_path.poses.empty()){
+      const auto & last_pose = composed_path.poses.back().pose.position;
+      const auto & next_pose = raw_route.poses[i].pose.position;
+      const double dx = last_pose.x - next_pose.x;
+      const double dy = last_pose.y - next_pose.y;
+      const double dz = last_pose.z - next_pose.z;
+      if(std::sqrt(dx * dx + dy * dy + dz * dz) <= kDedupDistance){
+        continue;
+      }
+    }
+    append_pose(raw_route.poses[i]);
+  }
+
+  return composed_path;
+}
+
+bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
+  const geometry_msgs::msg::PoseStamped & start,
+  const geometry_msgs::msg::PoseStamped & goal,
+  nav_msgs::msg::Path * raw_route,
+  nav_msgs::msg::Path * frozen_route,
+  std::size_t * anchor_index,
+  double * anchor_distance,
+  std::size_t * connector_pose_count,
+  bool * connector_used_fallback)
+{
+  if(raw_route == nullptr || frozen_route == nullptr){
+    return false;
+  }
+
+  *raw_route = makeROSPlanLocked(start, goal, false, false, 0);
+  *frozen_route = *raw_route;
+  if(anchor_index != nullptr){
+    *anchor_index = 0;
+  }
+  if(anchor_distance != nullptr){
+    *anchor_distance = 0.0;
+  }
+  if(connector_pose_count != nullptr){
+    *connector_pose_count = 0;
+  }
+  if(connector_used_fallback != nullptr){
+    *connector_used_fallback = false;
+  }
+
+  if(raw_route->poses.empty()){
+    return false;
+  }
+
+  if(!enable_entry_connector_){
+    return true;
+  }
+
+  if(!use_forward_hybrid_astar_ || forward_hybrid_astar_planner_ == nullptr){
+    if(connector_used_fallback != nullptr){
+      *connector_used_fallback = true;
+    }
+    RCLCPP_WARN(
+      this->get_logger(),
+      "entry connector fallback used because ForwardHybridAStar is unavailable.");
+    return true;
+  }
+
+  const std::vector<double> arc_lengths = computePathArcLengths(*raw_route);
+  const std::vector<std::size_t> candidate_indices =
+    selectEntryAnchorCandidates(*raw_route, arc_lengths, start);
+  if(candidate_indices.empty()){
+    if(connector_used_fallback != nullptr){
+      *connector_used_fallback = true;
+    }
+    RCLCPP_WARN(this->get_logger(), "entry connector fallback used because no anchor candidate is available.");
+    return true;
+  }
+
+  bool success_on_primary_candidate = true;
+  for(std::size_t candidate_order = 0; candidate_order < candidate_indices.size(); ++candidate_order){
+    const std::size_t candidate_index = candidate_indices[candidate_order];
+    const double candidate_distance =
+      (candidate_index < arc_lengths.size()) ? arc_lengths[candidate_index] : 0.0;
+    const bool candidate_in_window =
+      candidate_distance >= entry_connector_min_anchor_distance_ &&
+      candidate_distance <= entry_connector_max_anchor_distance_;
+    geometry_msgs::msg::PoseStamped anchor_pose;
+    double anchor_yaw = 0.0;
+    if(!buildAnchorPoseFromRoute(*raw_route, candidate_index, &anchor_pose, &anchor_yaw)){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "entry connector failed, anchor_index=%zu, anchor_distance=%.2f, anchor_yaw=nan (invalid route tangent)",
+        candidate_index,
+        candidate_distance);
+      success_on_primary_candidate = false;
+      continue;
+    }
+
+    nav_msgs::msg::Path entry_connector;
+    if(!forward_hybrid_astar_planner_->MakePlan(
+         start,
+         anchor_pose,
+         &entry_connector,
+         false,
+         entry_connector_force_goal_heading_,
+         0))
+    {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "entry connector failed, anchor_index=%zu, anchor_distance=%.2f, anchor_yaw=%.2f",
+        candidate_index,
+        candidate_distance,
+        anchor_yaw);
+      success_on_primary_candidate = false;
+      continue;
+    }
+
+    nav_msgs::msg::Path composed_route =
+      composeEntryConnectorWithRouteTail(entry_connector, *raw_route, candidate_index);
+    if(composed_route.poses.empty()){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "entry connector failed, anchor_index=%zu, anchor_distance=%.2f, anchor_yaw=%.2f (composition produced empty path)",
+        candidate_index,
+        candidate_distance,
+        anchor_yaw);
+      success_on_primary_candidate = false;
+      continue;
+    }
+
+    *frozen_route = composed_route;
+    if(anchor_index != nullptr){
+      *anchor_index = candidate_index;
+    }
+    if(anchor_distance != nullptr){
+      *anchor_distance = candidate_distance;
+    }
+    if(connector_pose_count != nullptr){
+      *connector_pose_count = entry_connector.poses.size();
+    }
+    if(connector_used_fallback != nullptr){
+      *connector_used_fallback =
+        !candidate_in_window || !success_on_primary_candidate || candidate_order > 0;
+    }
+    return true;
+  }
+
+  if(connector_used_fallback != nullptr){
+    *connector_used_fallback = true;
+  }
+  RCLCPP_WARN(
+    this->get_logger(),
+    "entry connector fallback used, publish raw route only, raw_route_poses=%zu",
+    raw_route->poses.size());
+  return true;
+}
+
+bool GlobalPlanner::BuildFrozenRouteWithEntryConnector(
+  const geometry_msgs::msg::PoseStamped & start,
+  const geometry_msgs::msg::PoseStamped & goal,
+  nav_msgs::msg::Path * frozen_route)
+{
+  nav_msgs::msg::Path raw_route;
+  std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
+  return buildFrozenRouteWithEntryConnectorLocked(
+    start,
+    goal,
+    &raw_route,
+    frozen_route,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr);
+}
+
 void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle){
   
   //@get goal and start
@@ -782,19 +1268,88 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
   geometry_msgs::msg::PoseStamped start;
   perception_3d_ros_->getGlobalPose(start);
 
-  auto ros_path = makeROSPlan(start, goal->goal, false, false, 0);
+  nav_msgs::msg::Path raw_route;
+  nav_msgs::msg::Path frozen_route;
+  std::size_t anchor_index = 0;
+  double anchor_distance = 0.0;
+  std::size_t connector_pose_count = 0;
+  bool connector_used_fallback = false;
+  {
+    std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
+    if(!buildFrozenRouteWithEntryConnectorLocked(
+         start,
+         goal->goal,
+         &raw_route,
+         &frozen_route,
+         &anchor_index,
+         &anchor_distance,
+         &connector_pose_count,
+         &connector_used_fallback))
+    {
+      frozen_route = raw_route;
+    }
+  }
 
-  if(ros_path.poses.empty()){
-    publishRawRouteDebugPath(ros_path, goal_seq, debug_route_version_, "get_plan_failed");
-    global_plan_result_->path = ros_path;
+  if(raw_route.poses.empty()){
+    publishRawRouteDebugPath(raw_route, goal_seq, debug_route_version_, "get_plan_failed");
+    publishFrozenRouteDebugPath(frozen_route, goal_seq, debug_route_version_, "get_plan_failed");
+    global_plan_result_->path = frozen_route;
     goal_handle->abort(global_plan_result_);
   }
   else{
-    //postSmoothPath(path, smoothed_path);
     const std::size_t route_version = ++debug_route_version_;
-    publishRawRouteDebugPath(ros_path, goal_seq, route_version, "get_plan");
-    pub_path_->publish(ros_path);
-    global_plan_result_->path = ros_path;
+    publishRawRouteDebugPath(raw_route, goal_seq, route_version, "get_plan_raw_route");
+    RCLCPP_INFO(
+      this->get_logger(),
+      "raw route generated, goal_seq=%zu, route_version=%zu, poses=%zu",
+      goal_seq,
+      route_version,
+      raw_route.poses.size());
+    if(!connector_used_fallback && connector_pose_count > 0){
+      RCLCPP_INFO(
+        this->get_logger(),
+        "entry connector generated successfully, goal_seq=%zu, route_version=%zu, anchor_index=%zu, anchor_distance=%.2f, connector_poses=%zu, route_tail_poses=%zu, frozen_route_poses=%zu",
+        goal_seq,
+        route_version,
+        anchor_index,
+        anchor_distance,
+        connector_pose_count,
+        raw_route.poses.size() > anchor_index ? raw_route.poses.size() - anchor_index : 0,
+        frozen_route.poses.size());
+    }
+    else if(enable_entry_connector_){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "entry connector fallback used, goal_seq=%zu, route_version=%zu, anchor_index=%zu, anchor_distance=%.2f, raw_route_poses=%zu, frozen_route_poses=%zu",
+        goal_seq,
+        route_version,
+        anchor_index,
+        anchor_distance,
+        raw_route.poses.size(),
+        frozen_route.poses.size());
+    }
+    publishFrozenRouteDebugPath(
+      frozen_route,
+      goal_seq,
+      route_version,
+      connector_used_fallback ? "get_plan_frozen_route_fallback" : "get_plan_frozen_route");
+    RCLCPP_INFO(
+      this->get_logger(),
+      "frozen route composed, goal_seq=%zu, route_version=%zu, route_tail_poses=%zu, connector_poses=%zu, frozen_route_poses=%zu, anchor_index=%zu, anchor_distance=%.2f",
+      goal_seq,
+      route_version,
+      raw_route.poses.size() > anchor_index ? raw_route.poses.size() - anchor_index : 0,
+      connector_pose_count,
+      frozen_route.poses.size(),
+      anchor_index,
+      anchor_distance);
+    pub_path_->publish(frozen_route);
+    RCLCPP_INFO(
+      this->get_logger(),
+      "frozen route published for goal_seq=%zu, route_version=%zu",
+      goal_seq,
+      route_version);
+    global_plan_result_->path = frozen_route;
     goal_handle->succeed(global_plan_result_);
   }
   clearCurrentHandleIfMatches(goal_handle);
@@ -805,9 +1360,24 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlan(
   const geometry_msgs::msg::PoseStamped& goal,
   bool force_position_only_goal,
   bool force_use_goal_heading,
-  int preferred_initial_turn_sign){
-  
+  int preferred_initial_turn_sign)
+{
   std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
+  return makeROSPlanLocked(
+    start,
+    goal,
+    force_position_only_goal,
+    force_use_goal_heading,
+    preferred_initial_turn_sign);
+}
+
+nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
+  const geometry_msgs::msg::PoseStamped& start,
+  const geometry_msgs::msg::PoseStamped& goal,
+  bool force_position_only_goal,
+  bool force_use_goal_heading,
+  int preferred_initial_turn_sign){
+
   unsigned int start_id = 0;
   unsigned int goal_id = 0;
   bool has_start_goal_id = false;

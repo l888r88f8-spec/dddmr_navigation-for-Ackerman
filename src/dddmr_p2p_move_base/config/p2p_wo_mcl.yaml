@@ -5,29 +5,32 @@ occupancy2ground:
 p2p_move_base:
   ros__parameters:
     use_sim_time: true
-    controller_frequency: 10.0
-    planner_patience: 10.0
+    orchestrator_frequency: 10.0
+    route_request_patience: 10.0
     oscillation_distance: 5.0
     oscillation_angle: 1.0
     oscillation_patience: 15.0
-    controller_patience: 10.0
-    no_plan_retry_num: 10
-    waiting_patience: 10.0
+    control_failure_patience: 10.0
+    max_recovery_attempts: 10
+    blocked_wait_patience: 10.0
+    recovery_action_name: ""
 global_plan_manager:
   ros__parameters:
     use_sim_time: true
-    global_planner_action_name: "get_plan"
-    global_plan_query_frequency: -1.0
+    route_action_name: "get_plan"
+    route_request_frequency: -1.0
 
 
 local_planner:
   ros__parameters:
     use_sim_time: true
     odom_topic: odom
-    forward_prune: 3.0
-    backward_prune: 1.0
+    local_reference:
+      forward_distance: 3.0
+      backward_distance: 1.0
     heading_tracking_distance: 0.5
-    heading_align_angle: 6.28 #align heading to this value and then move. 6.28 means dont align heading before moving
+    route_start_alignment:
+      heading_tolerance: 6.28 # align heading to this value and then move. 6.28 means dont align heading before moving
     causal_prune_search_window: 40
     causal_prune_max_index_jump: 15
     causal_prune_max_arc_jump: 2.0
@@ -39,7 +42,8 @@ local_planner:
     cached_pruned_path_timeout_sec: 0.8
     prune_plane_timeout: 3.0
     xy_goal_tolerance: 0.3
-    yaw_goal_tolerance: 0.3
+    goal_alignment:
+      heading_tolerance: 0.3
     controller_frequency: 10.0
     
     cuboid:
@@ -221,6 +225,11 @@ global_planner:
     turning_weight: 0.1 #Punish the zig-zag path
     enable_detail_log: false
     a_star_expanding_radius: 0.5
+    entry_connector:
+      enable: true
+      min_anchor_distance: 2.5
+      max_anchor_distance: 4.0
+      force_goal_heading: true
 
 #if we use get_dwa_plan in global_plan_manager, we setup parameters for dwa_global_planner
 dynamic_window_aware_global_planner:

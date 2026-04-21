@@ -97,6 +97,10 @@ class GlobalPlanner : public rclcpp::Node {
         bool force_position_only_goal = false,
         bool force_use_goal_heading = false,
         int preferred_initial_turn_sign = 0);
+      bool BuildFrozenRouteWithEntryConnector(
+        const geometry_msgs::msg::PoseStamped & start,
+        const geometry_msgs::msg::PoseStamped & goal,
+        nav_msgs::msg::Path * frozen_route);
       std::shared_ptr<dddmr_sys_core::action::GetPlan::Result> global_plan_result_;
 
     private:
@@ -141,6 +145,10 @@ class GlobalPlanner : public rclcpp::Node {
       double direct_path_distance_threshold_;
       bool use_forward_hybrid_astar_;
       bool enable_direct_path_shortcut_;
+      bool enable_entry_connector_;
+      double entry_connector_min_anchor_distance_;
+      double entry_connector_max_anchor_distance_;
+      bool entry_connector_force_goal_heading_;
       size_t static_ground_size_;
       bool use_pre_graph_;
       ForwardHybridAStar::Config forward_hybrid_astar_config_;
@@ -164,6 +172,7 @@ class GlobalPlanner : public rclcpp::Node {
       
       rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path_;
       rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_raw_route_path_;
+      rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_frozen_route_path_;
       rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_static_graph_;
       rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_weighted_pc_;
       std::size_t debug_goal_seq_;
@@ -199,6 +208,40 @@ class GlobalPlanner : public rclcpp::Node {
         std::size_t goal_seq,
         std::size_t route_version,
         const std::string & source_label);
+      void publishFrozenRouteDebugPath(
+        const nav_msgs::msg::Path & path,
+        std::size_t goal_seq,
+        std::size_t route_version,
+        const std::string & source_label);
+      nav_msgs::msg::Path makeROSPlanLocked(
+        const geometry_msgs::msg::PoseStamped & start,
+        const geometry_msgs::msg::PoseStamped & goal,
+        bool force_position_only_goal = false,
+        bool force_use_goal_heading = false,
+        int preferred_initial_turn_sign = 0);
+      bool buildFrozenRouteWithEntryConnectorLocked(
+        const geometry_msgs::msg::PoseStamped & start,
+        const geometry_msgs::msg::PoseStamped & goal,
+        nav_msgs::msg::Path * raw_route,
+        nav_msgs::msg::Path * frozen_route,
+        std::size_t * anchor_index,
+        double * anchor_distance,
+        std::size_t * connector_pose_count,
+        bool * connector_used_fallback);
+      std::vector<double> computePathArcLengths(const nav_msgs::msg::Path & path) const;
+      std::vector<std::size_t> selectEntryAnchorCandidates(
+        const nav_msgs::msg::Path & raw_route,
+        const std::vector<double> & arc_lengths,
+        const geometry_msgs::msg::PoseStamped & start) const;
+      bool buildAnchorPoseFromRoute(
+        const nav_msgs::msg::Path & raw_route,
+        std::size_t anchor_index,
+        geometry_msgs::msg::PoseStamped * anchor_pose,
+        double * anchor_yaw) const;
+      nav_msgs::msg::Path composeEntryConnectorWithRouteTail(
+        const nav_msgs::msg::Path & entry_connector,
+        const nav_msgs::msg::Path & raw_route,
+        std::size_t anchor_index) const;
 
       void pubStaticGraph();
       void getROSPath(std::vector<unsigned int>& path_id, nav_msgs::msg::Path& ros_path);

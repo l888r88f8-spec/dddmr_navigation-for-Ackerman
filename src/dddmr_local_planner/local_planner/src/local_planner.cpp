@@ -73,21 +73,73 @@ void Local_Planner::initial(
   this->get_parameter("compute_best_trajectory_in_odomCb", compute_best_trajectory_in_odomCb_);
   RCLCPP_INFO(this->get_logger(), "compute_best_trajectory_in_odomCb: %d", compute_best_trajectory_in_odomCb_);
 
+  declare_parameter(
+    "local_reference.forward_distance",
+    rclcpp::ParameterValue(std::numeric_limits<double>::quiet_NaN()));
+  double configured_forward_reference_distance = std::numeric_limits<double>::quiet_NaN();
+  this->get_parameter(
+    "local_reference.forward_distance",
+    configured_forward_reference_distance);
   declare_parameter("forward_prune", rclcpp::ParameterValue(1.0));
   this->get_parameter("forward_prune", forward_prune_);
-  RCLCPP_INFO(this->get_logger(), "forward_prune: %.2f", forward_prune_);
+  if(std::isfinite(configured_forward_reference_distance)){
+    forward_prune_ = configured_forward_reference_distance;
+    RCLCPP_INFO(this->get_logger(), "local_reference.forward_distance: %.2f", forward_prune_);
+  }
+  else{
+    RCLCPP_INFO(
+      this->get_logger(),
+      "forward_prune (legacy local reference alias): %.2f",
+      forward_prune_);
+  }
 
+  declare_parameter(
+    "local_reference.backward_distance",
+    rclcpp::ParameterValue(std::numeric_limits<double>::quiet_NaN()));
+  double configured_backward_reference_distance = std::numeric_limits<double>::quiet_NaN();
+  this->get_parameter(
+    "local_reference.backward_distance",
+    configured_backward_reference_distance);
   declare_parameter("backward_prune", rclcpp::ParameterValue(0.5));
   this->get_parameter("backward_prune", backward_prune_);
-  RCLCPP_INFO(this->get_logger(), "backward_prune: %.2f", backward_prune_);
+  if(std::isfinite(configured_backward_reference_distance)){
+    backward_prune_ = configured_backward_reference_distance;
+    RCLCPP_INFO(this->get_logger(), "local_reference.backward_distance: %.2f", backward_prune_);
+  }
+  else{
+    RCLCPP_INFO(
+      this->get_logger(),
+      "backward_prune (legacy local reference alias): %.2f",
+      backward_prune_);
+  }
 
   declare_parameter("heading_tracking_distance", rclcpp::ParameterValue(0.5));
   this->get_parameter("heading_tracking_distance", heading_tracking_distance_);
   RCLCPP_INFO(this->get_logger(), "heading_tracking_distance: %.2f", heading_tracking_distance_);
 
+  declare_parameter(
+    "route_start_alignment.heading_tolerance",
+    rclcpp::ParameterValue(std::numeric_limits<double>::quiet_NaN()));
+  double configured_route_start_alignment_tolerance =
+    std::numeric_limits<double>::quiet_NaN();
+  this->get_parameter(
+    "route_start_alignment.heading_tolerance",
+    configured_route_start_alignment_tolerance);
   declare_parameter("heading_align_angle", rclcpp::ParameterValue(0.5));
   this->get_parameter("heading_align_angle", heading_align_angle_);
-  RCLCPP_INFO(this->get_logger(), "heading_align_angle: %.2f", heading_align_angle_);
+  if(std::isfinite(configured_route_start_alignment_tolerance)){
+    heading_align_angle_ = configured_route_start_alignment_tolerance;
+    RCLCPP_INFO(
+      this->get_logger(),
+      "route_start_alignment.heading_tolerance: %.2f",
+      heading_align_angle_);
+  }
+  else{
+    RCLCPP_INFO(
+      this->get_logger(),
+      "heading_align_angle (legacy route start alignment alias): %.2f",
+      heading_align_angle_);
+  }
 
   declare_parameter("causal_prune_search_window", rclcpp::ParameterValue(40));
   this->get_parameter("causal_prune_search_window", causal_prune_search_window_);
@@ -133,9 +185,28 @@ void Local_Planner::initial(
   this->get_parameter("xy_goal_tolerance", xy_goal_tolerance_);
   RCLCPP_INFO(this->get_logger(), "xy_goal_tolerance: %.2f", xy_goal_tolerance_);
 
+  declare_parameter(
+    "goal_alignment.heading_tolerance",
+    rclcpp::ParameterValue(std::numeric_limits<double>::quiet_NaN()));
+  double configured_goal_alignment_tolerance = std::numeric_limits<double>::quiet_NaN();
+  this->get_parameter(
+    "goal_alignment.heading_tolerance",
+    configured_goal_alignment_tolerance);
   declare_parameter("yaw_goal_tolerance", rclcpp::ParameterValue(0.3));
   this->get_parameter("yaw_goal_tolerance", yaw_goal_tolerance_);
-  RCLCPP_INFO(this->get_logger(), "yaw_goal_tolerance: %.2f", yaw_goal_tolerance_);
+  if(std::isfinite(configured_goal_alignment_tolerance)){
+    yaw_goal_tolerance_ = configured_goal_alignment_tolerance;
+    RCLCPP_INFO(
+      this->get_logger(),
+      "goal_alignment.heading_tolerance: %.2f",
+      yaw_goal_tolerance_);
+  }
+  else{
+    RCLCPP_INFO(
+      this->get_logger(),
+      "yaw_goal_tolerance (legacy goal alignment alias): %.2f",
+      yaw_goal_tolerance_);
+  }
 
   declare_parameter("controller_frequency", rclcpp::ParameterValue(10.0));
   this->get_parameter("controller_frequency", controller_frequency_);
@@ -624,7 +695,7 @@ bool Local_Planner::tryReuseCachedPrunedPath()
   publishDebugPath(
     prune_plan_,
     pub_local_pruned_path_,
-    "local_pruned_path",
+    "local_reference_path",
     route_version_,
     goal_seq_,
     route_source_label_,
@@ -955,7 +1026,22 @@ bool Local_Planner::isGoalReached(){
     return false;
 }
 
-void Local_Planner::setPlan(
+bool Local_Planner::isGoalPositionReached()
+{
+  return isGoalReached();
+}
+
+bool Local_Planner::isRouteStartAligned()
+{
+  return isInitialHeadingAligned();
+}
+
+bool Local_Planner::isGoalHeadingSatisfied()
+{
+  return isGoalHeadingAligned();
+}
+
+void Local_Planner::setRoute(
   const std::vector<geometry_msgs::msg::PoseStamped>& orig_global_plan,
   std::size_t route_version,
   std::size_t goal_seq,
@@ -969,7 +1055,7 @@ void Local_Planner::setPlan(
   {
     RCLCPP_INFO_THROTTLE(
       this->get_logger().get_child(name_), *clock_, 5000,
-      "Reuse delivered route for local planner, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu",
+      "reuse delivered route in route controller, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu",
       route_version,
       goal_seq,
       source_label.c_str(),
@@ -980,7 +1066,7 @@ void Local_Planner::setPlan(
   publishDebugPath(
     buildPathFromPlan(orig_global_plan),
     pub_route_sent_to_local_,
-    "route_sent_to_local",
+    "controller_route_reference",
     route_version,
     goal_seq,
     source_label,
@@ -989,7 +1075,7 @@ void Local_Planner::setPlan(
   if(orig_global_plan.size()<3){
     RCLCPP_ERROR(
       this->get_logger().get_child(name_),
-      "Size of global plan is smaller than 3, route_version=%zu, goal_seq=%zu, source=%s",
+      "route has fewer than 3 poses, route_version=%zu, goal_seq=%zu, source=%s",
       route_version,
       goal_seq,
       source_label.c_str());
@@ -1017,12 +1103,21 @@ void Local_Planner::setPlan(
   rebuildGlobalPlanArcLengths();
   RCLCPP_INFO(
     this->get_logger().get_child(name_),
-    "Receive new global plan, route_version=%zu, goal_seq=%zu, source=%s, poses=%zu, local_route_progress_index=%zu",
+    "receive new route reference, route_version=%zu, goal_seq=%zu, source=%s, poses=%zu, local_route_progress_index=%zu",
     route_version_,
     goal_seq_,
     route_source_label_.c_str(),
     global_plan_.size(),
     local_route_progress_index_);
+}
+
+void Local_Planner::setPlan(
+  const std::vector<geometry_msgs::msg::PoseStamped>& orig_global_plan,
+  std::size_t route_version,
+  std::size_t goal_seq,
+  const std::string & source_label)
+{
+  setRoute(orig_global_plan, route_version, goal_seq, source_label);
 }
 
 double Local_Planner::getDistanceBTWPoseStamp(
@@ -1075,7 +1170,7 @@ bool Local_Planner::prunePlan(double forward_distance, double backward_distance)
     publishDebugPath(
       prune_plan_,
       pub_local_pruned_path_,
-      "local_pruned_path",
+      "local_reference_path",
       route_version_,
       goal_seq_,
       route_source_label_,
@@ -1115,7 +1210,7 @@ bool Local_Planner::prunePlan(double forward_distance, double backward_distance)
     publishDebugPath(
       prune_plan_,
       pub_local_pruned_path_,
-      "local_pruned_path",
+      "local_reference_path",
       route_version_,
       goal_seq_,
       route_source_label_,
@@ -1129,7 +1224,7 @@ bool Local_Planner::prunePlan(double forward_distance, double backward_distance)
   publishDebugPath(
     prune_plan_,
     pub_local_pruned_path_,
-    "local_pruned_path",
+    "local_reference_path",
     route_version_,
     goal_seq_,
     route_source_label_,
@@ -1235,7 +1330,7 @@ void Local_Planner::getBestTrajectory(std::string traj_gen_name, base_trajectory
   publishDebugPath(
     best_trajectory_path,
     pub_best_trajectory_path_,
-    "best_trajectory",
+    "best_control_trajectory",
     route_version_,
     goal_seq_,
     route_source_label_,
@@ -1325,7 +1420,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
         last_robot_to_route_distance_);
       RCLCPP_FATAL(
         this->get_logger().get_child(name_),
-        "Deviate global plan too much, computeVelocityCommand() returns false.");
+        "deviation from route reference exceeded tolerance, computeVelocityCommand() returns false.");
       return dddmr_sys_core::PRUNE_PLAN_FAIL;
     }
 
@@ -1415,9 +1510,9 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   auto t_diff = clock_->now() - control_loop_time_;
   RCLCPP_DEBUG(this->get_logger().get_child(name_), "Full control cycle time: %.9f", t_diff.seconds());
 
-  if(t_diff.seconds() > 1./controller_frequency_){
-    RCLCPP_WARN(this->get_logger().get_child(name_), "Local planner control time exceed expect time: %.2f but is %.2f", 1./controller_frequency_, t_diff.seconds());
-  }
+  // if(t_diff.seconds() > 1./controller_frequency_){
+  //   RCLCPP_WARN(this->get_logger().get_child(name_), "Local planner control time exceed expect time: %.2f but is %.2f", 1./controller_frequency_, t_diff.seconds());
+  // }
   
   //@Loop opinions
   for(auto opinion_it=opinions.begin(); opinion_it!=opinions.end();opinion_it++){
@@ -1444,6 +1539,29 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   mpc_critics_ros_->getSharedDataPtr()->pcl_perception_.reset(new pcl::PointCloud<pcl::PointXYZI>());
   mpc_critics_ros_->getSharedDataPtr()->pcl_perception_kdtree_.reset(new pcl::KdTreeFLANN<pcl::PointXYZI>());
   return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
+}
+
+dddmr_sys_core::PlannerState Local_Planner::computeControlCommand(
+  const std::string & controller_name,
+  geometry_msgs::msg::Twist * cmd_vel)
+{
+  if(cmd_vel != nullptr){
+    cmd_vel->linear.x = 0.0;
+    cmd_vel->linear.y = 0.0;
+    cmd_vel->linear.z = 0.0;
+    cmd_vel->angular.x = 0.0;
+    cmd_vel->angular.y = 0.0;
+    cmd_vel->angular.z = 0.0;
+  }
+
+  base_trajectory::Trajectory best_traj;
+  const auto planner_state = computeVelocityCommand(controller_name, best_traj);
+  if(planner_state == dddmr_sys_core::TRAJECTORY_FOUND && cmd_vel != nullptr){
+    cmd_vel->linear.x = best_traj.xv_;
+    cmd_vel->linear.y = best_traj.yv_;
+    cmd_vel->angular.z = best_traj.thetav_;
+  }
+  return planner_state;
 }
 
 void Local_Planner::trajectory2posearray_cuboids(const base_trajectory::Trajectory& a_traj, 

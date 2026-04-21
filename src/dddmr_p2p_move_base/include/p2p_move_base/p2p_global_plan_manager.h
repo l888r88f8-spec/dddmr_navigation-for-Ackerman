@@ -68,17 +68,17 @@ private:
   std::shared_ptr<tf2_ros::TransformListener> tfl_;
   std::shared_ptr<tf2_ros::Buffer> tf2Buffer_;
   
-  std::string global_planner_action_name_;
-  double global_plan_query_frequency_;
+  std::string route_action_name_;
+  double route_request_frequency_;
   bool freeze_route_per_goal_;
   geometry_msgs::msg::PoseStamped goal_;
   bool is_planning_;
   bool got_first_goal_;
-  bool goal_plan_attempted_;
-  bool goal_plan_failed_;
+  bool route_requested_for_goal_;
+  bool route_request_failed_;
   std::size_t goal_seq_;
   std::size_t route_version_;
-  nav_msgs::msg::Path global_path_;
+  nav_msgs::msg::Path active_route_;
   nav_msgs::msg::Path frozen_route_;
   std::string route_source_label_;
 
@@ -104,12 +104,21 @@ public:
   void setGoal(const geometry_msgs::msg::PoseStamped& goal);
   void resume();
   void stop(const std::string & reason = "goal finished/canceled/failed");
-  bool hasPlan();
+  bool hasRoute();
+  bool hasPlan(){return hasRoute();}
+  void copyRoute(
+    std::vector<geometry_msgs::msg::PoseStamped>& route,
+    std::size_t * route_version = nullptr,
+    std::size_t * goal_seq = nullptr,
+    std::string * source_label = nullptr);
   void copyPlan(
     std::vector<geometry_msgs::msg::PoseStamped>& plan,
     std::size_t * route_version = nullptr,
     std::size_t * goal_seq = nullptr,
-    std::string * source_label = nullptr);
+    std::string * source_label = nullptr)
+  {
+    copyRoute(plan, route_version, goal_seq, source_label);
+  }
 
 };
 }  // namespace p2p_move_base

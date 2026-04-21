@@ -72,11 +72,12 @@ void P2PMoveBase::handle_accepted(const std::shared_ptr<rclcpp_action::ServerGoa
   std::thread{std::bind(&P2PMoveBase::executeCb, this, std::placeholders::_1), goal_handle}.detach();
 }
 
-void P2PMoveBase::initial(const std::shared_ptr<local_planner::Local_Planner>& lp
-                    ,const std::shared_ptr<p2p_move_base::P2PGlobalPlanManager>& gpm){
+void P2PMoveBase::initial(
+  const std::shared_ptr<dddmr_sys_core::RouteTrackingController>& route_controller,
+  const std::shared_ptr<p2p_move_base::P2PGlobalPlanManager>& route_manager){
   
-  LP_ = lp;
-  GPM_ = gpm;
+  route_controller_ = route_controller;
+  route_manager_ = route_manager;
 
   FSM_ = std::make_shared<p2p_move_base::FSM>(this->get_node_logging_interface(), this->get_node_parameters_interface());
   
@@ -104,21 +105,57 @@ void P2PMoveBase::initial(const std::shared_ptr<local_planner::Local_Planner>& l
       this,
       "recovery_behaviors", recovery_behaviors_client_group_);
 
+  this->declare_parameter("tracking_controller_name", rclcpp::ParameterValue(""));
+  this->get_parameter("tracking_controller_name", tracking_controller_name_);
   this->declare_parameter("drive_trajectory_generator_name", rclcpp::ParameterValue("differential_drive_simple"));
-  this->get_parameter("drive_trajectory_generator_name", drive_trajectory_generator_name_);
-  RCLCPP_INFO(this->get_logger(), "drive_trajectory_generator_name: %s", drive_trajectory_generator_name_.c_str());
-
-  this->declare_parameter("rotate_trajectory_generator_name", rclcpp::ParameterValue("differential_drive_rotate_shortest_angle"));
-  this->get_parameter("rotate_trajectory_generator_name", rotate_trajectory_generator_name_);
-  RCLCPP_INFO(this->get_logger(), "rotate_trajectory_generator_name: %s", rotate_trajectory_generator_name_.c_str());
-
-  this->declare_parameter("recovery_behavior_name", rclcpp::ParameterValue("rotate_inplace"));
-  this->get_parameter("recovery_behavior_name", recovery_behavior_name_);
-  if(recovery_behavior_name_.empty()){
-    RCLCPP_WARN(this->get_logger(), "recovery_behavior_name is empty, recovery behavior is disabled.");
+  std::string legacy_tracking_controller_name;
+  this->get_parameter("drive_trajectory_generator_name", legacy_tracking_controller_name);
+  if(tracking_controller_name_.empty()){
+    tracking_controller_name_ = legacy_tracking_controller_name;
+    RCLCPP_INFO(
+      this->get_logger(),
+      "drive_trajectory_generator_name (legacy tracking controller alias): %s",
+      tracking_controller_name_.c_str());
   }
   else{
-    RCLCPP_INFO(this->get_logger(), "recovery_behavior_name: %s", recovery_behavior_name_.c_str());
+    RCLCPP_INFO(this->get_logger(), "tracking_controller_name: %s", tracking_controller_name_.c_str());
+  }
+
+  this->declare_parameter("alignment_controller_name", rclcpp::ParameterValue(""));
+  this->get_parameter("alignment_controller_name", alignment_controller_name_);
+  this->declare_parameter("rotate_trajectory_generator_name", rclcpp::ParameterValue("differential_drive_rotate_shortest_angle"));
+  std::string legacy_alignment_controller_name;
+  this->get_parameter("rotate_trajectory_generator_name", legacy_alignment_controller_name);
+  if(alignment_controller_name_.empty()){
+    alignment_controller_name_ = legacy_alignment_controller_name;
+    RCLCPP_INFO(
+      this->get_logger(),
+      "rotate_trajectory_generator_name (legacy alignment controller alias): %s",
+      alignment_controller_name_.c_str());
+  }
+  else{
+    RCLCPP_INFO(this->get_logger(), "alignment_controller_name: %s", alignment_controller_name_.c_str());
+  }
+
+  this->declare_parameter("recovery_action_name", rclcpp::ParameterValue(""));
+  this->get_parameter("recovery_action_name", recovery_action_name_);
+  this->declare_parameter("recovery_behavior_name", rclcpp::ParameterValue(""));
+  std::string legacy_recovery_action_name;
+  this->get_parameter("recovery_behavior_name", legacy_recovery_action_name);
+  if(recovery_action_name_.empty()){
+    recovery_action_name_ = legacy_recovery_action_name;
+  }
+  if(recovery_action_name_.empty()){
+    RCLCPP_WARN(this->get_logger(), "recovery_action_name is empty, explicit recovery action is disabled.");
+  }
+  else if(recovery_action_name_ == legacy_recovery_action_name){
+    RCLCPP_INFO(
+      this->get_logger(),
+      "recovery_behavior_name (legacy recovery action alias): %s",
+      recovery_action_name_.c_str());
+  }
+  else{
+    RCLCPP_INFO(this->get_logger(), "recovery_action_name: %s", recovery_action_name_.c_str());
   }
 
   //@Create action server
@@ -139,8 +176,8 @@ P2PMoveBase::~P2PMoveBase(){
   FSM_.reset();
   tf2Buffer_.reset();
   tfl_.reset();
-  LP_.reset();
-  GPM_.reset();
+  route_controller_.reset();
+  route_manager_.reset();
 }
 
 bool P2PMoveBase::isQuaternionValid(const geometry_msgs::msg::Quaternion& q){
@@ -207,6 +244,34 @@ void P2PMoveBase::publishVelocity(double vx, double vy, double angular_z){
   }
 }
 
+void P2PMoveBase::publishVelocity(const geometry_msgs::msg::Twist & cmd_vel)
+{
+  publishVelocity(cmd_vel.linear.x, cmd_vel.linear.y, cmd_vel.angular.z);
+}
+
+bool P2PMoveBase::syncRouteReferenceFromManager(const std::string & consumer_label)
+{
+  if(!route_manager_ || !route_controller_ || !route_manager_->hasRoute()){
+    return false;
+  }
+
+  std::vector<geometry_msgs::msg::PoseStamped> route;
+  std::size_t route_version = 0;
+  std::size_t goal_seq = 0;
+  std::string source_label;
+  route_manager_->copyRoute(route, &route_version, &goal_seq, &source_label);
+  if(route.empty()){
+    RCLCPP_WARN(
+      this->get_logger(),
+      "route manager reported an available route but returned an empty path (%s)",
+      consumer_label.c_str());
+    return false;
+  }
+
+  route_controller_->setRoute(route, route_version, goal_seq, source_label);
+  return true;
+}
+
 void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> goal_handle)
 {
   auto result = std::make_shared<dddmr_sys_core::action::PToPMoveBase::Result>();
@@ -219,41 +284,41 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
     return;
   }
 
-  rclcpp::Rate r(FSM_->controller_frequency_);
+  rclcpp::Rate r(FSM_->orchestrator_frequency_);
 
   //@ if we dont initialize oscillation pose here, the first controlling entry will cause recovery behavior.
   //@ the rclcpp::Time initial are all done in FSM class
-  FSM_->initialParams(LP_->getGlobalPose(), clock_->now());
+  FSM_->initialParams(route_controller_->getGlobalPose(), clock_->now());
   FSM_->current_goal_ = move_base_goal->target_pose;
-  GPM_->setGoal(FSM_->current_goal_);
-  GPM_->resume();
+  route_manager_->setGoal(FSM_->current_goal_);
+  route_manager_->resume();
 
   while(rclcpp::ok()){
 
     if(!goal_handle->is_active()){
       
-      if(FSM_->isCurrentDecision("d_recovery_waitdone")){
-        RCLCPP_INFO(this->get_logger(), "P2P is in recovery state, cancel recovery behaviors.");
+      if(FSM_->isPhase(FSM::NavigationPhase::kRecoveryAction)){
+        RCLCPP_INFO(this->get_logger(), "navigation is in recovery action state, cancel recovery behaviors.");
         recovery_behaviors_client_ptr_->async_cancel_all_goals();
       }
 
       RCLCPP_INFO(this->get_logger(), "P2P move base preempted.");
       publishZeroVelocity();
-      GPM_->stop("goal preempted");
+      route_manager_->stop("goal preempted");
       return;
     }
 
     if(goal_handle->is_canceling()){
 
-      if(FSM_->isCurrentDecision("d_recovery_waitdone")){
-        RCLCPP_INFO(this->get_logger(), "P2P is in recovery state, cancel recovery behaviors.");
+      if(FSM_->isPhase(FSM::NavigationPhase::kRecoveryAction)){
+        RCLCPP_INFO(this->get_logger(), "navigation is in recovery action state, cancel recovery behaviors.");
         recovery_behaviors_client_ptr_->async_cancel_all_goals();
       }
 
       goal_handle->canceled(result);
       RCLCPP_INFO(this->get_logger(), "P2P move base cancelled.");
       publishZeroVelocity();
-      GPM_->stop("goal canceled");
+      route_manager_->stop("goal canceled");
       return;
     }
 
@@ -268,7 +333,7 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
 
     //if we're done, then we'll return from execute
     if(done){
-      GPM_->stop("goal finished/canceled/failed");
+      route_manager_->stop("goal finished/canceled/failed");
       return;
     }
     
@@ -277,448 +342,298 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
     //if(FSM_->isCurrentDecision("d_controlling") && r.cycleTime() > ros::Duration(1 / FSM_->controller_frequency_))
     //  ROS_WARN("Control loop missed its desired rate of %.4fHz... the loop actually took %.4f seconds", FSM_->controller_frequency_, r.cycleTime().toSec());
   }
-  GPM_->stop("goal finished/canceled/failed");
+  route_manager_->stop("goal finished/canceled/failed");
 }
 
 bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> goal_handle){
-    FSM_->global_pose_ = LP_->getGlobalPose();
-    if(FSM_->getDistance(FSM_->global_pose_, FSM_->oscillation_pose_) >= FSM_->oscillation_distance_ ||
-          FSM_->getAngle(FSM_->global_pose_, FSM_->oscillation_pose_) >= FSM_->oscillation_angle_)
+  FSM_->global_pose_ = route_controller_->getGlobalPose();
+  if(FSM_->getDistance(FSM_->global_pose_, FSM_->oscillation_pose_) >= FSM_->oscillation_distance_ ||
+     FSM_->getAngle(FSM_->global_pose_, FSM_->oscillation_pose_) >= FSM_->oscillation_angle_)
+  {
+    FSM_->oscillation_pose_ = FSM_->global_pose_;
+    FSM_->last_oscillation_reset_ = clock_->now();
+  }
+
+  const auto start_recovery_or_route_refresh =
+    [&](const std::string & reason) {
+      publishZeroVelocity();
+      if(startRecoveryAction(reason)){
+        FSM_->setPhase(FSM::NavigationPhase::kRecoveryAction, reason);
+      }
+      else{
+        FSM_->last_valid_plan_ = clock_->now();
+        FSM_->setPhase(FSM::NavigationPhase::kRouteRequest, reason + ", fallback to route refresh");
+      }
+      return false;
+    };
+
+  const auto route_refresh =
+    [&](const std::string & reason) {
+      publishZeroVelocity();
+      FSM_->last_valid_plan_ = clock_->now();
+      FSM_->setPhase(FSM::NavigationPhase::kRouteRequest, reason);
+      return false;
+    };
+
+  const auto wait_for_clearance =
+    [&](const std::string & reason) {
+      publishZeroVelocity();
+      FSM_->waiting_time_ = clock_->now();
+      FSM_->setPhase(FSM::NavigationPhase::kBlockedWait, reason);
+      return false;
+    };
+
+  const auto handle_common_control_fault =
+    [&](dddmr_sys_core::PlannerState planner_state,
+        const std::string & phase_label,
+        bool allow_blocked_wait) -> bool {
+      if(planner_state == dddmr_sys_core::PlannerState::PERCEPTION_MALFUNCTION){
+        RCLCPP_WARN_THROTTLE(
+          this->get_logger(), *clock_, 5000,
+          "%s paused because perception data is out of date",
+          phase_label.c_str());
+        publishZeroVelocity();
+        return false;
+      }
+      if(planner_state == dddmr_sys_core::PlannerState::TF_FAIL){
+        RCLCPP_WARN_THROTTLE(
+          this->get_logger(), *clock_, 5000,
+          "%s paused because TF is out of date",
+          phase_label.c_str());
+        publishZeroVelocity();
+        return false;
+      }
+      if(planner_state == dddmr_sys_core::PlannerState::PRUNE_PLAN_FAIL){
+        return route_refresh(phase_label + ": local reference prune failed");
+      }
+      if(planner_state == dddmr_sys_core::PlannerState::ALL_TRAJECTORIES_FAIL){
+        if((clock_->now() - FSM_->last_valid_control_).seconds() > FSM_->controller_patience_){
+          return start_recovery_or_route_refresh(phase_label + ": controller stalled");
+        }
+        return route_refresh(phase_label + ": controller requested route refresh");
+      }
+      if(planner_state == dddmr_sys_core::PlannerState::PATH_BLOCKED_REPLANNING){
+        return route_refresh(phase_label + ": route blocked, refresh route");
+      }
+      if(planner_state == dddmr_sys_core::PlannerState::PATH_BLOCKED_WAIT && allow_blocked_wait){
+        return wait_for_clearance(phase_label + ": route blocked, waiting");
+      }
+      if(planner_state == dddmr_sys_core::PlannerState::PATH_BLOCKED_WAIT){
+        return route_refresh(phase_label + ": route blocked during alignment");
+      }
+      RCLCPP_FATAL(this->get_logger(), "unhandled PlannerState in %s", phase_label.c_str());
+      publishZeroVelocity();
+      return false;
+    };
+
+  if(FSM_->isPhase(FSM::NavigationPhase::kIdle)){
+    FSM_->setPhase(FSM::NavigationPhase::kRouteRequest, "start goal orchestration");
+    return false;
+  }
+
+  if(FSM_->isPhase(FSM::NavigationPhase::kRouteRequest)){
+    route_manager_->queryThread();
+    FSM_->setPhase(FSM::NavigationPhase::kRoutePending, "route request sent");
+    return false;
+  }
+
+  if(FSM_->isPhase(FSM::NavigationPhase::kRoutePending)){
+    if(syncRouteReferenceFromManager("route_pending")){
+      FSM_->last_valid_plan_ = clock_->now();
+      FSM_->setPhase(FSM::NavigationPhase::kRouteStartAlignment, "route received");
+      return false;
+    }
+
+    if((clock_->now() - FSM_->last_valid_plan_).seconds() > FSM_->route_request_patience_){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "route request timed out for goal (%.2f, %.2f, %.2f)",
+        FSM_->current_goal_.pose.position.x,
+        FSM_->current_goal_.pose.position.y,
+        FSM_->current_goal_.pose.position.z);
+      return start_recovery_or_route_refresh("route request timeout");
+    }
+    return false;
+  }
+
+  if(FSM_->isPhase(FSM::NavigationPhase::kRouteStartAlignment)){
+    if(route_controller_->isRouteStartAligned()){
+      FSM_->setPhase(FSM::NavigationPhase::kRouteTracking, "route start alignment satisfied");
+      return false;
+    }
+
+    if(FSM_->oscillation_patience_ > 0 &&
+       (clock_->now()-FSM_->last_oscillation_reset_).seconds() >= FSM_->oscillation_patience_)
     {
-      FSM_->oscillation_pose_ = FSM_->global_pose_;
-      FSM_->last_oscillation_reset_ = clock_->now();
+      const auto diff = (clock_->now()-FSM_->last_oscillation_reset_).seconds();
+      RCLCPP_WARN(
+        this->get_logger(),
+        "oscillation timeout during route start alignment: %.2f secs for %.2f m",
+        diff,
+        FSM_->getDistance(FSM_->global_pose_, FSM_->oscillation_pose_));
+      return start_recovery_or_route_refresh("route start alignment oscillation timeout");
     }
 
+    geometry_msgs::msg::Twist cmd_vel;
+    const auto planner_state =
+      route_controller_->computeControlCommand(alignment_controller_name_, &cmd_vel);
+    if(planner_state == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
+      FSM_->last_valid_control_ = clock_->now();
+      publishVelocity(cmd_vel);
+      return false;
+    }
+    return handle_common_control_fault(
+      planner_state,
+      "route start alignment",
+      true);
+  }
 
-    if(FSM_->isCurrentDecision("d_initial")){
-      FSM_->setDecision("d_planning");
+  if(FSM_->isPhase(FSM::NavigationPhase::kGoalAlignment)){
+    if(route_controller_->isGoalHeadingSatisfied()){
+      RCLCPP_INFO(this->get_logger(), "goal lifecycle complete");
+      auto result = std::make_shared<dddmr_sys_core::action::PToPMoveBase::Result>();
+      goal_handle->succeed(result);
+      publishZeroVelocity();
+      return true;
     }
 
-    else if(FSM_->isCurrentDecision("d_planning")){
-      GPM_->queryThread();
-      FSM_->setDecision("d_planning_waitdone");
+    if(FSM_->oscillation_patience_ > 0 &&
+       (clock_->now()-FSM_->last_oscillation_reset_).seconds() >= FSM_->oscillation_patience_)
+    {
+      const auto diff = (clock_->now()-FSM_->last_oscillation_reset_).seconds();
+      RCLCPP_WARN(
+        this->get_logger(),
+        "oscillation timeout during goal alignment: %.2f secs for %.2f m",
+        diff,
+        FSM_->getDistance(FSM_->global_pose_, FSM_->oscillation_pose_));
+      return start_recovery_or_route_refresh("goal alignment oscillation timeout");
+    }
+
+    geometry_msgs::msg::Twist cmd_vel;
+    const auto planner_state =
+      route_controller_->computeControlCommand(alignment_controller_name_, &cmd_vel);
+    if(planner_state == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
+      FSM_->last_valid_control_ = clock_->now();
+      publishVelocity(cmd_vel);
+      return false;
+    }
+    if(planner_state == dddmr_sys_core::PlannerState::ALL_TRAJECTORIES_FAIL ||
+       planner_state == dddmr_sys_core::PlannerState::PATH_BLOCKED_WAIT ||
+       planner_state == dddmr_sys_core::PlannerState::PATH_BLOCKED_REPLANNING)
+    {
+      if((clock_->now() - FSM_->last_valid_control_).seconds() > FSM_->controller_patience_){
+        return start_recovery_or_route_refresh("goal alignment controller stalled");
+      }
+      publishZeroVelocity();
+      return false;
+    }
+    return handle_common_control_fault(planner_state, "goal alignment", false);
+  }
+
+  if(FSM_->isPhase(FSM::NavigationPhase::kRouteTracking)){
+    if(route_controller_->isGoalPositionReached()){
+      publishZeroVelocity();
+      RCLCPP_INFO(this->get_logger(), "goal position tolerance reached, entering goal alignment");
+      FSM_->setPhase(FSM::NavigationPhase::kGoalAlignment, "goal position reached");
       return false;
     }
 
-    else if(FSM_->isCurrentDecision("d_planning_waitdone")){
-      
-      //@If global planner keep return empty plan, we will enter this state for n seconds, then abort
-      //@see: decision_planning
-      std::vector<geometry_msgs::msg::PoseStamped> plan;
-      if(GPM_->hasPlan()){
-        std::size_t route_version = 0;
-        std::size_t goal_seq = 0;
-        std::string source_label;
-        GPM_->copyPlan(plan, &route_version, &goal_seq, &source_label);
-        //if the planner fails or returns a zero length plan, planning failed
-        if(plan.empty()){
-          RCLCPP_DEBUG(this->get_logger(), "Failed to find a plan to point (%.2f, %.2f, %.2f)", 
-              FSM_->current_goal_.pose.position.x, FSM_->current_goal_.pose.position.y, FSM_->current_goal_.pose.position.z);
-          FSM_->setDecision("d_planning");
-        }
-        else{
-          FSM_->last_valid_plan_ = clock_->now();
-          LP_->setPlan(plan, route_version, goal_seq, source_label);
-          FSM_->setDecision("d_align_heading");  
-        }
-      }
+    syncRouteReferenceFromManager("route_tracking");
 
-      if((clock_->now()-FSM_->last_valid_plan_).seconds()>FSM_->planner_patience_){
-        RCLCPP_WARN(this->get_logger(), "Time out to find a plan to point (%.2f, %.2f, %.2f)", 
-            FSM_->current_goal_.pose.position.x, FSM_->current_goal_.pose.position.y, FSM_->current_goal_.pose.position.z);
-        if(startRecoveryBehaviors()){
-          FSM_->setDecision("d_recovery_waitdone");
-        }
-        else{
-          FSM_->setDecision("d_planning");
-        }
-        return false;
-      }
+    if(FSM_->oscillation_patience_ > 0 &&
+       (clock_->now()-FSM_->last_oscillation_reset_).seconds() >= FSM_->oscillation_patience_)
+    {
+      const auto diff = (clock_->now()-FSM_->last_oscillation_reset_).seconds();
+      RCLCPP_WARN(
+        this->get_logger(),
+        "oscillation timeout during route tracking: %.2f secs for %.2f m",
+        diff,
+        FSM_->getDistance(FSM_->global_pose_, FSM_->oscillation_pose_));
+      return start_recovery_or_route_refresh("route tracking oscillation timeout");
+    }
+
+    geometry_msgs::msg::Twist cmd_vel;
+    const auto planner_state =
+      route_controller_->computeControlCommand(tracking_controller_name_, &cmd_vel);
+    if(planner_state == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
+      FSM_->last_valid_control_ = clock_->now();
+      publishVelocity(cmd_vel);
       return false;
     }
-    
-    else if(FSM_->isCurrentDecision("d_align_heading")){
+    return handle_common_control_fault(planner_state, "route tracking", true);
+  }
 
-      if(LP_->isInitialHeadingAligned()){
-        FSM_->setDecision("d_controlling");  
-      }
-      else{
-
-        if(FSM_->oscillation_patience_ > 0 && (clock_->now()-FSM_->last_oscillation_reset_).seconds() >= FSM_->oscillation_patience_){
-          //@go to recovery
-          auto diff = (clock_->now()-FSM_->last_oscillation_reset_).seconds();
-          RCLCPP_WARN(this->get_logger(), "Oscillation time out is detected: %.2f secs for %.2f m.", diff, FSM_->getDistance(FSM_->global_pose_, FSM_->oscillation_pose_));
-          if(startRecoveryBehaviors()){
-            FSM_->setDecision("d_recovery_waitdone");
-          }
-          else{
-            FSM_->setDecision("d_planning");
-          }
-          return false;
-        }
-        
-        base_trajectory::Trajectory best_traj;
-        dddmr_sys_core::PlannerState PS = LP_->computeVelocityCommand(rotate_trajectory_generator_name_, best_traj);
-
-        if(PS == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
-          FSM_->last_valid_control_ = clock_->now();
-          FSM_->setDecision("d_align_heading");  
-          publishVelocity(best_traj.xv_, best_traj.yv_, best_traj.thetav_);
-          return false;
-        }
-        else if(PS == dddmr_sys_core::PlannerState::PERCEPTION_MALFUNCTION){
-          RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 5000, "Sensor data is out of date, we're not going to allow commanding of the base for safety");
-          publishZeroVelocity();
-          return false;
-        }
-        else if(PS == dddmr_sys_core::PlannerState::TF_FAIL){
-          RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 5000, "Detect TF fail in local planner, we're not going to allow commanding of the base for safety");
-          publishZeroVelocity();
-          return false;
-        }
-        else if(PS == dddmr_sys_core::PlannerState::PRUNE_PLAN_FAIL){
-          //@ this assignment will allow at least one time planning query
-          FSM_->last_valid_plan_ = clock_->now();
-          publishZeroVelocity();
-          FSM_->setDecision("d_planning");  
-          return false;
-        }
-        else if(PS == dddmr_sys_core::PlannerState::ALL_TRAJECTORIES_FAIL){
-          //At least implement last_valid_control_ timeout to abort here
-          //@ this assignment will allow at least one time planning query
-          if((clock_->now() - FSM_->last_valid_control_).seconds() > FSM_->controller_patience_){
-            RCLCPP_WARN(this->get_logger(), "Controller time out, go to recovery");
-            if(startRecoveryBehaviors()){
-              FSM_->setDecision("d_recovery_waitdone");
-            }
-            else{
-              FSM_->setDecision("d_planning");
-            }
-          }
-          else{
-            FSM_->last_valid_plan_ = clock_->now();
-            FSM_->setDecision("d_planning");  
-          }
-          publishZeroVelocity();
-          return false;
-        }
-
-        else if(PS == dddmr_sys_core::PlannerState::PATH_BLOCKED_WAIT || PS == dddmr_sys_core::PlannerState::PATH_BLOCKED_REPLANNING){
-          FSM_->last_valid_plan_ = clock_->now();
-          FSM_->setDecision("d_planning");
-          publishZeroVelocity();
-          return false;
-        }
-
-        else{
-          RCLCPP_FATAL(this->get_logger(), "Should not happen here, we did not catch dddmr_sys_core::PlannerState");
-          publishZeroVelocity();
-          return false;
-        }
-      }
-
+  if(FSM_->isPhase(FSM::NavigationPhase::kRecoveryAction)){
+    if(is_recoverying_){
+      return false;
     }
 
-    else if(FSM_->isCurrentDecision("d_align_goal_heading")){
-      if(LP_->isGoalHeadingAligned()){
-        RCLCPP_INFO(this->get_logger(), "Goal reach.");
-        auto result = std::make_shared<dddmr_sys_core::action::PToPMoveBase::Result>();
-        goal_handle->succeed(result);
-        publishZeroVelocity();
-        return true;
-      }
-      else{
-
-        if(FSM_->oscillation_patience_ >0 && (clock_->now()-FSM_->last_oscillation_reset_).seconds() >= FSM_->oscillation_patience_){
-          //@go to recovery
-          auto diff = (clock_->now()-FSM_->last_oscillation_reset_).seconds();
-          RCLCPP_WARN(this->get_logger(), "Oscillation time out is detected: %.2f secs for %.2f m.", diff, FSM_->getDistance(FSM_->global_pose_, FSM_->oscillation_pose_));
-          if(startRecoveryBehaviors()){
-            FSM_->setDecision("d_recovery_waitdone");
-          }
-          else{
-            FSM_->setDecision("d_planning");
-          }
-          return false;
-        }
-        
-        base_trajectory::Trajectory best_traj;
-        dddmr_sys_core::PlannerState PS = LP_->computeVelocityCommand(rotate_trajectory_generator_name_, best_traj);
-
-        if(PS == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
-          FSM_->last_valid_control_ = clock_->now();
-          FSM_->setDecision("d_align_goal_heading");  
-          publishVelocity(best_traj.xv_, best_traj.yv_, best_traj.thetav_);
-          return false;
-        }
-        else if(PS == dddmr_sys_core::PlannerState::PERCEPTION_MALFUNCTION){
-          RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 5000, "Sensor data is out of date, we're not going to allow commanding of the base for safety");
-          publishZeroVelocity();
-          return false;
-        }
-        else if(PS == dddmr_sys_core::PlannerState::TF_FAIL){
-          RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 5000, "Detect TF fail in local planner, we're not going to allow commanding of the base for safety");
-          publishZeroVelocity();
-          return false;
-        }
-        else if(PS == dddmr_sys_core::PlannerState::PRUNE_PLAN_FAIL){
-          //@ this assignment will allow at least one time planning query
-          FSM_->last_valid_plan_ = clock_->now();
-          publishZeroVelocity();
-          FSM_->setDecision("d_planning");  
-          return false;
-        }
-        else if(PS == dddmr_sys_core::PlannerState::ALL_TRAJECTORIES_FAIL ||
-                PS == dddmr_sys_core::PlannerState::PATH_BLOCKED_WAIT || 
-                PS == dddmr_sys_core::PlannerState::PATH_BLOCKED_REPLANNING){
-          //At least implement last_valid_control_ timeout to abort here
-          //@ this assignment will allow at least one time planning query
-          if((clock_->now() - FSM_->last_valid_control_).seconds() > FSM_->controller_patience_){
-            RCLCPP_WARN(this->get_logger(), "Controller time out, go to recovery");
-            if(startRecoveryBehaviors()){
-              FSM_->setDecision("d_recovery_waitdone");
-            }
-            else{
-              FSM_->setDecision("d_planning");
-            }
-          }
-          else{
-            FSM_->setDecision("d_align_goal_heading");  
-          }
-          publishZeroVelocity();
-          return false;
-        }
-        else{
-          RCLCPP_FATAL(this->get_logger(), "Should not happen here, we did not catch dddmr_sys_core::PlannerState");
-          publishZeroVelocity();
-          return false;
-        }
-      }
+    if(FSM_->recovery_attempt_count_ >= FSM_->max_recovery_attempts_){
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "route orchestration failed after %d recovery attempts",
+        FSM_->recovery_attempt_count_);
+      auto result = std::make_shared<dddmr_sys_core::action::PToPMoveBase::Result>();
+      goal_handle->abort(result);
+      publishZeroVelocity();
+      return true;
     }
 
-    else if(FSM_->isCurrentDecision("d_controlling")){
-
-      //@Check is goal xy tolerance reach
-      if(LP_->isGoalReached()){
-        publishZeroVelocity();
-        RCLCPP_INFO(this->get_logger(), "Goal xy tolerance reach, switch to align goal heading state.");
-        FSM_->setDecision("d_align_goal_heading");  
-        return false;
-      }
-      
-      //@ update global plan
-      if(GPM_->hasPlan()){
-        std::vector<geometry_msgs::msg::PoseStamped> plan;
-        std::size_t route_version = 0;
-        std::size_t goal_seq = 0;
-        std::string source_label;
-        GPM_->copyPlan(plan, &route_version, &goal_seq, &source_label);
-        LP_->setPlan(plan, route_version, goal_seq, source_label);
-      }
-      //@Behavior for oscillation here
-      
-      if(FSM_->oscillation_patience_ >0 && (clock_->now()-FSM_->last_oscillation_reset_).seconds() >= FSM_->oscillation_patience_){
-        //@go to recovery
-        auto diff = (clock_->now()-FSM_->last_oscillation_reset_).seconds();
-        RCLCPP_WARN(this->get_logger(), "Oscillation time out is detected: %.2f secs for %.2f m.", diff, FSM_->getDistance(FSM_->global_pose_, FSM_->oscillation_pose_));
-        if(startRecoveryBehaviors()){
-          FSM_->setDecision("d_recovery_waitdone");
-        }
-        else{
-          FSM_->setDecision("d_planning");
-        }
-        return false;
-      }
-
-      base_trajectory::Trajectory best_traj;
-      dddmr_sys_core::PlannerState PS = LP_->computeVelocityCommand(drive_trajectory_generator_name_, best_traj);
-
-      if(PS == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
-        FSM_->last_valid_control_ = clock_->now();
-        FSM_->setDecision("d_controlling");  
-        publishVelocity(best_traj.xv_, best_traj.yv_, best_traj.thetav_);
-        return false;
-      }
-      else if(PS == dddmr_sys_core::PlannerState::PERCEPTION_MALFUNCTION){
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 5000, "Sensor data is out of date, we're not going to allow commanding of the base for safety");
-        publishZeroVelocity();
-        return false;
-      }
-      else if(PS == dddmr_sys_core::PlannerState::TF_FAIL){
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 5000, "Detect TF fail in local planner, we're not going to allow commanding of the base for safety");
-        publishZeroVelocity();
-        return false;
-      }
-      else if(PS == dddmr_sys_core::PlannerState::PRUNE_PLAN_FAIL){
-        //@ this assignment will allow at least one time planning query
-        FSM_->last_valid_plan_ = clock_->now();
-        publishZeroVelocity();
-        FSM_->setDecision("d_planning");  
-        return false;
-      }
-      else if(PS == dddmr_sys_core::PlannerState::ALL_TRAJECTORIES_FAIL){
-        //At least implement last_valid_control_ timeout to abort here
-        //@ this assignment will allow at least one time planning query
-        if((clock_->now() - FSM_->last_valid_control_).seconds() > FSM_->controller_patience_){
-          RCLCPP_WARN(this->get_logger(), "Controller time out, go to recovery");
-          if(startRecoveryBehaviors()){
-            FSM_->setDecision("d_recovery_waitdone");
-          }
-          else{
-            FSM_->setDecision("d_planning");
-          }
-        }
-        else{
-          FSM_->last_valid_plan_ = clock_->now();
-          FSM_->setDecision("d_planning");  
-        }
-
-        return false;
-      }
-
-      else if(PS == dddmr_sys_core::PlannerState::PATH_BLOCKED_REPLANNING){
-        FSM_->last_valid_plan_ = clock_->now();
-        publishZeroVelocity();
-        FSM_->setDecision("d_planning"); 
-        RCLCPP_WARN(this->get_logger(), "Path conflits, but no need to wait.");
-       	return false;
-      }
-
-      else if(PS == dddmr_sys_core::PlannerState::PATH_BLOCKED_WAIT){
-        FSM_->waiting_time_ = clock_->now();
-        FSM_->setDecision("d_waiting");
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 5000, "Path conflits, switch to waiting state.");
-       	return false;
-      }
-
-      else{
-        RCLCPP_FATAL(this->get_logger(), "Should not happen here, we did not catch dddmr_sys_core::PlannerState");
-        publishZeroVelocity();
-        return false;
-      }
-
+    if(is_recoverying_succeed_){
+      RCLCPP_INFO(this->get_logger(), "recovery action completed, request a fresh route");
+      FSM_->recovery_attempt_count_++;
+      FSM_->last_valid_plan_ = clock_->now();
+      FSM_->setPhase(FSM::NavigationPhase::kRouteRequest, "recovery action completed");
+      return false;
     }
 
-    else if(FSM_->isCurrentDecision("d_recovery_waitdone")){
-      
-      if(is_recoverying_){
-        return false;
-      }
-        
+    RCLCPP_ERROR(this->get_logger(), "recovery action failed");
+    auto result = std::make_shared<dddmr_sys_core::action::PToPMoveBase::Result>();
+    goal_handle->abort(result);
+    publishZeroVelocity();
+    return true;
+  }
 
-      if(FSM_->no_plan_recovery_count_>=FSM_->no_plan_retry_num_){
-        RCLCPP_ERROR(this->get_logger(), "No global plan has been found even we try recovery %d times", FSM_->no_plan_recovery_count_);
-        auto result = std::make_shared<dddmr_sys_core::action::PToPMoveBase::Result>();
-        goal_handle->abort(result);
-        publishZeroVelocity();
-        return true;        
-      }
-      
-      if(is_recoverying_succeed_){
-        //we go to planning and we also need to count second recovery then abort
-        RCLCPP_INFO(this->get_logger(), "Recovery succeed, back to planning state.");
-        FSM_->no_plan_recovery_count_++;
-        FSM_->last_valid_plan_ = clock_->now();
-        FSM_->setDecision("d_planning");
-        return false;  
-      }
-      else{
-        //we may abort or go to another recovery
-        RCLCPP_ERROR(this->get_logger(), "The potential collision has been detected when doing recovery.");
-        auto result = std::make_shared<dddmr_sys_core::action::PToPMoveBase::Result>();
-        goal_handle->abort(result);
-        publishZeroVelocity();
-        return true;  
-      }
-      
+  if(FSM_->isPhase(FSM::NavigationPhase::kBlockedWait)){
+    if((clock_->now()-FSM_->waiting_time_).seconds() >= FSM_->blocked_wait_patience_){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "blocked wait exceeded %.2f seconds, request a fresh route",
+        FSM_->blocked_wait_patience_);
+      return route_refresh("blocked wait timeout");
     }
 
-    else if(FSM_->isCurrentDecision("d_waiting")){
-      
-      //if continue conflict over 10s,to recalculate the path
-      if((clock_->now()-FSM_->waiting_time_).seconds() >= FSM_->waiting_patience_){ 
-       	FSM_->last_valid_plan_ = clock_->now();
-        FSM_->setDecision("d_planning");
-        RCLCPP_WARN(this->get_logger(), "waiting time over %.2f,change to d_planning", FSM_->waiting_patience_);
-        return false;
-      }
+    syncRouteReferenceFromManager("blocked_wait");
 
-      //@ update global plan
-      if(GPM_->hasPlan()){
-        std::vector<geometry_msgs::msg::PoseStamped> plan;
-        std::size_t route_version = 0;
-        std::size_t goal_seq = 0;
-        std::string source_label;
-        GPM_->copyPlan(plan, &route_version, &goal_seq, &source_label);
-        LP_->setPlan(plan, route_version, goal_seq, source_label);
-      }
-      base_trajectory::Trajectory best_traj;
-      dddmr_sys_core::PlannerState PS = LP_->computeVelocityCommand(drive_trajectory_generator_name_, best_traj);
-
-      if(PS == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
-        FSM_->last_valid_control_ = clock_->now();
-        FSM_->setDecision("d_controlling");  
-        return false;
-      }
-
-      else if(PS == dddmr_sys_core::PlannerState::PERCEPTION_MALFUNCTION){
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 5000, "Sensor data is out of date, we're not going to allow commanding of the base for safety");
-        publishZeroVelocity();
-        return false;
-      }
-
-      else if(PS == dddmr_sys_core::PlannerState::TF_FAIL){
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 5000, "Detect TF fail in local planner, we're not going to allow commanding of the base for safety");
-        publishZeroVelocity();
-        return false;
-      }
-
-      else if(PS == dddmr_sys_core::PlannerState::PRUNE_PLAN_FAIL){
-        FSM_->last_valid_plan_ = clock_->now();
-        publishZeroVelocity();
-        FSM_->setDecision("d_planning");  
-        return false;
-      }
-
-      else if(PS == dddmr_sys_core::PlannerState::ALL_TRAJECTORIES_FAIL){
-        //At least implement last_valid_control_ timeout to abort here
-        //@ this assignment will allow at least one time planning query
-        if((clock_->now() - FSM_->last_valid_control_).seconds() > FSM_->controller_patience_){
-          RCLCPP_WARN(this->get_logger(), "Controller time out, go to recovery");
-          if(startRecoveryBehaviors()){
-            FSM_->setDecision("d_recovery_waitdone");
-          }
-          else{
-            FSM_->setDecision("d_planning");
-          }
-        }
-        else{
-          FSM_->last_valid_plan_ = clock_->now();
-          FSM_->setDecision("d_planning");  
-        }
-      }
-
-      else if(PS == dddmr_sys_core::PlannerState::PATH_BLOCKED_WAIT || PS == dddmr_sys_core::PlannerState::PATH_BLOCKED_REPLANNING){
-	      FSM_->setDecision("d_waiting");
-        publishZeroVelocity();
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 5000, "Path conflits in waiting state, keep waiting.");
-	      return false;
-      }
-
-      else{
-        RCLCPP_FATAL(this->get_logger(), "Should not happen here, we did not catch dddmr_sys_core::PlannerState");
-        publishZeroVelocity();
-        return false;
-      }
+    geometry_msgs::msg::Twist cmd_vel;
+    const auto planner_state =
+      route_controller_->computeControlCommand(tracking_controller_name_, &cmd_vel);
+    if(planner_state == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
+      FSM_->last_valid_control_ = clock_->now();
+      FSM_->setPhase(FSM::NavigationPhase::kRouteTracking, "blocked wait cleared");
+      publishVelocity(cmd_vel);
+      return false;
     }
+    if(planner_state == dddmr_sys_core::PlannerState::PATH_BLOCKED_WAIT){
+      publishZeroVelocity();
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *clock_, 5000,
+        "route remains blocked, keep waiting");
+      return false;
+    }
+    return handle_common_control_fault(planner_state, "blocked wait", false);
+  }
 
   return false;
 }
 
-bool P2PMoveBase::startRecoveryBehaviors(){
+bool P2PMoveBase::startRecoveryAction(const std::string & trigger_reason){
 
-  if(recovery_behavior_name_.empty()){
-    RCLCPP_WARN(this->get_logger(), "Skip recovery because recovery behavior is disabled. Fall back to replanning.");
+  if(recovery_action_name_.empty()){
+    RCLCPP_WARN(
+      this->get_logger(),
+      "skip recovery action because it is disabled, fallback to route refresh (%s)",
+      trigger_reason.c_str());
     is_recoverying_ = false;
     is_recoverying_succeed_ = false;
     FSM_->oscillation_pose_ = FSM_->global_pose_;
@@ -729,7 +644,7 @@ bool P2PMoveBase::startRecoveryBehaviors(){
   }
 
   auto goal_msg = dddmr_sys_core::action::RecoveryBehaviors::Goal();
-  goal_msg.behavior_name = recovery_behavior_name_;
+  goal_msg.behavior_name = recovery_action_name_;
 
   auto send_goal_options = rclcpp_action::Client<dddmr_sys_core::action::RecoveryBehaviors>::SendGoalOptions();
   
@@ -740,6 +655,11 @@ bool P2PMoveBase::startRecoveryBehaviors(){
   
   is_recoverying_ = true;
   is_recoverying_succeed_ = false;
+  RCLCPP_WARN(
+    this->get_logger(),
+    "start recovery action '%s' because %s",
+    recovery_action_name_.c_str(),
+    trigger_reason.c_str());
   recovery_behaviors_client_ptr_->async_send_goal(goal_msg, send_goal_options);
   return true;
 }
@@ -747,11 +667,11 @@ bool P2PMoveBase::startRecoveryBehaviors(){
 void P2PMoveBase::recovery_behaviors_client_goal_response_callback(const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::RecoveryBehaviors>::SharedPtr & goal_handle)
 {
   if (!goal_handle) {
-    RCLCPP_ERROR(this->get_logger(), "Goal was rejected by recovery behaviors server");
+    RCLCPP_ERROR(this->get_logger(), "recovery action request was rejected by recovery behaviors server");
     is_recoverying_ = false;
     is_recoverying_succeed_ = false;
   } else {
-    RCLCPP_INFO(this->get_logger(), "Goal accepted by recovery behaviors server, waiting for result");
+    RCLCPP_INFO(this->get_logger(), "recovery action accepted by recovery behaviors server, waiting for result");
   }
 }
 
@@ -761,15 +681,16 @@ void P2PMoveBase::recovery_behaviors_client_result_callback(const rclcpp_action:
   switch (result.code) {
     case rclcpp_action::ResultCode::SUCCEEDED:
       is_recoverying_succeed_ = true;
+      RCLCPP_INFO(this->get_logger(), "recovery action finished successfully");
       break;
     case rclcpp_action::ResultCode::ABORTED:
-      RCLCPP_ERROR(this->get_logger(), "Recovery Behaviors: Goal was aborted");
+      RCLCPP_ERROR(this->get_logger(), "recovery action was aborted");
       break;
     case rclcpp_action::ResultCode::CANCELED:
-      RCLCPP_ERROR(this->get_logger(), "Recovery Behaviors: Goal was canceled");
+      RCLCPP_ERROR(this->get_logger(), "recovery action was canceled");
       break;
     default:
-      RCLCPP_ERROR(this->get_logger(), "Recovery Behaviors: Unknown result code");
+      RCLCPP_ERROR(this->get_logger(), "recovery action returned unknown result code");
       break;
   }
   

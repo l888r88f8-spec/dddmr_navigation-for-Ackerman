@@ -53,27 +53,41 @@ namespace p2p_move_base
 class FSM{
 
   public:
+    enum class NavigationPhase {
+      kIdle,
+      kRouteRequest,
+      kRoutePending,
+      kRouteStartAlignment,
+      kRouteTracking,
+      kGoalAlignment,
+      kBlockedWait,
+      kRecoveryAction
+    };
     
     FSM(const rclcpp::node_interfaces::NodeLoggingInterface::SharedPtr& m_logger,
               const rclcpp::node_interfaces::NodeParametersInterface::SharedPtr& m_parameter);
 
+    bool setPhase(NavigationPhase next_phase, const std::string & reason = "");
     bool setDecision(std::string m_decision);
+    bool isPhase(NavigationPhase phase) const;
 
-    std::string getCurrentDecision(){return current_decision_;}
-    std::string getLastDecision(){return last_decision_;}
+    std::string getCurrentDecision(){return phaseName(current_phase_);}
+    std::string getLastDecision(){return phaseName(last_phase_);}
     bool isCurrentDecision(std::string m_decision);
+    static std::string phaseName(NavigationPhase phase);
+    static bool legacyDecisionToPhase(const std::string & decision, NavigationPhase * phase);
 
     void initialParams(geometry_msgs::msg::TransformStamped robot_curent_pose, rclcpp::Time current_time);
     
     rclcpp::Time last_valid_plan_;
 
     geometry_msgs::msg::PoseStamped current_goal_;
-    double planner_patience_;
-    double controller_frequency_;
+    double route_request_patience_;
+    double orchestrator_frequency_;
     
     /*recovery params*/
-    int no_plan_recovery_count_, no_plan_retry_num_;
-    double oscillation_distance_, oscillation_angle_, oscillation_patience_, controller_patience_, waiting_patience_;
+    int recovery_attempt_count_, max_recovery_attempts_;
+    double oscillation_distance_, oscillation_angle_, oscillation_patience_, controller_patience_, blocked_wait_patience_;
     rclcpp::Time last_oscillation_reset_;
     rclcpp::Time last_valid_control_;
 
@@ -95,8 +109,8 @@ class FSM{
 
     rclcpp::node_interfaces::NodeLoggingInterface::SharedPtr logger_;
     rclcpp::node_interfaces::NodeParametersInterface::SharedPtr parameter_;
-    std::string current_decision_;
-    std::string last_decision_;
+    NavigationPhase current_phase_;
+    NavigationPhase last_phase_;
 
 };
 

@@ -56,6 +56,7 @@
 
 //@planner state
 #include <dddmr_sys_core/dddmr_enum_states.h>
+#include <dddmr_sys_core/route_tracking_controller.h>
 
 #include <cstddef>
 #include <string>
@@ -63,7 +64,7 @@
 
 namespace local_planner {
 
-class Local_Planner : public rclcpp::Node {
+class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingController {
 
     public:
       Local_Planner(const std::string& name);
@@ -75,24 +76,35 @@ class Local_Planner : public rclcpp::Node {
 
       ~Local_Planner();
 
+      void setRoute(
+        const std::vector<geometry_msgs::msg::PoseStamped>& orig_global_plan,
+        std::size_t route_version = 0,
+        std::size_t goal_seq = 0,
+        const std::string & source_label = "planner_result") override;
       void setPlan(
         const std::vector<geometry_msgs::msg::PoseStamped>& orig_global_plan,
         std::size_t route_version = 0,
         std::size_t goal_seq = 0,
         const std::string & source_label = "planner_result");
+      dddmr_sys_core::PlannerState computeControlCommand(
+        const std::string & controller_name,
+        geometry_msgs::msg::Twist * cmd_vel) override;
       dddmr_sys_core::PlannerState computeVelocityCommand(std::string traj_gen_name, base_trajectory::Trajectory& best_traj);
       void getBestTrajectory(std::string traj_gen_name, base_trajectory::Trajectory& best_traj);
 
       //@ shared data for trajectory generator, we manage the variables by this way for future changed to ROS2
       std::shared_ptr<trajectory_generators::TrajectoryGeneratorSharedData> traj_shared_data_;
       
+      bool isGoalPositionReached() override;
       bool isGoalReached();
       
+      bool isRouteStartAligned() override;
       bool isInitialHeadingAligned();
+      bool isGoalHeadingSatisfied() override;
       bool isGoalHeadingAligned();
 
       void updateGlobalPose();
-      geometry_msgs::msg::TransformStamped getGlobalPose();
+      geometry_msgs::msg::TransformStamped getGlobalPose() override;
       
     private: 
       

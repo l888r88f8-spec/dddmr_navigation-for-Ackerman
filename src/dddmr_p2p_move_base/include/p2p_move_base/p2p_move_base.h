@@ -34,9 +34,7 @@
 
 //@in enum state, the p_to_p_move_base is included
 #include <dddmr_sys_core/dddmr_enum_states.h>
-
-//@local planner
-#include <local_planner/local_planner.h>
+#include <dddmr_sys_core/route_tracking_controller.h>
 
 //@for call global planner action
 #include "dddmr_sys_core/action/get_plan.hpp"
@@ -56,7 +54,9 @@ class P2PMoveBase : public rclcpp::Node {
     P2PMoveBase(std::string name);
     ~P2PMoveBase();
 
-    void initial(const std::shared_ptr<local_planner::Local_Planner>& lp, const std::shared_ptr<p2p_move_base::P2PGlobalPlanManager>& gpm);
+    void initial(
+      const std::shared_ptr<dddmr_sys_core::RouteTrackingController>& route_controller,
+      const std::shared_ptr<p2p_move_base::P2PGlobalPlanManager>& route_manager);
   private:
 
     rclcpp_action::GoalResponse handle_goal(
@@ -91,16 +91,18 @@ class P2PMoveBase : public rclcpp::Node {
 
     void publishZeroVelocity();
     void publishVelocity(double vx, double vy, double angular_z);
+    void publishVelocity(const geometry_msgs::msg::Twist & cmd_vel);
 
-    std::string drive_trajectory_generator_name_;
-    std::string rotate_trajectory_generator_name_;
+    std::string tracking_controller_name_;
+    std::string alignment_controller_name_;
     std::shared_ptr<p2p_move_base::FSM> FSM_;
-    std::shared_ptr<local_planner::Local_Planner> LP_;
-    std::shared_ptr<p2p_move_base::P2PGlobalPlanManager> GPM_;
+    std::shared_ptr<dddmr_sys_core::RouteTrackingController> route_controller_;
+    std::shared_ptr<p2p_move_base::P2PGlobalPlanManager> route_manager_;
 
     void executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> goal_handle);
 
     bool executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> goal_handle);
+    bool syncRouteReferenceFromManager(const std::string & consumer_label);
 
     bool is_active(
       const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> handle) const
@@ -113,8 +115,8 @@ class P2PMoveBase : public rclcpp::Node {
     void recovery_behaviors_client_result_callback(const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::RecoveryBehaviors>::WrappedResult & result);
     bool is_recoverying_;
     bool is_recoverying_succeed_;
-    std::string recovery_behavior_name_;
-    bool startRecoveryBehaviors();
+    std::string recovery_action_name_;
+    bool startRecoveryAction(const std::string & trigger_reason);
 
 
 };

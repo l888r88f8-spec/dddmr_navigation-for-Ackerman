@@ -38,14 +38,19 @@ FSM::FSM(const rclcpp::node_interfaces::NodeLoggingInterface::SharedPtr& m_logge
 {
   logger_ = m_logger;
   parameter_ = m_parameter;
-  current_decision_ = "d_initial",
-  last_decision_ = "d_initial",
+  current_phase_ = NavigationPhase::kIdle;
+  last_phase_ = NavigationPhase::kIdle;
 
-  //Planning related
+  // Goal orchestration / route management related.
+  parameter_->declare_parameter("route_request_patience", rclcpp::ParameterValue(-1.0));
+  rclcpp::Parameter route_request_patience = parameter_->get_parameter("route_request_patience");
   parameter_->declare_parameter("planner_patience", rclcpp::ParameterValue(10.0));
   rclcpp::Parameter planner_patience = parameter_->get_parameter("planner_patience");
-  planner_patience_ = planner_patience.as_double();
-  RCLCPP_INFO(logger_->get_logger(), "planner_patience: %.2f", planner_patience_);  
+  route_request_patience_ =
+    route_request_patience.as_double() >= 0.0 ?
+    route_request_patience.as_double() :
+    planner_patience.as_double();
+  RCLCPP_INFO(logger_->get_logger(), "route_request_patience: %.2f", route_request_patience_);  
 
   //Controlling related
   parameter_->declare_parameter("oscillation_distance", rclcpp::ParameterValue(10.0));
@@ -63,25 +68,45 @@ FSM::FSM(const rclcpp::node_interfaces::NodeLoggingInterface::SharedPtr& m_logge
   oscillation_patience_ = oscillation_patience.as_double();
   RCLCPP_INFO(logger_->get_logger(), "oscillation_patience: %.2f", oscillation_patience_);  
 
+  parameter_->declare_parameter("control_failure_patience", rclcpp::ParameterValue(-1.0));
+  rclcpp::Parameter control_failure_patience = parameter_->get_parameter("control_failure_patience");
   parameter_->declare_parameter("controller_patience", rclcpp::ParameterValue(10.0));
   rclcpp::Parameter controller_patience = parameter_->get_parameter("controller_patience");
-  controller_patience_ = controller_patience.as_double();
-  RCLCPP_INFO(logger_->get_logger(), "controller_patience: %.2f", controller_patience_);  
+  controller_patience_ =
+    control_failure_patience.as_double() >= 0.0 ?
+    control_failure_patience.as_double() :
+    controller_patience.as_double();
+  RCLCPP_INFO(logger_->get_logger(), "control_failure_patience: %.2f", controller_patience_);  
 
+  parameter_->declare_parameter("max_recovery_attempts", rclcpp::ParameterValue(-1));
+  rclcpp::Parameter max_recovery_attempts = parameter_->get_parameter("max_recovery_attempts");
   parameter_->declare_parameter("no_plan_retry_num", rclcpp::ParameterValue(10));
   rclcpp::Parameter no_plan_retry_num = parameter_->get_parameter("no_plan_retry_num");
-  no_plan_retry_num_ = no_plan_retry_num.as_int();
-  RCLCPP_INFO(logger_->get_logger(), "no_plan_retry_num: %d", no_plan_retry_num_);  
+  max_recovery_attempts_ =
+    max_recovery_attempts.as_int() >= 0 ?
+    max_recovery_attempts.as_int() :
+    no_plan_retry_num.as_int();
+  RCLCPP_INFO(logger_->get_logger(), "max_recovery_attempts: %d", max_recovery_attempts_);  
 
+  parameter_->declare_parameter("blocked_wait_patience", rclcpp::ParameterValue(-1.0));
+  rclcpp::Parameter blocked_wait_patience = parameter_->get_parameter("blocked_wait_patience");
   parameter_->declare_parameter("waiting_patience", rclcpp::ParameterValue(10.0));
   rclcpp::Parameter waiting_patience = parameter_->get_parameter("waiting_patience");
-  waiting_patience_ = waiting_patience.as_double();
-  RCLCPP_INFO(logger_->get_logger(), "waiting_patience: %.2f", waiting_patience_); 
+  blocked_wait_patience_ =
+    blocked_wait_patience.as_double() >= 0.0 ?
+    blocked_wait_patience.as_double() :
+    waiting_patience.as_double();
+  RCLCPP_INFO(logger_->get_logger(), "blocked_wait_patience: %.2f", blocked_wait_patience_); 
 
+  parameter_->declare_parameter("orchestrator_frequency", rclcpp::ParameterValue(-1.0));
+  rclcpp::Parameter orchestrator_frequency = parameter_->get_parameter("orchestrator_frequency");
   parameter_->declare_parameter("controller_frequency", rclcpp::ParameterValue(20.0));
   rclcpp::Parameter controller_frequency = parameter_->get_parameter("controller_frequency");
-  controller_frequency_ = controller_frequency.as_double();
-  RCLCPP_INFO(logger_->get_logger(), "controller_frequency: %.2f", controller_frequency_); 
+  orchestrator_frequency_ =
+    orchestrator_frequency.as_double() > 0.0 ?
+    orchestrator_frequency.as_double() :
+    controller_frequency.as_double();
+  RCLCPP_INFO(logger_->get_logger(), "orchestrator_frequency: %.2f", orchestrator_frequency_); 
 
   parameter_->declare_parameter("use_twist_stamped", rclcpp::ParameterValue(false));
   rclcpp::Parameter use_twist_stamped = parameter_->get_parameter("use_twist_stamped");
@@ -95,23 +120,90 @@ FSM::FSM(const rclcpp::node_interfaces::NodeLoggingInterface::SharedPtr& m_logge
 
 }
 
-bool FSM::isCurrentDecision(std::string m_decision){
-  if(m_decision==current_decision_)
+std::string FSM::phaseName(NavigationPhase phase)
+{
+  switch(phase){
+    case NavigationPhase::kIdle:
+      return "idle";
+    case NavigationPhase::kRouteRequest:
+      return "route_request";
+    case NavigationPhase::kRoutePending:
+      return "route_pending";
+    case NavigationPhase::kRouteStartAlignment:
+      return "route_start_alignment";
+    case NavigationPhase::kRouteTracking:
+      return "route_tracking";
+    case NavigationPhase::kGoalAlignment:
+      return "goal_alignment";
+    case NavigationPhase::kBlockedWait:
+      return "blocked_wait";
+    case NavigationPhase::kRecoveryAction:
+      return "recovery_action";
+  }
+  return "unknown";
+}
+
+bool FSM::legacyDecisionToPhase(const std::string & decision, NavigationPhase * phase)
+{
+  if(phase == nullptr){
+    return false;
+  }
+
+  if(decision == "d_initial" || decision == "idle"){
+    *phase = NavigationPhase::kIdle;
     return true;
+  }
+  if(decision == "d_planning" || decision == "route_request"){
+    *phase = NavigationPhase::kRouteRequest;
+    return true;
+  }
+  if(decision == "d_planning_waitdone" || decision == "route_pending"){
+    *phase = NavigationPhase::kRoutePending;
+    return true;
+  }
+  if(decision == "d_align_heading" || decision == "route_start_alignment"){
+    *phase = NavigationPhase::kRouteStartAlignment;
+    return true;
+  }
+  if(decision == "d_controlling" || decision == "route_tracking"){
+    *phase = NavigationPhase::kRouteTracking;
+    return true;
+  }
+  if(decision == "d_align_goal_heading" || decision == "goal_alignment"){
+    *phase = NavigationPhase::kGoalAlignment;
+    return true;
+  }
+  if(decision == "d_waiting" || decision == "blocked_wait"){
+    *phase = NavigationPhase::kBlockedWait;
+    return true;
+  }
+  if(decision == "d_recovery_waitdone" || decision == "recovery_action"){
+    *phase = NavigationPhase::kRecoveryAction;
+    return true;
+  }
   return false;
 }
 
+bool FSM::isPhase(NavigationPhase phase) const
+{
+  return current_phase_ == phase;
+}
+
+bool FSM::isCurrentDecision(std::string m_decision){
+  NavigationPhase phase = NavigationPhase::kIdle;
+  return legacyDecisionToPhase(m_decision, &phase) && current_phase_ == phase;
+}
 
 void FSM::initialParams(geometry_msgs::msg::TransformStamped robot_curent_pose, rclcpp::Time current_time){
 
-  last_decision_ = "d_initial";
-  current_decision_ = "d_initial";
+  last_phase_ = NavigationPhase::kIdle;
+  current_phase_ = NavigationPhase::kIdle;
 
   oscillation_pose_ = robot_curent_pose;
   last_oscillation_reset_ = current_time;
   last_valid_plan_ = current_time;
   last_valid_control_ = current_time;
-  no_plan_recovery_count_ = 0;
+  recovery_attempt_count_ = 0;
 
 }
 
@@ -147,15 +239,41 @@ double FSM::getAngle(geometry_msgs::msg::TransformStamped& a, geometry_msgs::msg
 
 }
 
-bool FSM::setDecision(std::string m_decision){
+bool FSM::setPhase(NavigationPhase next_phase, const std::string & reason){
+  const NavigationPhase previous_phase = current_phase_;
+  last_phase_ = current_phase_;
+  current_phase_ = next_phase;
 
-  last_decision_ = current_decision_;
-  current_decision_ = m_decision;
-
-  //if(last_decision_.compare(current_decision_)!=0)
-  //  RCLCPP_INFO(logger_->get_logger(), "Decision from -- %s -- to -- %s --", last_decision_.c_str(), current_decision_.c_str()); 
-  
+  if(previous_phase != next_phase){
+    if(reason.empty()){
+      RCLCPP_INFO(
+        logger_->get_logger(),
+        "navigation phase: %s -> %s",
+        phaseName(previous_phase).c_str(),
+        phaseName(next_phase).c_str());
+    }
+    else{
+      RCLCPP_INFO(
+        logger_->get_logger(),
+        "navigation phase: %s -> %s (%s)",
+        phaseName(previous_phase).c_str(),
+        phaseName(next_phase).c_str(),
+        reason.c_str());
+    }
+  }
   return true;
+}
+
+bool FSM::setDecision(std::string m_decision){
+  NavigationPhase phase = NavigationPhase::kIdle;
+  if(!legacyDecisionToPhase(m_decision, &phase)){
+    RCLCPP_WARN(
+      logger_->get_logger(),
+      "unknown legacy navigation decision: %s",
+      m_decision.c_str());
+    return false;
+  }
+  return setPhase(phase, "legacy decision alias");
 
 }
 
