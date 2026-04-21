@@ -49,6 +49,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // chrono_literals handles user-defined time durations (e.g. 500ms) 
@@ -60,6 +61,7 @@ class P2PGlobalPlanManager  : public rclcpp::Node
 {
 
 private:
+  using GetPlanClientGoalHandle = rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::GetPlan>;
   
   std::string name_;
   rclcpp::Clock::SharedPtr clock_;
@@ -78,9 +80,13 @@ private:
   bool route_request_failed_;
   std::size_t goal_seq_;
   std::size_t route_version_;
+  std::size_t next_route_request_id_;
+  std::size_t active_route_request_id_;
   nav_msgs::msg::Path active_route_;
   nav_msgs::msg::Path frozen_route_;
   std::string route_source_label_;
+  GetPlanClientGoalHandle::SharedPtr active_route_request_handle_;
+  std::unordered_map<std::size_t, std::string> route_request_cancel_reasons_;
 
   rclcpp::CallbackGroup::SharedPtr tf_listener_group_;
   rclcpp::CallbackGroup::SharedPtr timer_group_;
@@ -90,12 +96,15 @@ private:
 
   rclcpp_action::Client<dddmr_sys_core::action::GetPlan>::SharedPtr global_planner_client_ptr_;
   void global_planner_client_goal_response_callback(
-    const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::GetPlan>::SharedPtr & goal_handle,
-    bool is_route_request);
-  void global_planner_client_result_callback(
-    const rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::GetPlan>::WrappedResult & result,
+    const GetPlanClientGoalHandle::SharedPtr & goal_handle,
     bool is_route_request,
-    std::size_t request_goal_seq);
+    std::size_t request_goal_seq,
+    std::size_t request_id);
+  void global_planner_client_result_callback(
+    const GetPlanClientGoalHandle::WrappedResult & result,
+    bool is_route_request,
+    std::size_t request_goal_seq,
+    std::size_t request_id);
   
 
 public:
@@ -108,6 +117,7 @@ public:
   void initial();
   void setGoal(const geometry_msgs::msg::PoseStamped& goal);
   void resume();
+  void cancelActiveRouteRequest(const std::string & reason);
   void stop(const std::string & reason = "goal stopped");
   bool hasRoute();
   bool hasPlan(){return hasRoute();}

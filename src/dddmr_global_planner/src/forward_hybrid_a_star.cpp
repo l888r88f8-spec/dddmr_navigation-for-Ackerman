@@ -790,8 +790,25 @@ bool ForwardHybridAStar::MakePlan(
   nav_msgs::msg::Path * ros_path,
   bool force_position_only_goal,
   bool force_use_goal_heading,
-  int preferred_initial_turn_sign)
+  int preferred_initial_turn_sign,
+  const CancelRequestedCallback & cancel_requested,
+  bool * was_canceled)
 {
+  if (was_canceled != nullptr) {
+    *was_canceled = false;
+  }
+
+  auto check_cancel_requested =
+    [&cancel_requested, was_canceled]() -> bool {
+      if (cancel_requested && cancel_requested()) {
+        if (was_canceled != nullptr) {
+          *was_canceled = true;
+        }
+        return true;
+      }
+      return false;
+    };
+
   if (ros_path == nullptr) {
     RCLCPP_WARN(logger_, "Hybrid A*: ros_path pointer is null.");
     return false;
@@ -800,6 +817,11 @@ bool ForwardHybridAStar::MakePlan(
   ros_path->poses.clear();
   ros_path->header.frame_id = global_frame_;
   ros_path->header.stamp = rclcpp::Clock(RCL_ROS_TIME).now();
+
+  if (check_cancel_requested()) {
+    RCLCPP_INFO(logger_, "Hybrid A*: planning canceled before search start.");
+    return false;
+  }
 
   if (perception_3d_ == nullptr || pcl_ground_ == nullptr || kdtree_ground_ == nullptr) {
     RCLCPP_WARN(logger_, "Hybrid A*: planner context is not ready.");
@@ -926,6 +948,14 @@ bool ForwardHybridAStar::MakePlan(
   std::size_t expand_count = 0;
   const std::size_t max_expand_count = std::max<std::size_t>(state_space_size, 1);
   while (!open_list.empty()) {
+    if (check_cancel_requested()) {
+      RCLCPP_INFO(
+        logger_,
+        "Hybrid A*: planning canceled during search after %zu expansions.",
+        expand_count);
+      return false;
+    }
+
     const OpenEntry top_entry = open_list.top();
     open_list.pop();
 

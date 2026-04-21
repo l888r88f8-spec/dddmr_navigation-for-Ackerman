@@ -455,6 +455,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
         FSM_->current_goal_.pose.position.x,
         FSM_->current_goal_.pose.position.y,
         FSM_->current_goal_.pose.position.z);
+      route_manager_->cancelActiveRouteRequest("planner request timed out on client side");
       return start_recovery_or_route_refresh("route request timeout");
     }
     return false;

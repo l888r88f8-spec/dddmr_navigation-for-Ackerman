@@ -129,7 +129,7 @@ perception_3d_global:
 local_planner:
   ros__parameters:
     odom_topic: /lio_sam/localization/odometry               # 局部规划使用的位姿/速度来源
-    controller_backend: "legacy_rollout"                     # 可选: legacy_rollout / regulated_pure_pursuit
+    controller_backend: "regulated_pure_pursuit"                     # 可选: legacy_rollout / regulated_pure_pursuit
     # Ackermann rollout uses sim_time=2.0 and max_vel_x=3.0, so a 3 m prune
     # horizon makes the critics prefer short / slow trajectories. Keep the
     # local target farther ahead so faster valid rollouts are not penalized.

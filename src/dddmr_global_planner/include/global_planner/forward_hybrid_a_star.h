@@ -11,6 +11,7 @@
 #include <perception_3d/perception_3d_ros.h>
 
 #include <cstddef>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <string>
@@ -23,6 +24,8 @@ namespace global_planner
 class ForwardHybridAStar
 {
 public:
+  using CancelRequestedCallback = std::function<bool()>;
+
   // This planner is a forward continuous-lattice search with projection-based
   // collision/ground validation. It is not a strictly graph-constrained Hybrid A*.
   struct Config
@@ -63,7 +66,9 @@ public:
     nav_msgs::msg::Path * ros_path,
     bool force_position_only_goal = false,
     bool force_use_goal_heading = false,
-    int preferred_initial_turn_sign = 0);
+    int preferred_initial_turn_sign = 0,
+    const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
+    bool * was_canceled = nullptr);
 
 private:
   struct NodeRecord

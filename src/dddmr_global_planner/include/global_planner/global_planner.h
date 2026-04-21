@@ -52,6 +52,7 @@ type edge_t is inside here
 #include <global_planner/a_star_on_pc.h>
 #include <global_planner/a_star_on_pre_graph.h>
 #include <global_planner/forward_hybrid_a_star.h>
+#include <functional>
 #include <set>
 #include <mutex>
 
@@ -86,6 +87,8 @@ namespace global_planner
 
 class GlobalPlanner : public rclcpp::Node {
     public:
+      using CancelRequestedCallback = std::function<bool()>;
+
       GlobalPlanner(const std::string& name);
       ~GlobalPlanner();
 
@@ -96,11 +99,15 @@ class GlobalPlanner : public rclcpp::Node {
         const geometry_msgs::msg::PoseStamped& goal,
         bool force_position_only_goal = false,
         bool force_use_goal_heading = false,
-        int preferred_initial_turn_sign = 0);
+        int preferred_initial_turn_sign = 0,
+        const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
+        bool * was_canceled = nullptr);
       bool BuildFrozenRouteWithEntryConnector(
         const geometry_msgs::msg::PoseStamped & start,
         const geometry_msgs::msg::PoseStamped & goal,
-        nav_msgs::msg::Path * frozen_route);
+        nav_msgs::msg::Path * frozen_route,
+        const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
+        bool * was_canceled = nullptr);
       std::shared_ptr<dddmr_sys_core::action::GetPlan::Result> global_plan_result_;
 
     private:
@@ -218,7 +225,9 @@ class GlobalPlanner : public rclcpp::Node {
         const geometry_msgs::msg::PoseStamped & goal,
         bool force_position_only_goal = false,
         bool force_use_goal_heading = false,
-        int preferred_initial_turn_sign = 0);
+        int preferred_initial_turn_sign = 0,
+        const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
+        bool * was_canceled = nullptr);
       bool buildFrozenRouteWithEntryConnectorLocked(
         const geometry_msgs::msg::PoseStamped & start,
         const geometry_msgs::msg::PoseStamped & goal,
@@ -227,7 +236,9 @@ class GlobalPlanner : public rclcpp::Node {
         std::size_t * anchor_index,
         double * anchor_distance,
         std::size_t * connector_pose_count,
-        bool * connector_used_fallback);
+        bool * connector_used_fallback,
+        const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
+        bool * was_canceled = nullptr);
       std::vector<double> computePathArcLengths(const nav_msgs::msg::Path & path) const;
       std::vector<std::size_t> selectEntryAnchorCandidates(
         const nav_msgs::msg::Path & raw_route,

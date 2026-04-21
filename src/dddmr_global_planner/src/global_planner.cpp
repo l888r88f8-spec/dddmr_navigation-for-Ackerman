@@ -57,7 +57,9 @@ rclcpp_action::GoalResponse GlobalPlanner::handle_goal(
 rclcpp_action::CancelResponse GlobalPlanner::handle_cancel(
   const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle)
 {
-  RCLCPP_INFO(this->get_logger(), "Received request to cancel goal");
+  RCLCPP_INFO(
+    this->get_logger(),
+    "Received request to cancel planner goal; computation will stop at the next cancel check.");
   (void)goal_handle;
   return rclcpp_action::CancelResponse::ACCEPT;
 }
@@ -1096,13 +1098,23 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
   std::size_t * anchor_index,
   double * anchor_distance,
   std::size_t * connector_pose_count,
-  bool * connector_used_fallback)
+  bool * connector_used_fallback,
+  const CancelRequestedCallback & cancel_requested,
+  bool * was_canceled)
 {
   if(raw_route == nullptr || frozen_route == nullptr){
     return false;
   }
 
-  *raw_route = makeROSPlanLocked(start, goal, false, false, 0);
+  if(was_canceled != nullptr){
+    *was_canceled = false;
+  }
+
+  *raw_route = makeROSPlanLocked(start, goal, false, false, 0, cancel_requested, was_canceled);
+  if(was_canceled != nullptr && *was_canceled){
+    frozen_route->poses.clear();
+    return false;
+  }
   *frozen_route = *raw_route;
   if(anchor_index != nullptr){
     *anchor_index = 0;
@@ -1118,6 +1130,14 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
   }
 
   if(raw_route->poses.empty()){
+    return false;
+  }
+
+  if(cancel_requested && cancel_requested()){
+    if(was_canceled != nullptr){
+      *was_canceled = true;
+    }
+    frozen_route->poses.clear();
     return false;
   }
 
@@ -1148,6 +1168,14 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
 
   bool success_on_primary_candidate = true;
   for(std::size_t candidate_order = 0; candidate_order < candidate_indices.size(); ++candidate_order){
+    if(cancel_requested && cancel_requested()){
+      if(was_canceled != nullptr){
+        *was_canceled = true;
+      }
+      frozen_route->poses.clear();
+      return false;
+    }
+
     const std::size_t candidate_index = candidate_indices[candidate_order];
     const double candidate_distance =
       (candidate_index < arc_lengths.size()) ? arc_lengths[candidate_index] : 0.0;
@@ -1167,14 +1195,24 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
     }
 
     nav_msgs::msg::Path entry_connector;
+    bool entry_connector_canceled = false;
     if(!forward_hybrid_astar_planner_->MakePlan(
          start,
          anchor_pose,
          &entry_connector,
          false,
          entry_connector_force_goal_heading_,
-         0))
+         0,
+         cancel_requested,
+         &entry_connector_canceled))
     {
+      if(entry_connector_canceled){
+        if(was_canceled != nullptr){
+          *was_canceled = true;
+        }
+        frozen_route->poses.clear();
+        return false;
+      }
       RCLCPP_WARN(
         this->get_logger(),
         "entry connector failed, anchor_index=%zu, anchor_distance=%.2f, anchor_yaw=%.2f",
@@ -1183,6 +1221,14 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
         anchor_yaw);
       success_on_primary_candidate = false;
       continue;
+    }
+
+    if(cancel_requested && cancel_requested()){
+      if(was_canceled != nullptr){
+        *was_canceled = true;
+      }
+      frozen_route->poses.clear();
+      return false;
     }
 
     nav_msgs::msg::Path composed_route =
@@ -1228,7 +1274,9 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
 bool GlobalPlanner::BuildFrozenRouteWithEntryConnector(
   const geometry_msgs::msg::PoseStamped & start,
   const geometry_msgs::msg::PoseStamped & goal,
-  nav_msgs::msg::Path * frozen_route)
+  nav_msgs::msg::Path * frozen_route,
+  const CancelRequestedCallback & cancel_requested,
+  bool * was_canceled)
 {
   nav_msgs::msg::Path raw_route;
   std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
@@ -1240,24 +1288,36 @@ bool GlobalPlanner::BuildFrozenRouteWithEntryConnector(
     nullptr,
     nullptr,
     nullptr,
-    nullptr);
+    nullptr,
+    cancel_requested,
+    was_canceled);
 }
 
 void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle){
   
   //@get goal and start
   const auto goal = goal_handle->get_goal();
+  auto result = std::make_shared<dddmr_sys_core::action::GetPlan::Result>();
+  const auto cancel_requested =
+    [goal_handle]() {
+      return goal_handle->is_canceling();
+    };
+
+  const auto finish_canceled =
+    [this, &goal_handle, &result](const std::string & reason) {
+      RCLCPP_INFO(this->get_logger(), "%s", reason.c_str());
+      goal_handle->canceled(result);
+      clearCurrentHandleIfMatches(goal_handle);
+    };
 
   if(!perception_3d_ros_->getSharedDataPtr()->is_static_layer_ready_){
     RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000, "Received the request before static layer is ready");
-    auto result = std::make_shared<dddmr_sys_core::action::GetPlan::Result>();
     goal_handle->abort(result);
     clearCurrentHandleIfMatches(goal_handle);
     return;
   }
 
   if(!goal_handle->get_goal()->activate_threading){
-    auto result = std::make_shared<dddmr_sys_core::action::GetPlan::Result>();
     RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000, "Deactivate thread");
     goal_handle->succeed(result);
     clearCurrentHandleIfMatches(goal_handle);
@@ -1274,6 +1334,12 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
   double anchor_distance = 0.0;
   std::size_t connector_pose_count = 0;
   bool connector_used_fallback = false;
+  bool planner_canceled = false;
+
+  if(cancel_requested()){
+    finish_canceled("planner canceled before route computation started");
+    return;
+  }
   {
     std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
     if(!buildFrozenRouteWithEntryConnectorLocked(
@@ -1284,17 +1350,25 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
          &anchor_index,
          &anchor_distance,
          &connector_pose_count,
-         &connector_used_fallback))
+         &connector_used_fallback,
+         cancel_requested,
+         &planner_canceled))
     {
       frozen_route = raw_route;
     }
   }
 
+  if(planner_canceled || cancel_requested()){
+    finish_canceled(
+      "planner canceled while computing route; client-side wait ended before planner finished");
+    return;
+  }
+
   if(raw_route.poses.empty()){
     publishRawRouteDebugPath(raw_route, goal_seq, debug_route_version_, "get_plan_failed");
     publishFrozenRouteDebugPath(frozen_route, goal_seq, debug_route_version_, "get_plan_failed");
-    global_plan_result_->path = frozen_route;
-    goal_handle->abort(global_plan_result_);
+    result->path = frozen_route;
+    goal_handle->abort(result);
   }
   else{
     const std::size_t route_version = ++debug_route_version_;
@@ -1349,8 +1423,8 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
       "frozen route published for goal_seq=%zu, route_version=%zu",
       goal_seq,
       route_version);
-    global_plan_result_->path = frozen_route;
-    goal_handle->succeed(global_plan_result_);
+    result->path = frozen_route;
+    goal_handle->succeed(result);
   }
   clearCurrentHandleIfMatches(goal_handle);
 }
@@ -1360,7 +1434,9 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlan(
   const geometry_msgs::msg::PoseStamped& goal,
   bool force_position_only_goal,
   bool force_use_goal_heading,
-  int preferred_initial_turn_sign)
+  int preferred_initial_turn_sign,
+  const CancelRequestedCallback & cancel_requested,
+  bool * was_canceled)
 {
   std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
   return makeROSPlanLocked(
@@ -1368,7 +1444,9 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlan(
     goal,
     force_position_only_goal,
     force_use_goal_heading,
-    preferred_initial_turn_sign);
+    preferred_initial_turn_sign,
+    cancel_requested,
+    was_canceled);
 }
 
 nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
@@ -1376,7 +1454,9 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
   const geometry_msgs::msg::PoseStamped& goal,
   bool force_position_only_goal,
   bool force_use_goal_heading,
-  int preferred_initial_turn_sign){
+  int preferred_initial_turn_sign,
+  const CancelRequestedCallback & cancel_requested,
+  bool * was_canceled){
 
   unsigned int start_id = 0;
   unsigned int goal_id = 0;
@@ -1386,6 +1466,23 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
   ros_path.header.frame_id = global_frame_;
   ros_path.header.stamp = clock_->now();
 
+  if(was_canceled != nullptr){
+    *was_canceled = false;
+  }
+
+  const auto mark_canceled =
+    [&ros_path, was_canceled]() -> nav_msgs::msg::Path {
+      if(was_canceled != nullptr){
+        *was_canceled = true;
+      }
+      ros_path.poses.clear();
+      return ros_path;
+    };
+
+  if(cancel_requested && cancel_requested()){
+    return mark_canceled();
+  }
+
   const bool allow_direct_shortcut =
     enable_direct_path_shortcut_ && !use_forward_hybrid_astar_;
   if(allow_direct_shortcut && buildStraightLinePlan(start, goal, ros_path)){
@@ -1394,19 +1491,32 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
 
   if(use_forward_hybrid_astar_ && forward_hybrid_astar_planner_){
     nav_msgs::msg::Path hybrid_path;
+    bool hybrid_planning_canceled = false;
     if(forward_hybrid_astar_planner_->MakePlan(
         start, goal, &hybrid_path,
         force_position_only_goal,
         force_use_goal_heading,
-        preferred_initial_turn_sign))
+        preferred_initial_turn_sign,
+        cancel_requested,
+        &hybrid_planning_canceled))
     {
       hybrid_path.header.frame_id = global_frame_;
       hybrid_path.header.stamp = clock_->now();
       return hybrid_path;
     }
+    if(hybrid_planning_canceled){
+      return mark_canceled();
+    }
+    if(cancel_requested && cancel_requested()){
+      return mark_canceled();
+    }
     RCLCPP_WARN_THROTTLE(
       this->get_logger(), *clock_, 2000,
       "Forward Hybrid A* failed, fallback to legacy A*.");
+  }
+
+  if(cancel_requested && cancel_requested()){
+    return mark_canceled();
   }
 
   has_start_goal_id = getStartGoalID(start, goal, start_id, goal_id);
