@@ -161,6 +161,7 @@ class GlobalPlanner : public rclcpp::Node {
       bool use_forward_hybrid_astar_;
       bool enable_direct_path_shortcut_;
       bool enable_entry_connector_;
+      std::string entry_connector_backend_;
       double entry_connector_min_anchor_distance_;
       double entry_connector_max_anchor_distance_;
       bool entry_connector_force_goal_heading_;
@@ -270,8 +271,26 @@ class GlobalPlanner : public rclcpp::Node {
         std::size_t request_id = 0,
         std::size_t goal_seq = 0,
         std::string * request_result_class = nullptr);
+      struct EntryAnchorCandidate
+      {
+        std::size_t index = 0;
+        double arc_distance = 0.0;
+        bool in_preferred_window = false;
+        bool has_valid_anchor_pose = false;
+        bool in_vehicle_forward_half_plane = true;
+        bool in_route_forward_half_plane = true;
+        bool in_goal_forward_half_plane = true;
+        double vehicle_forward_projection = 0.0;
+        double route_forward_projection = 0.0;
+        double goal_forward_projection = 0.0;
+        double approach_alignment = 0.0;
+        double anchor_yaw = 0.0;
+        bool force_goal_heading = false;
+        std::string ranking_bucket;
+        std::string ranking_reason;
+      };
       std::vector<double> computePathArcLengths(const nav_msgs::msg::Path & path) const;
-      std::vector<std::size_t> selectEntryAnchorCandidates(
+      std::vector<EntryAnchorCandidate> selectEntryAnchorCandidates(
         const nav_msgs::msg::Path & raw_route,
         const std::vector<double> & arc_lengths,
         const geometry_msgs::msg::PoseStamped & start) const;
