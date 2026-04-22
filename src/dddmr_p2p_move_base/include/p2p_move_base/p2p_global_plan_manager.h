@@ -47,6 +47,7 @@
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -62,6 +63,19 @@ class P2PGlobalPlanManager  : public rclcpp::Node
 
 private:
   using GetPlanClientGoalHandle = rclcpp_action::ClientGoalHandle<dddmr_sys_core::action::GetPlan>;
+
+public:
+  struct PlannerRouteRequestDiagnostics
+  {
+    bool valid = false;
+    std::size_t request_id = 0;
+    std::string stage = "unknown";
+    double stage_elapsed_sec = 0.0;
+    std::size_t expansions = 0;
+    std::string result_class = "unknown";
+  };
+
+private:
   
   std::string name_;
   rclcpp::Clock::SharedPtr clock_;
@@ -87,6 +101,7 @@ private:
   std::string route_source_label_;
   GetPlanClientGoalHandle::SharedPtr active_route_request_handle_;
   std::unordered_map<std::size_t, std::string> route_request_cancel_reasons_;
+  std::unordered_map<std::size_t, PlannerRouteRequestDiagnostics> planner_route_request_diagnostics_;
 
   rclcpp::CallbackGroup::SharedPtr tf_listener_group_;
   rclcpp::CallbackGroup::SharedPtr timer_group_;
@@ -95,6 +110,7 @@ private:
   rclcpp::TimerBase::SharedPtr loop_timer_;
 
   rclcpp_action::Client<dddmr_sys_core::action::GetPlan>::SharedPtr global_planner_client_ptr_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr planner_route_request_diag_sub_;
   void global_planner_client_goal_response_callback(
     const GetPlanClientGoalHandle::SharedPtr & goal_handle,
     bool is_route_request,
@@ -105,6 +121,7 @@ private:
     bool is_route_request,
     std::size_t request_goal_seq,
     std::size_t request_id);
+  void planner_route_request_diag_callback(const std_msgs::msg::String::SharedPtr msg);
   
 
 public:

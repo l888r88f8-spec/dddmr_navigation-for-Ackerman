@@ -32,6 +32,7 @@
 
 #include <cmath>
 #include <limits>
+#include <sstream>
 
 namespace p2p_move_base
 {
@@ -45,6 +46,81 @@ bool is_failure_termination_reason(const std::string & reason)
 bool is_client_side_timeout_reason(const std::string & reason)
 {
   return reason == "planner request timed out on client side";
+}
+
+std::string timeout_result_class_from_stage(const std::string & stage)
+{
+  if(stage == "entry_connector"){
+    return "timed_out_during_entry_connector";
+  }
+  return "timed_out_during_raw_route";
+}
+
+std::string classify_aborted_planner_result(
+  const P2PGlobalPlanManager::PlannerRouteRequestDiagnostics * diagnostics)
+{
+  if(diagnostics != nullptr){
+    if(!diagnostics->result_class.empty() && diagnostics->result_class != "in_progress"){
+      return diagnostics->result_class;
+    }
+    if(diagnostics->stage == "projecting"){
+      return "failed_projection";
+    }
+    if(diagnostics->stage == "entry_connector"){
+      return "failed_entry_connector";
+    }
+  }
+  return "failed_raw_route";
+}
+
+bool parse_planner_route_request_diagnostics(
+  const std::string & serialized,
+  P2PGlobalPlanManager::PlannerRouteRequestDiagnostics * diagnostics)
+{
+  if(diagnostics == nullptr){
+    return false;
+  }
+
+  P2PGlobalPlanManager::PlannerRouteRequestDiagnostics parsed;
+  std::istringstream stream(serialized);
+  std::string token;
+  while(std::getline(stream, token, ';')){
+    const auto separator = token.find('=');
+    if(separator == std::string::npos){
+      continue;
+    }
+
+    const std::string key = token.substr(0, separator);
+    const std::string value = token.substr(separator + 1);
+    try{
+      if(key == "request_id"){
+        parsed.request_id = static_cast<std::size_t>(std::stoull(value));
+      }
+      else if(key == "stage"){
+        parsed.stage = value;
+      }
+      else if(key == "stage_elapsed_sec"){
+        parsed.stage_elapsed_sec = std::stod(value);
+      }
+      else if(key == "expansions"){
+        parsed.expansions = static_cast<std::size_t>(std::stoull(value));
+      }
+      else if(key == "result_class"){
+        parsed.result_class = value;
+      }
+    }
+    catch(const std::exception &){
+      return false;
+    }
+  }
+
+  if(parsed.request_id == 0 || parsed.stage.empty()){
+    return false;
+  }
+
+  parsed.valid = true;
+  *diagnostics = parsed;
+  return true;
 }
 }
 
@@ -127,6 +203,10 @@ void P2PGlobalPlanManager::initial(){
   global_planner_client_ptr_ = rclcpp_action::create_client<dddmr_sys_core::action::GetPlan>(
       this,
       route_action_name_, global_planner_client_group_);
+  planner_route_request_diag_sub_ = this->create_subscription<std_msgs::msg::String>(
+    "/debug/planner_route_request_stage",
+    rclcpp::QoS(rclcpp::KeepLast(50)).reliable(),
+    std::bind(&P2PGlobalPlanManager::planner_route_request_diag_callback, this, std::placeholders::_1));
   
   timer_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
@@ -159,6 +239,9 @@ void P2PGlobalPlanManager::cancelActiveRouteRequest(const std::string & reason)
   std::size_t goal_seq = 0;
   std::size_t request_id = 0;
   bool has_active_request = false;
+  PlannerRouteRequestDiagnostics diagnostics;
+  bool has_diagnostics = false;
+  std::string timeout_result_class;
 
   {
     std::unique_lock<std::mutex> lock(access_);
@@ -175,17 +258,52 @@ void P2PGlobalPlanManager::cancelActiveRouteRequest(const std::string & reason)
     is_planning_ = false;
     route_requested_for_goal_ = false;
     route_request_failed_ = false;
+    const auto diagnostics_it = planner_route_request_diagnostics_.find(request_id);
+    if(diagnostics_it != planner_route_request_diagnostics_.end()){
+      diagnostics = diagnostics_it->second;
+      has_diagnostics = diagnostics.valid;
+    }
+    if(is_client_side_timeout_reason(reason)){
+      timeout_result_class =
+        timeout_result_class_from_stage(has_diagnostics ? diagnostics.stage : "raw_route");
+      if(request_id != 0){
+        route_request_cancel_reasons_[request_id] = reason;
+        planner_route_request_diagnostics_[request_id].valid = true;
+        planner_route_request_diagnostics_[request_id].request_id = request_id;
+        planner_route_request_diagnostics_[request_id].stage =
+          has_diagnostics ? diagnostics.stage : "unknown";
+        planner_route_request_diagnostics_[request_id].stage_elapsed_sec =
+          has_diagnostics ? diagnostics.stage_elapsed_sec : 0.0;
+        planner_route_request_diagnostics_[request_id].expansions =
+          has_diagnostics ? diagnostics.expansions : 0;
+        planner_route_request_diagnostics_[request_id].result_class = timeout_result_class;
+      }
+    }
     if(request_id != 0){
       route_request_cancel_reasons_[request_id] = reason;
     }
   }
 
   if(is_client_side_timeout_reason(reason)){
-    RCLCPP_WARN(
-      this->get_logger(),
-      "planner request timed out on client side, goal_seq=%zu, request_id=%zu; canceling planner request",
-      goal_seq,
-      request_id);
+    if(has_diagnostics){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "planner request timed out on client side, goal_seq=%zu, request_id=%zu, planner_stage=%s, stage_elapsed_sec=%.3f, expansions=%zu, final_result=%s; canceling planner request",
+        goal_seq,
+        request_id,
+        diagnostics.stage.c_str(),
+        diagnostics.stage_elapsed_sec,
+        diagnostics.expansions,
+        timeout_result_class.c_str());
+    }
+    else{
+      RCLCPP_WARN(
+        this->get_logger(),
+        "planner request timed out on client side, goal_seq=%zu, request_id=%zu, planner_stage=unknown, stage_elapsed_sec=0.000, expansions=0, final_result=%s; canceling planner request",
+        goal_seq,
+        request_id,
+        timeout_result_class.c_str());
+    }
   }
   else{
     RCLCPP_INFO(
@@ -225,6 +343,7 @@ void P2PGlobalPlanManager::stop(const std::string & reason){
     active_route_request_handle_.reset();
     active_route_request_id_ = 0;
     route_request_cancel_reasons_.clear();
+    planner_route_request_diagnostics_.clear();
   }
 
   if(freeze_route_per_goal_ && should_log_release){
@@ -300,6 +419,8 @@ void P2PGlobalPlanManager::queryThread(){
     request_id = ++next_route_request_id_;
     active_route_request_id_ = request_id;
     active_route_request_handle_.reset();
+    route_request_cancel_reasons_.erase(request_id);
+    planner_route_request_diagnostics_.erase(request_id);
     is_planning_ = true;
     route_requested_for_goal_ = true;
     should_send_goal = true;
@@ -347,6 +468,7 @@ void P2PGlobalPlanManager::global_planner_client_goal_response_callback(
         route_requested_for_goal_ = false;
         route_request_failed_ = true;
         active_route_request_handle_.reset();
+        planner_route_request_diagnostics_.erase(request_id);
       }
     }
     if(route_request_frequency_>2)
@@ -439,6 +561,8 @@ void P2PGlobalPlanManager::global_planner_client_result_callback(
   std::size_t pose_count = 0;
   bool ignore_stale_result = false;
   std::string cancel_reason;
+  PlannerRouteRequestDiagnostics diagnostics;
+  bool has_diagnostics = false;
 
   {
     std::unique_lock<std::mutex> lock(access_);
@@ -446,6 +570,12 @@ void P2PGlobalPlanManager::global_planner_client_result_callback(
     if(cancel_it != route_request_cancel_reasons_.end()){
       cancel_reason = cancel_it->second;
       route_request_cancel_reasons_.erase(cancel_it);
+    }
+    const auto diagnostics_it = planner_route_request_diagnostics_.find(request_id);
+    if(diagnostics_it != planner_route_request_diagnostics_.end()){
+      diagnostics = diagnostics_it->second;
+      has_diagnostics = diagnostics.valid;
+      planner_route_request_diagnostics_.erase(diagnostics_it);
     }
 
     if(!got_first_goal_ || request_goal_seq != goal_seq_ || request_id != active_route_request_id_){
@@ -492,39 +622,63 @@ void P2PGlobalPlanManager::global_planner_client_result_callback(
     return;
   }
 
+  std::string final_result_class =
+    has_diagnostics ? diagnostics.result_class : std::string();
   switch (result.code) {
     case rclcpp_action::ResultCode::SUCCEEDED:
-      break;
-    case rclcpp_action::ResultCode::ABORTED:
-      RCLCPP_ERROR(
+      if(final_result_class.empty() || final_result_class == "in_progress"){
+        final_result_class = "succeeded";
+      }
+      RCLCPP_INFO(
         this->get_logger(),
-        "planner failed for goal_seq=%zu, request_id=%zu via %s",
+        "planner finished for goal_seq=%zu, request_id=%zu via %s, final_result=%s",
         goal_seq,
         request_id,
-        route_action_name_.c_str());
+        route_action_name_.c_str(),
+        final_result_class.c_str());
+      break;
+    case rclcpp_action::ResultCode::ABORTED:
+      final_result_class = classify_aborted_planner_result(
+        has_diagnostics ? &diagnostics : nullptr);
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "planner failed for goal_seq=%zu, request_id=%zu via %s, final_result=%s",
+        goal_seq,
+        request_id,
+        route_action_name_.c_str(),
+        final_result_class.c_str());
       break;
     case rclcpp_action::ResultCode::CANCELED:
       if(is_client_side_timeout_reason(cancel_reason)){
+        if(final_result_class.empty() || final_result_class == "in_progress"){
+          final_result_class = timeout_result_class_from_stage(
+            has_diagnostics ? diagnostics.stage : "raw_route");
+        }
         RCLCPP_INFO(
           this->get_logger(),
-          "planner timeout cleanup completed, goal_seq=%zu, request_id=%zu",
-          goal_seq,
-          request_id);
-      }
-      else if(!cancel_reason.empty()){
-        RCLCPP_INFO(
-          this->get_logger(),
-          "planner canceled for goal_seq=%zu, request_id=%zu because %s",
+          "planner timeout cleanup completed, goal_seq=%zu, request_id=%zu, final_result=%s",
           goal_seq,
           request_id,
-          cancel_reason.c_str());
+          final_result_class.c_str());
       }
-      else{
+      else if(!cancel_reason.empty()){
+        final_result_class = "planner_canceled";
         RCLCPP_INFO(
           this->get_logger(),
-          "planner canceled for goal_seq=%zu, request_id=%zu",
+          "planner canceled for goal_seq=%zu, request_id=%zu because %s, final_result=%s",
           goal_seq,
-          request_id);
+          request_id,
+          cancel_reason.c_str(),
+          final_result_class.c_str());
+      }
+      else{
+        final_result_class = "planner_canceled";
+        RCLCPP_INFO(
+          this->get_logger(),
+          "planner canceled for goal_seq=%zu, request_id=%zu, final_result=%s",
+          goal_seq,
+          request_id,
+          final_result_class.c_str());
       }
       break;
     default:
@@ -558,9 +712,49 @@ void P2PGlobalPlanManager::global_planner_client_result_callback(
   else if(freeze_current_goal && result.code == rclcpp_action::ResultCode::ABORTED){
     RCLCPP_WARN(
       this->get_logger(),
-      "release frozen route because planner failed, goal_seq=%zu, route_version=%zu",
+      "release frozen route because planner failed, goal_seq=%zu, route_version=%zu, final_result=%s",
       goal_seq,
-      route_version);
+      route_version,
+      final_result_class.c_str());
+  }
+}
+
+void P2PGlobalPlanManager::planner_route_request_diag_callback(
+  const std_msgs::msg::String::SharedPtr msg)
+{
+  PlannerRouteRequestDiagnostics diagnostics;
+  if(msg == nullptr || !parse_planner_route_request_diagnostics(msg->data, &diagnostics)){
+    return;
+  }
+
+  bool should_log_stage_update = false;
+  std::size_t active_goal_seq = 0;
+  {
+    std::unique_lock<std::mutex> lock(access_);
+    const auto previous_it = planner_route_request_diagnostics_.find(diagnostics.request_id);
+    const bool stage_changed =
+      previous_it == planner_route_request_diagnostics_.end() ||
+      previous_it->second.stage != diagnostics.stage;
+    const bool result_changed =
+      previous_it == planner_route_request_diagnostics_.end() ||
+      previous_it->second.result_class != diagnostics.result_class;
+    planner_route_request_diagnostics_[diagnostics.request_id] = diagnostics;
+    should_log_stage_update =
+      diagnostics.request_id == active_route_request_id_ &&
+      (stage_changed || result_changed || diagnostics.stage == "finished");
+    active_goal_seq = goal_seq_;
+  }
+
+  if(should_log_stage_update){
+    RCLCPP_INFO(
+      this->get_logger(),
+      "planner stage update, goal_seq=%zu, request_id=%zu, stage=%s, stage_elapsed_sec=%.3f, expansions=%zu, result_class=%s",
+      active_goal_seq,
+      diagnostics.request_id,
+      diagnostics.stage.c_str(),
+      diagnostics.stage_elapsed_sec,
+      diagnostics.expansions,
+      diagnostics.result_class.c_str());
   }
 }
 
@@ -577,6 +771,7 @@ void P2PGlobalPlanManager::setGoal(const geometry_msgs::msg::PoseStamped& goal){
   active_route_request_handle_.reset();
   active_route_request_id_ = 0;
   route_request_cancel_reasons_.clear();
+  planner_route_request_diagnostics_.clear();
   ++goal_seq_;
   RCLCPP_INFO(
     this->get_logger(),

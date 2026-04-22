@@ -33,6 +33,7 @@
 #include "rclcpp_action/rclcpp_action.hpp"
 
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include "std_msgs/msg/string.hpp"
 
 /*Fast triangulation of unordered point clouds*/
 #include <pcl/kdtree/kdtree_flann.h>
@@ -101,7 +102,13 @@ class GlobalPlanner : public rclcpp::Node {
         bool force_use_goal_heading = false,
         int preferred_initial_turn_sign = 0,
         const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
-        bool * was_canceled = nullptr);
+        bool * was_canceled = nullptr,
+        const std::string & debug_label = "",
+        ForwardHybridAStar::SearchDiagnostics * search_diagnostics = nullptr,
+        ForwardHybridAStar::ProjectionDiagnostics * start_projection = nullptr,
+        ForwardHybridAStar::ProjectionDiagnostics * goal_projection = nullptr,
+        const ForwardHybridAStar::ProgressCallback & progress_callback =
+          ForwardHybridAStar::ProgressCallback());
       bool BuildFrozenRouteWithEntryConnector(
         const geometry_msgs::msg::PoseStamped & start,
         const geometry_msgs::msg::PoseStamped & goal,
@@ -180,10 +187,12 @@ class GlobalPlanner : public rclcpp::Node {
       rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path_;
       rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_raw_route_path_;
       rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_frozen_route_path_;
+      rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_route_request_stage_;
       rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_static_graph_;
       rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_weighted_pc_;
       std::size_t debug_goal_seq_;
       std::size_t debug_route_version_;
+      std::size_t debug_request_id_;
 
       /*cb*/
       rclcpp::TimerBase::SharedPtr perception_3d_check_timer_;
@@ -220,6 +229,13 @@ class GlobalPlanner : public rclcpp::Node {
         std::size_t goal_seq,
         std::size_t route_version,
         const std::string & source_label);
+      void publishRouteRequestStageDebug(
+        std::size_t request_id,
+        std::size_t goal_seq,
+        const std::string & stage,
+        double stage_elapsed_sec,
+        std::size_t expansions,
+        const std::string & result_class);
       nav_msgs::msg::Path makeROSPlanLocked(
         const geometry_msgs::msg::PoseStamped & start,
         const geometry_msgs::msg::PoseStamped & goal,
@@ -227,7 +243,13 @@ class GlobalPlanner : public rclcpp::Node {
         bool force_use_goal_heading = false,
         int preferred_initial_turn_sign = 0,
         const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
-        bool * was_canceled = nullptr);
+        bool * was_canceled = nullptr,
+        const std::string & debug_label = "",
+        ForwardHybridAStar::SearchDiagnostics * search_diagnostics = nullptr,
+        ForwardHybridAStar::ProjectionDiagnostics * start_projection = nullptr,
+        ForwardHybridAStar::ProjectionDiagnostics * goal_projection = nullptr,
+        const ForwardHybridAStar::ProgressCallback & progress_callback =
+          ForwardHybridAStar::ProgressCallback());
       bool buildFrozenRouteWithEntryConnectorLocked(
         const geometry_msgs::msg::PoseStamped & start,
         const geometry_msgs::msg::PoseStamped & goal,
@@ -238,7 +260,10 @@ class GlobalPlanner : public rclcpp::Node {
         std::size_t * connector_pose_count,
         bool * connector_used_fallback,
         const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
-        bool * was_canceled = nullptr);
+        bool * was_canceled = nullptr,
+        std::size_t request_id = 0,
+        std::size_t goal_seq = 0,
+        std::string * request_result_class = nullptr);
       std::vector<double> computePathArcLengths(const nav_msgs::msg::Path & path) const;
       std::vector<std::size_t> selectEntryAnchorCandidates(
         const nav_msgs::msg::Path & raw_route,

@@ -25,6 +25,32 @@ class ForwardHybridAStar
 {
 public:
   using CancelRequestedCallback = std::function<bool()>;
+  struct ProjectionDiagnostics
+  {
+    bool success = false;
+    double query_x = std::numeric_limits<double>::quiet_NaN();
+    double query_y = std::numeric_limits<double>::quiet_NaN();
+    double query_z = std::numeric_limits<double>::quiet_NaN();
+    std::size_t ground_index = 0;
+    double ground_x = std::numeric_limits<double>::quiet_NaN();
+    double ground_y = std::numeric_limits<double>::quiet_NaN();
+    double ground_z = std::numeric_limits<double>::quiet_NaN();
+    double projection_distance = std::numeric_limits<double>::quiet_NaN();
+    std::string fallback = "none";
+    double fallback_z_before = std::numeric_limits<double>::quiet_NaN();
+    double fallback_z_after = std::numeric_limits<double>::quiet_NaN();
+    double fallback_nearest_distance = std::numeric_limits<double>::quiet_NaN();
+  };
+
+  struct SearchDiagnostics
+  {
+    bool success = false;
+    bool canceled = false;
+    std::size_t expansions = 0;
+    double planning_time_sec = 0.0;
+    std::size_t path_pose_count = 0;
+  };
+  using ProgressCallback = std::function<void(const SearchDiagnostics &)>;
 
   // This planner is a forward continuous-lattice search with projection-based
   // collision/ground validation. It is not a strictly graph-constrained Hybrid A*.
@@ -68,7 +94,12 @@ public:
     bool force_use_goal_heading = false,
     int preferred_initial_turn_sign = 0,
     const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
-    bool * was_canceled = nullptr);
+    bool * was_canceled = nullptr,
+    const std::string & debug_label = "",
+    SearchDiagnostics * search_diagnostics = nullptr,
+    ProjectionDiagnostics * start_projection = nullptr,
+    ProjectionDiagnostics * goal_projection = nullptr,
+    const ProgressCallback & progress_callback = ProgressCallback());
 
 private:
   struct NodeRecord
@@ -139,7 +170,8 @@ private:
     double y,
     double z_hint,
     std::size_t * ground_index,
-    double * projected_z) const;
+    double * projected_z,
+    ProjectionDiagnostics * diagnostics = nullptr) const;
 
   bool ValidateSample(
     double x,

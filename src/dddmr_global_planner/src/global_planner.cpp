@@ -31,7 +31,9 @@
 #include <global_planner/global_planner.h>
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
+#include <sstream>
 
 using namespace std::chrono_literals;
 
@@ -44,6 +46,7 @@ GlobalPlanner::GlobalPlanner(const std::string& name)
   clock_ = this->get_clock();
   debug_goal_seq_ = 0;
   debug_route_version_ = 0;
+  debug_request_id_ = 0;
 }
 
 rclcpp_action::GoalResponse GlobalPlanner::handle_goal(
@@ -250,6 +253,9 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   pub_frozen_route_path_ = this->create_publisher<nav_msgs::msg::Path>(
     "/debug/frozen_route_path",
     rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
+  pub_route_request_stage_ = this->create_publisher<std_msgs::msg::String>(
+    "/debug/planner_route_request_stage",
+    rclcpp::QoS(rclcpp::KeepLast(20)).reliable());
   pub_static_graph_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("static_graph", rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
   pub_weighted_pc_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("weighted_ground", rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
 
@@ -865,6 +871,30 @@ void GlobalPlanner::publishFrozenRouteDebugPath(
     debug_path.poses.size());
 }
 
+void GlobalPlanner::publishRouteRequestStageDebug(
+  std::size_t request_id,
+  std::size_t goal_seq,
+  const std::string & stage,
+  double stage_elapsed_sec,
+  std::size_t expansions,
+  const std::string & result_class)
+{
+  if(!pub_route_request_stage_){
+    return;
+  }
+
+  std_msgs::msg::String message;
+  std::ostringstream stream;
+  stream << "request_id=" << request_id
+         << ";goal_seq=" << goal_seq
+         << ";stage=" << stage
+         << ";stage_elapsed_sec=" << stage_elapsed_sec
+         << ";expansions=" << expansions
+         << ";result_class=" << result_class;
+  message.data = stream.str();
+  pub_route_request_stage_->publish(message);
+}
+
 std::vector<double> GlobalPlanner::computePathArcLengths(const nav_msgs::msg::Path & path) const
 {
   std::vector<double> arc_lengths;
@@ -1100,7 +1130,10 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
   std::size_t * connector_pose_count,
   bool * connector_used_fallback,
   const CancelRequestedCallback & cancel_requested,
-  bool * was_canceled)
+  bool * was_canceled,
+  std::size_t request_id,
+  std::size_t goal_seq,
+  std::string * request_result_class)
 {
   if(raw_route == nullptr || frozen_route == nullptr){
     return false;
@@ -1109,11 +1142,130 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
   if(was_canceled != nullptr){
     *was_canceled = false;
   }
+  if(request_result_class != nullptr){
+    *request_result_class = "failed_raw_route";
+  }
 
-  *raw_route = makeROSPlanLocked(start, goal, false, false, 0, cancel_requested, was_canceled);
+  const auto elapsed_seconds =
+    [](const std::chrono::steady_clock::time_point & started_at) {
+      return std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - started_at).count();
+    };
+  const auto publish_stage =
+    [this, request_id, goal_seq, &elapsed_seconds](
+      const std::string & stage,
+      const std::chrono::steady_clock::time_point & stage_started_at,
+      std::size_t expansions,
+      const std::string & result_class)
+    {
+      if(request_id == 0){
+        return;
+      }
+      publishRouteRequestStageDebug(
+        request_id,
+        goal_seq,
+        stage,
+        elapsed_seconds(stage_started_at),
+        expansions,
+        result_class);
+    };
+
+  const auto projecting_started_at = std::chrono::steady_clock::now();
+  publish_stage("projecting", projecting_started_at, 0, "in_progress");
+
+  ForwardHybridAStar::SearchDiagnostics raw_route_search_diagnostics;
+  ForwardHybridAStar::ProjectionDiagnostics start_projection;
+  ForwardHybridAStar::ProjectionDiagnostics goal_projection;
+  bool raw_route_stage_started = false;
+  auto raw_route_stage_started_at = std::chrono::steady_clock::now();
+  const auto raw_route_progress_callback =
+    [&publish_stage, &raw_route_stage_started, &raw_route_stage_started_at](
+      const ForwardHybridAStar::SearchDiagnostics & diagnostics)
+    {
+      if(!raw_route_stage_started){
+        raw_route_stage_started = true;
+        raw_route_stage_started_at = std::chrono::steady_clock::now();
+      }
+      publish_stage(
+        "raw_route",
+        raw_route_stage_started_at,
+        diagnostics.expansions,
+        "in_progress");
+    };
+  std::ostringstream raw_route_debug_label;
+  raw_route_debug_label
+    << "raw_route goal_seq=" << goal_seq
+    << ", request_id=" << request_id
+    << ", stage=raw_route";
+
+  *raw_route = makeROSPlanLocked(
+    start,
+    goal,
+    false,
+    false,
+    0,
+    cancel_requested,
+    was_canceled,
+    raw_route_debug_label.str(),
+    &raw_route_search_diagnostics,
+    &start_projection,
+    &goal_projection,
+    raw_route_progress_callback);
+  if(!raw_route_stage_started && start_projection.success && goal_projection.success){
+    raw_route_stage_started = true;
+    raw_route_stage_started_at = std::chrono::steady_clock::now();
+    publish_stage("raw_route", raw_route_stage_started_at, raw_route_search_diagnostics.expansions, "in_progress");
+  }
+
   if(was_canceled != nullptr && *was_canceled){
+    if(request_result_class != nullptr){
+      *request_result_class = "planner_canceled";
+    }
     frozen_route->poses.clear();
     return false;
+  }
+  const bool projection_failed = !start_projection.success || !goal_projection.success;
+  if(raw_route->poses.empty()){
+    const std::string raw_route_result_class =
+      projection_failed ? "failed_projection" : "failed_raw_route";
+    if(request_result_class != nullptr){
+      *request_result_class = raw_route_result_class;
+    }
+    RCLCPP_WARN(
+      this->get_logger(),
+      "raw route stage finished, goal_seq=%zu, request_id=%zu, stage=raw_route, success=0, result_class=%s, expansions=%zu, planning_time=%.3f, path_poses=%zu, start_ground_idx=%zu, start_ground_z=%.2f, start_projection_distance=%.3f, start_fallback=%s, goal_ground_idx=%zu, goal_ground_z=%.2f, goal_projection_distance=%.3f, goal_fallback=%s",
+      goal_seq,
+      request_id,
+      raw_route_result_class.c_str(),
+      raw_route_search_diagnostics.expansions,
+      raw_route_search_diagnostics.planning_time_sec,
+      raw_route_search_diagnostics.path_pose_count,
+      start_projection.ground_index,
+      start_projection.ground_z,
+      start_projection.projection_distance,
+      start_projection.fallback.c_str(),
+      goal_projection.ground_index,
+      goal_projection.ground_z,
+      goal_projection.projection_distance,
+      goal_projection.fallback.c_str());
+  }
+  else{
+    RCLCPP_INFO(
+      this->get_logger(),
+      "raw route stage finished, goal_seq=%zu, request_id=%zu, stage=raw_route, success=1, result_class=succeeded, expansions=%zu, planning_time=%.3f, path_poses=%zu, start_ground_idx=%zu, start_ground_z=%.2f, start_projection_distance=%.3f, start_fallback=%s, goal_ground_idx=%zu, goal_ground_z=%.2f, goal_projection_distance=%.3f, goal_fallback=%s",
+      goal_seq,
+      request_id,
+      raw_route_search_diagnostics.expansions,
+      raw_route_search_diagnostics.planning_time_sec,
+      raw_route_search_diagnostics.path_pose_count,
+      start_projection.ground_index,
+      start_projection.ground_z,
+      start_projection.projection_distance,
+      start_projection.fallback.c_str(),
+      goal_projection.ground_index,
+      goal_projection.ground_z,
+      goal_projection.projection_distance,
+      goal_projection.fallback.c_str());
   }
   *frozen_route = *raw_route;
   if(anchor_index != nullptr){
@@ -1137,21 +1289,37 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
     if(was_canceled != nullptr){
       *was_canceled = true;
     }
+    if(request_result_class != nullptr){
+      *request_result_class = "planner_canceled";
+    }
     frozen_route->poses.clear();
     return false;
   }
 
   if(!enable_entry_connector_){
+    const auto composing_started_at = std::chrono::steady_clock::now();
+    publish_stage("composing_frozen_route", composing_started_at, 0, "in_progress");
+    if(request_result_class != nullptr){
+      *request_result_class = "succeeded";
+    }
     return true;
   }
 
   if(!use_forward_hybrid_astar_ || forward_hybrid_astar_planner_ == nullptr){
+    const auto composing_started_at = std::chrono::steady_clock::now();
+    publish_stage("composing_frozen_route", composing_started_at, 0, "in_progress");
     if(connector_used_fallback != nullptr){
       *connector_used_fallback = true;
     }
     RCLCPP_WARN(
       this->get_logger(),
-      "entry connector fallback used because ForwardHybridAStar is unavailable.");
+      "entry connector fallback used, goal_seq=%zu, request_id=%zu, stage=entry_connector, fallback_reason=forward_hybrid_astar_unavailable, raw_route_poses=%zu",
+      goal_seq,
+      request_id,
+      raw_route->poses.size());
+    if(request_result_class != nullptr){
+      *request_result_class = "succeeded";
+    }
     return true;
   }
 
@@ -1159,10 +1327,20 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
   const std::vector<std::size_t> candidate_indices =
     selectEntryAnchorCandidates(*raw_route, arc_lengths, start);
   if(candidate_indices.empty()){
+    const auto composing_started_at = std::chrono::steady_clock::now();
+    publish_stage("composing_frozen_route", composing_started_at, 0, "in_progress");
     if(connector_used_fallback != nullptr){
       *connector_used_fallback = true;
     }
-    RCLCPP_WARN(this->get_logger(), "entry connector fallback used because no anchor candidate is available.");
+    RCLCPP_WARN(
+      this->get_logger(),
+      "entry connector fallback used, goal_seq=%zu, request_id=%zu, stage=entry_connector, fallback_reason=anchor_invalid, raw_route_poses=%zu",
+      goal_seq,
+      request_id,
+      raw_route->poses.size());
+    if(request_result_class != nullptr){
+      *request_result_class = "succeeded";
+    }
     return true;
   }
 
@@ -1171,6 +1349,9 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
     if(cancel_requested && cancel_requested()){
       if(was_canceled != nullptr){
         *was_canceled = true;
+      }
+      if(request_result_class != nullptr){
+        *request_result_class = "planner_canceled";
       }
       frozen_route->poses.clear();
       return false;
@@ -1182,20 +1363,67 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
     const bool candidate_in_window =
       candidate_distance >= entry_connector_min_anchor_distance_ &&
       candidate_distance <= entry_connector_max_anchor_distance_;
+    const auto entry_connector_stage_started_at = std::chrono::steady_clock::now();
+    publish_stage("entry_connector", entry_connector_stage_started_at, 0, "in_progress");
     geometry_msgs::msg::PoseStamped anchor_pose;
     double anchor_yaw = 0.0;
     if(!buildAnchorPoseFromRoute(*raw_route, candidate_index, &anchor_pose, &anchor_yaw)){
       RCLCPP_WARN(
         this->get_logger(),
-        "entry connector failed, anchor_index=%zu, anchor_distance=%.2f, anchor_yaw=nan (invalid route tangent)",
+        "entry connector candidate failed, goal_seq=%zu, request_id=%zu, stage=entry_connector, candidate_order=%zu, anchor_index=%zu, anchor_arc_distance=%.2f, preferred_window=%d, fallback_reason=anchor_invalid",
+        goal_seq,
+        request_id,
+        candidate_order,
         candidate_index,
-        candidate_distance);
+        candidate_distance,
+        candidate_in_window ? 1 : 0);
       success_on_primary_candidate = false;
       continue;
     }
 
+    RCLCPP_INFO(
+      this->get_logger(),
+      "entry connector candidate start, goal_seq=%zu, request_id=%zu, stage=entry_connector, entry_connector_enabled=%d, candidate_order=%zu, anchor_index=%zu, anchor_arc_distance=%.2f, preferred_window=%d, anchor_pose=(%.2f, %.2f, %.2f), anchor_yaw=%.2f",
+      goal_seq,
+      request_id,
+      enable_entry_connector_ ? 1 : 0,
+      candidate_order,
+      candidate_index,
+      candidate_distance,
+      candidate_in_window ? 1 : 0,
+      anchor_pose.pose.position.x,
+      anchor_pose.pose.position.y,
+      anchor_pose.pose.position.z,
+      anchor_yaw);
+
     nav_msgs::msg::Path entry_connector;
     bool entry_connector_canceled = false;
+    ForwardHybridAStar::SearchDiagnostics entry_connector_search_diagnostics;
+    ForwardHybridAStar::ProjectionDiagnostics entry_connector_start_projection;
+    ForwardHybridAStar::ProjectionDiagnostics entry_anchor_projection;
+    bool entry_connector_search_started = false;
+    auto entry_connector_search_started_at = std::chrono::steady_clock::now();
+    const auto entry_connector_progress_callback =
+      [&publish_stage, &entry_connector_search_started, &entry_connector_search_started_at](
+        const ForwardHybridAStar::SearchDiagnostics & diagnostics)
+      {
+        if(!entry_connector_search_started){
+          entry_connector_search_started = true;
+          entry_connector_search_started_at = std::chrono::steady_clock::now();
+        }
+        publish_stage(
+          "entry_connector",
+          entry_connector_search_started_at,
+          diagnostics.expansions,
+          "in_progress");
+      };
+    std::ostringstream entry_connector_debug_label;
+    entry_connector_debug_label
+      << "entry_connector goal_seq=" << goal_seq
+      << ", request_id=" << request_id
+      << ", stage=entry_connector"
+      << ", candidate_order=" << candidate_order
+      << ", anchor_index=" << candidate_index;
     if(!forward_hybrid_astar_planner_->MakePlan(
          start,
          anchor_pose,
@@ -1204,21 +1432,47 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
          entry_connector_force_goal_heading_,
          0,
          cancel_requested,
-         &entry_connector_canceled))
+         &entry_connector_canceled,
+         entry_connector_debug_label.str(),
+         &entry_connector_search_diagnostics,
+         &entry_connector_start_projection,
+         &entry_anchor_projection,
+         entry_connector_progress_callback))
     {
       if(entry_connector_canceled){
+        RCLCPP_WARN(
+          this->get_logger(),
+          "entry_connector planning canceled, goal_seq=%zu, request_id=%zu, stage=entry_connector, candidate_order=%zu, anchor_index=%zu, expansions=%zu, planning_time=%.3f, fallback_reason=connector_canceled",
+          goal_seq,
+          request_id,
+          candidate_order,
+          candidate_index,
+          entry_connector_search_diagnostics.expansions,
+          entry_connector_search_diagnostics.planning_time_sec);
         if(was_canceled != nullptr){
           *was_canceled = true;
+        }
+        if(request_result_class != nullptr){
+          *request_result_class = "planner_canceled";
         }
         frozen_route->poses.clear();
         return false;
       }
       RCLCPP_WARN(
         this->get_logger(),
-        "entry connector failed, anchor_index=%zu, anchor_distance=%.2f, anchor_yaw=%.2f",
+        "entry connector candidate result, goal_seq=%zu, request_id=%zu, stage=entry_connector, candidate_order=%zu, anchor_index=%zu, preferred_window=%d, success=0, expansions=%zu, planning_time=%.3f, connector_poses=%zu, anchor_ground_idx=%zu, anchor_ground_z=%.2f, anchor_projection_distance=%.3f, anchor_fallback=%s, fallback_reason=connector_search_failed",
+        goal_seq,
+        request_id,
+        candidate_order,
         candidate_index,
-        candidate_distance,
-        anchor_yaw);
+        candidate_in_window ? 1 : 0,
+        entry_connector_search_diagnostics.expansions,
+        entry_connector_search_diagnostics.planning_time_sec,
+        entry_connector_search_diagnostics.path_pose_count,
+        entry_anchor_projection.ground_index,
+        entry_anchor_projection.ground_z,
+        entry_anchor_projection.projection_distance,
+        entry_anchor_projection.fallback.c_str());
       success_on_primary_candidate = false;
       continue;
     }
@@ -1227,19 +1481,41 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
       if(was_canceled != nullptr){
         *was_canceled = true;
       }
+      if(request_result_class != nullptr){
+        *request_result_class = "planner_canceled";
+      }
       frozen_route->poses.clear();
       return false;
     }
 
+    RCLCPP_INFO(
+      this->get_logger(),
+      "entry connector candidate result, goal_seq=%zu, request_id=%zu, stage=entry_connector, candidate_order=%zu, anchor_index=%zu, preferred_window=%d, success=1, expansions=%zu, planning_time=%.3f, connector_poses=%zu, anchor_ground_idx=%zu, anchor_ground_z=%.2f, anchor_projection_distance=%.3f, anchor_fallback=%s",
+      goal_seq,
+      request_id,
+      candidate_order,
+      candidate_index,
+      candidate_in_window ? 1 : 0,
+      entry_connector_search_diagnostics.expansions,
+      entry_connector_search_diagnostics.planning_time_sec,
+      entry_connector.poses.size(),
+      entry_anchor_projection.ground_index,
+      entry_anchor_projection.ground_z,
+      entry_anchor_projection.projection_distance,
+      entry_anchor_projection.fallback.c_str());
+    const auto composing_started_at = std::chrono::steady_clock::now();
+    publish_stage("composing_frozen_route", composing_started_at, 0, "in_progress");
     nav_msgs::msg::Path composed_route =
       composeEntryConnectorWithRouteTail(entry_connector, *raw_route, candidate_index);
     if(composed_route.poses.empty()){
       RCLCPP_WARN(
         this->get_logger(),
-        "entry connector failed, anchor_index=%zu, anchor_distance=%.2f, anchor_yaw=%.2f (composition produced empty path)",
+        "entry connector candidate failed, goal_seq=%zu, request_id=%zu, stage=composing_frozen_route, candidate_order=%zu, anchor_index=%zu, anchor_arc_distance=%.2f, fallback_reason=composition_empty",
+        goal_seq,
+        request_id,
+        candidate_order,
         candidate_index,
-        candidate_distance,
-        anchor_yaw);
+        candidate_distance);
       success_on_primary_candidate = false;
       continue;
     }
@@ -1258,16 +1534,26 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
       *connector_used_fallback =
         !candidate_in_window || !success_on_primary_candidate || candidate_order > 0;
     }
+    if(request_result_class != nullptr){
+      *request_result_class = "succeeded";
+    }
     return true;
   }
 
+  const auto composing_started_at = std::chrono::steady_clock::now();
+  publish_stage("composing_frozen_route", composing_started_at, 0, "in_progress");
   if(connector_used_fallback != nullptr){
     *connector_used_fallback = true;
   }
   RCLCPP_WARN(
     this->get_logger(),
-    "entry connector fallback used, publish raw route only, raw_route_poses=%zu",
+    "entry connector fallback used, goal_seq=%zu, request_id=%zu, stage=entry_connector, fallback_reason=connector_search_failed, raw_route_poses=%zu",
+    goal_seq,
+    request_id,
     raw_route->poses.size());
+  if(request_result_class != nullptr){
+    *request_result_class = "succeeded";
+  }
   return true;
 }
 
@@ -1290,7 +1576,10 @@ bool GlobalPlanner::BuildFrozenRouteWithEntryConnector(
     nullptr,
     nullptr,
     cancel_requested,
-    was_canceled);
+    was_canceled,
+    0,
+    0,
+    nullptr);
 }
 
 void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle){
@@ -1325,6 +1614,7 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
   }
 
   const std::size_t goal_seq = ++debug_goal_seq_;
+  const std::size_t request_id = ++debug_request_id_;
   geometry_msgs::msg::PoseStamped start;
   perception_3d_ros_->getGlobalPose(start);
 
@@ -1335,6 +1625,7 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
   std::size_t connector_pose_count = 0;
   bool connector_used_fallback = false;
   bool planner_canceled = false;
+  std::string request_result_class = "failed_raw_route";
 
   if(cancel_requested()){
     finish_canceled("planner canceled before route computation started");
@@ -1352,19 +1643,36 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
          &connector_pose_count,
          &connector_used_fallback,
          cancel_requested,
-         &planner_canceled))
+         &planner_canceled,
+         request_id,
+         goal_seq,
+         &request_result_class))
     {
       frozen_route = raw_route;
     }
   }
 
   if(planner_canceled || cancel_requested()){
+    publishRouteRequestStageDebug(
+      request_id,
+      goal_seq,
+      "finished",
+      0.0,
+      0,
+      "planner_canceled");
     finish_canceled(
       "planner canceled while computing route; client-side wait ended before planner finished");
     return;
   }
 
   if(raw_route.poses.empty()){
+    publishRouteRequestStageDebug(
+      request_id,
+      goal_seq,
+      "finished",
+      0.0,
+      0,
+      request_result_class);
     publishRawRouteDebugPath(raw_route, goal_seq, debug_route_version_, "get_plan_failed");
     publishFrozenRouteDebugPath(frozen_route, goal_seq, debug_route_version_, "get_plan_failed");
     result->path = frozen_route;
@@ -1423,6 +1731,13 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
       "frozen route published for goal_seq=%zu, route_version=%zu",
       goal_seq,
       route_version);
+    publishRouteRequestStageDebug(
+      request_id,
+      goal_seq,
+      "finished",
+      0.0,
+      0,
+      "succeeded");
     result->path = frozen_route;
     goal_handle->succeed(result);
   }
@@ -1436,7 +1751,12 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlan(
   bool force_use_goal_heading,
   int preferred_initial_turn_sign,
   const CancelRequestedCallback & cancel_requested,
-  bool * was_canceled)
+  bool * was_canceled,
+  const std::string & debug_label,
+  ForwardHybridAStar::SearchDiagnostics * search_diagnostics,
+  ForwardHybridAStar::ProjectionDiagnostics * start_projection,
+  ForwardHybridAStar::ProjectionDiagnostics * goal_projection,
+  const ForwardHybridAStar::ProgressCallback & progress_callback)
 {
   std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
   return makeROSPlanLocked(
@@ -1446,7 +1766,12 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlan(
     force_use_goal_heading,
     preferred_initial_turn_sign,
     cancel_requested,
-    was_canceled);
+    was_canceled,
+    debug_label,
+    search_diagnostics,
+    start_projection,
+    goal_projection,
+    progress_callback);
 }
 
 nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
@@ -1456,7 +1781,12 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
   bool force_use_goal_heading,
   int preferred_initial_turn_sign,
   const CancelRequestedCallback & cancel_requested,
-  bool * was_canceled){
+  bool * was_canceled,
+  const std::string & debug_label,
+  ForwardHybridAStar::SearchDiagnostics * search_diagnostics,
+  ForwardHybridAStar::ProjectionDiagnostics * start_projection,
+  ForwardHybridAStar::ProjectionDiagnostics * goal_projection,
+  const ForwardHybridAStar::ProgressCallback & progress_callback){
 
   unsigned int start_id = 0;
   unsigned int goal_id = 0;
@@ -1498,7 +1828,12 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
         force_use_goal_heading,
         preferred_initial_turn_sign,
         cancel_requested,
-        &hybrid_planning_canceled))
+        &hybrid_planning_canceled,
+        debug_label,
+        search_diagnostics,
+        start_projection,
+        goal_projection,
+        progress_callback))
     {
       hybrid_path.header.frame_id = global_frame_;
       hybrid_path.header.stamp = clock_->now();

@@ -4,6 +4,7 @@
 #include <tf2/LinearMath/Quaternion.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <queue>
@@ -25,6 +26,16 @@ double SquaredDistance2D(double x0, double y0, double x1, double y1)
   const double dx = x0 - x1;
   const double dy = y0 - y1;
   return dx * dx + dy * dy;
+}
+
+double Distance3D(
+  double x0, double y0, double z0,
+  double x1, double y1, double z1)
+{
+  const double dx = x0 - x1;
+  const double dy = y0 - y1;
+  const double dz = z0 - z1;
+  return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
 }  // namespace
@@ -193,17 +204,31 @@ bool ForwardHybridAStar::PoseToGroundIndex(
   double y,
   double z_hint,
   std::size_t * ground_index,
-  double * projected_z) const
+  double * projected_z,
+  ProjectionDiagnostics * diagnostics) const
 {
   if (ground_index == nullptr || projected_z == nullptr) {
     return false;
   }
 
+  if (diagnostics != nullptr) {
+    *diagnostics = ProjectionDiagnostics();
+    diagnostics->query_x = x;
+    diagnostics->query_y = y;
+    diagnostics->query_z = z_hint;
+  }
+
   if (!IsFinite(x) || !IsFinite(y) || !IsFinite(z_hint)) {
+    if (diagnostics != nullptr) {
+      diagnostics->fallback = "invalid_query";
+    }
     return false;
   }
 
   if (kdtree_ground_ == nullptr || pcl_ground_ == nullptr || pcl_ground_->points.empty()) {
+    if (diagnostics != nullptr) {
+      diagnostics->fallback = "ground_unavailable";
+    }
     return false;
   }
 
@@ -238,40 +263,85 @@ bool ForwardHybridAStar::PoseToGroundIndex(
 
     const pcl::PointXYZI & nearest_pt = pcl_ground_->points[static_cast<std::size_t>(nearest_index)];
     if (!IsFinite(nearest_pt.z)) {
+      if (diagnostics != nullptr) {
+        diagnostics->fallback = "invalid_projected_point";
+      }
       return false;
     }
 
     *ground_index = static_cast<std::size_t>(nearest_index);
     *projected_z = nearest_pt.z;
+    if (diagnostics != nullptr) {
+      diagnostics->success = true;
+      diagnostics->ground_index = *ground_index;
+      diagnostics->ground_x = nearest_pt.x;
+      diagnostics->ground_y = nearest_pt.y;
+      diagnostics->ground_z = nearest_pt.z;
+      diagnostics->projection_distance =
+        Distance3D(x, y, z_hint, nearest_pt.x, nearest_pt.y, nearest_pt.z);
+      diagnostics->fallback = "none";
+      diagnostics->fallback_z_before = z_hint;
+      diagnostics->fallback_z_after = nearest_pt.z;
+      diagnostics->fallback_nearest_distance = std::sqrt(point_squared_distances[closest_idx]);
+    }
     return true;
   }
 
   point_indices.clear();
   point_squared_distances.clear();
   if (kdtree_ground_->nearestKSearch(query, 1, point_indices, point_squared_distances) <= 0) {
+    if (diagnostics != nullptr) {
+      diagnostics->fallback = "nearest_k_not_found";
+    }
     return false;
   }
   if (point_indices.empty() || point_squared_distances.empty()) {
+    if (diagnostics != nullptr) {
+      diagnostics->fallback = "nearest_k_empty";
+    }
     return false;
   }
 
   const int nearest_index = point_indices.front();
   if (nearest_index < 0 || static_cast<std::size_t>(nearest_index) >= pcl_ground_->points.size()) {
+    if (diagnostics != nullptr) {
+      diagnostics->fallback = "nearest_k_invalid_index";
+    }
     return false;
   }
 
   const double nearest_distance = std::sqrt(point_squared_distances.front());
   if (!IsFinite(nearest_distance) || nearest_distance > config_.projection_search_radius * 2.0) {
+    if (diagnostics != nullptr) {
+      diagnostics->fallback = "nearest_k_rejected_too_far";
+      diagnostics->fallback_nearest_distance = nearest_distance;
+    }
     return false;
   }
 
   const pcl::PointXYZI & nearest_pt = pcl_ground_->points[static_cast<std::size_t>(nearest_index)];
   if (!IsFinite(nearest_pt.z)) {
+    if (diagnostics != nullptr) {
+      diagnostics->fallback = "nearest_k_invalid_projected_point";
+    }
     return false;
   }
 
   *ground_index = static_cast<std::size_t>(nearest_index);
   *projected_z = nearest_pt.z;
+  if (diagnostics != nullptr) {
+    diagnostics->success = true;
+    diagnostics->ground_index = *ground_index;
+    diagnostics->ground_x = nearest_pt.x;
+    diagnostics->ground_y = nearest_pt.y;
+    diagnostics->ground_z = nearest_pt.z;
+    diagnostics->projection_distance =
+      Distance3D(x, y, z_hint, nearest_pt.x, nearest_pt.y, nearest_pt.z);
+    diagnostics->fallback = "nearest_k_fallback";
+    diagnostics->fallback_z_before = z_hint;
+    diagnostics->fallback_z_after = nearest_pt.z;
+    diagnostics->fallback_nearest_distance = nearest_distance;
+  }
   return true;
 }
 
@@ -792,11 +862,52 @@ bool ForwardHybridAStar::MakePlan(
   bool force_use_goal_heading,
   int preferred_initial_turn_sign,
   const CancelRequestedCallback & cancel_requested,
-  bool * was_canceled)
+  bool * was_canceled,
+  const std::string & debug_label,
+  SearchDiagnostics * search_diagnostics,
+  ProjectionDiagnostics * start_projection,
+  ProjectionDiagnostics * goal_projection,
+  const ProgressCallback & progress_callback)
 {
   if (was_canceled != nullptr) {
     *was_canceled = false;
   }
+  if (search_diagnostics != nullptr) {
+    *search_diagnostics = SearchDiagnostics();
+  }
+
+  const auto planning_started_at = std::chrono::steady_clock::now();
+  const auto elapsed_seconds =
+    [&planning_started_at]() {
+      return std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - planning_started_at).count();
+    };
+
+  const auto update_search_diagnostics =
+    [search_diagnostics](std::size_t expansions, double planning_time_sec, bool canceled, bool success, std::size_t path_pose_count) {
+      if (search_diagnostics != nullptr) {
+        search_diagnostics->expansions = expansions;
+        search_diagnostics->planning_time_sec = planning_time_sec;
+        search_diagnostics->canceled = canceled;
+        search_diagnostics->success = success;
+        search_diagnostics->path_pose_count = path_pose_count;
+      }
+    };
+
+  const auto publish_progress =
+    [&](std::size_t expansions, bool canceled) {
+      const double planning_time_sec = elapsed_seconds();
+      update_search_diagnostics(expansions, planning_time_sec, canceled, false, 0);
+      if (progress_callback) {
+        SearchDiagnostics progress;
+        progress.expansions = expansions;
+        progress.planning_time_sec = planning_time_sec;
+        progress.canceled = canceled;
+        progress.success = false;
+        progress.path_pose_count = 0;
+        progress_callback(progress);
+      }
+    };
 
   auto check_cancel_requested =
     [&cancel_requested, was_canceled]() -> bool {
@@ -819,7 +930,17 @@ bool ForwardHybridAStar::MakePlan(
   ros_path->header.stamp = rclcpp::Clock(RCL_ROS_TIME).now();
 
   if (check_cancel_requested()) {
-    RCLCPP_INFO(logger_, "Hybrid A*: planning canceled before search start.");
+    if (!debug_label.empty()) {
+      RCLCPP_WARN(
+        logger_,
+        "%s planning canceled, expansions=%zu, planning_time=%.3f",
+        debug_label.c_str(),
+        static_cast<std::size_t>(0),
+        elapsed_seconds());
+    } else {
+      RCLCPP_INFO(logger_, "Hybrid A*: planning canceled before search start.");
+    }
+    update_search_diagnostics(0, elapsed_seconds(), true, false, 0);
     return false;
   }
 
@@ -871,9 +992,15 @@ bool ForwardHybridAStar::MakePlan(
       start.pose.position.y,
       start.pose.position.z,
       &start_ground_index,
-      &start_projected_z))
+      &start_projected_z,
+      start_projection))
   {
-    RCLCPP_WARN(logger_, "Hybrid A*: failed to project start pose onto ground.");
+    if (!debug_label.empty()) {
+      RCLCPP_WARN(logger_, "%s projection failed for start", debug_label.c_str());
+    } else {
+      RCLCPP_WARN(logger_, "Hybrid A*: failed to project start pose onto ground.");
+    }
+    update_search_diagnostics(0, elapsed_seconds(), false, false, 0);
     return false;
   }
 
@@ -884,11 +1011,60 @@ bool ForwardHybridAStar::MakePlan(
       goal.pose.position.y,
       goal.pose.position.z,
       &goal_ground_index,
-      &goal_projected_z))
+      &goal_projected_z,
+      goal_projection))
   {
-    RCLCPP_WARN(logger_, "Hybrid A*: failed to project goal pose onto ground.");
+    if (!debug_label.empty()) {
+      RCLCPP_WARN(logger_, "%s projection failed for goal", debug_label.c_str());
+    } else {
+      RCLCPP_WARN(logger_, "Hybrid A*: failed to project goal pose onto ground.");
+    }
+    update_search_diagnostics(0, elapsed_seconds(), false, false, 0);
     return false;
   }
+
+  if (!debug_label.empty() && start_projection != nullptr && goal_projection != nullptr) {
+    RCLCPP_INFO(
+      logger_,
+      "%s planning start: start_world=(%.2f, %.2f, %.2f) -> ground=(%.2f, %.2f, %.2f) idx=%zu dist=%.3f fallback=%s | goal_world=(%.2f, %.2f, %.2f) -> ground=(%.2f, %.2f, %.2f) idx=%zu dist=%.3f fallback=%s",
+      debug_label.c_str(),
+      start_projection->query_x,
+      start_projection->query_y,
+      start_projection->query_z,
+      start_projection->ground_x,
+      start_projection->ground_y,
+      start_projection->ground_z,
+      start_projection->ground_index,
+      start_projection->projection_distance,
+      start_projection->fallback.c_str(),
+      goal_projection->query_x,
+      goal_projection->query_y,
+      goal_projection->query_z,
+      goal_projection->ground_x,
+      goal_projection->ground_y,
+      goal_projection->ground_z,
+      goal_projection->ground_index,
+      goal_projection->projection_distance,
+      goal_projection->fallback.c_str());
+    RCLCPP_INFO(
+      logger_,
+      "%s start projection detail: fallback=%s, z_before=%.2f, z_after=%.2f, nearest_ground_distance=%.3f",
+      debug_label.c_str(),
+      start_projection->fallback.c_str(),
+      start_projection->fallback_z_before,
+      start_projection->fallback_z_after,
+      start_projection->fallback_nearest_distance);
+    RCLCPP_INFO(
+      logger_,
+      "%s goal projection detail: fallback=%s, z_before=%.2f, z_after=%.2f, nearest_ground_distance=%.3f",
+      debug_label.c_str(),
+      goal_projection->fallback.c_str(),
+      goal_projection->fallback_z_before,
+      goal_projection->fallback_z_after,
+      goal_projection->fallback_nearest_distance);
+  }
+
+  publish_progress(0, false);
 
   (void)goal_ground_index;
   (void)goal_projected_z;
@@ -949,10 +1125,21 @@ bool ForwardHybridAStar::MakePlan(
   const std::size_t max_expand_count = std::max<std::size_t>(state_space_size, 1);
   while (!open_list.empty()) {
     if (check_cancel_requested()) {
-      RCLCPP_INFO(
-        logger_,
-        "Hybrid A*: planning canceled during search after %zu expansions.",
-        expand_count);
+      if (!debug_label.empty()) {
+        RCLCPP_WARN(
+          logger_,
+          "%s planning canceled, expansions=%zu, planning_time=%.3f",
+          debug_label.c_str(),
+          expand_count,
+          elapsed_seconds());
+      } else {
+        RCLCPP_INFO(
+          logger_,
+          "Hybrid A*: planning canceled during search after %zu expansions.",
+          expand_count);
+      }
+      update_search_diagnostics(expand_count, elapsed_seconds(), true, false, 0);
+      publish_progress(expand_count, true);
       return false;
     }
 
@@ -1057,22 +1244,52 @@ bool ForwardHybridAStar::MakePlan(
     }
 
     ++expand_count;
+    if (progress_callback && (expand_count == 1 || expand_count % 500 == 0)) {
+      publish_progress(expand_count, false);
+    }
     if (expand_count > max_expand_count) {
       break;
     }
   }
 
   if (goal_state_id == kInvalidStateId) {
+    if (!debug_label.empty()) {
+      RCLCPP_WARN(
+        logger_,
+        "%s planning finished, success=0, expansions=%zu, planning_time=%.3f, path_poses=%zu",
+        debug_label.c_str(),
+        expand_count,
+        elapsed_seconds(),
+        static_cast<std::size_t>(0));
+    }
+    update_search_diagnostics(expand_count, elapsed_seconds(), false, false, 0);
     return false;
   }
 
-  return ReconstructPath(
+  const bool reconstructed = ReconstructPath(
     goal_state_id,
     goal,
     goal_yaw,
     has_goal_yaw,
     use_goal_heading,
     ros_path);
+  if (!debug_label.empty()) {
+    RCLCPP_INFO(
+      logger_,
+      "%s planning finished, success=%d, expansions=%zu, planning_time=%.3f, path_poses=%zu",
+      debug_label.c_str(),
+      reconstructed ? 1 : 0,
+      expand_count,
+      elapsed_seconds(),
+      ros_path != nullptr ? ros_path->poses.size() : 0);
+  }
+  update_search_diagnostics(
+    expand_count,
+    elapsed_seconds(),
+    false,
+    reconstructed,
+    ros_path != nullptr ? ros_path->poses.size() : 0);
+  return reconstructed;
 }
 
 }  // namespace global_planner
