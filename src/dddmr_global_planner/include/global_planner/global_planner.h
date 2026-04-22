@@ -157,6 +157,7 @@ class GlobalPlanner : public rclcpp::Node {
       bool enable_detail_log_;
       double a_star_expanding_radius_;
       double direct_path_distance_threshold_;
+      std::string raw_route_backend_;
       bool use_forward_hybrid_astar_;
       bool enable_direct_path_shortcut_;
       bool enable_entry_connector_;
@@ -206,8 +207,13 @@ class GlobalPlanner : public rclcpp::Node {
       void postSmoothPath(std::vector<unsigned int>& path_id, std::vector<unsigned int>& smoothed_path_id);
       void getStaticGraphFromPerception3D();
 
-      bool getStartGoalID(const geometry_msgs::msg::PoseStamped& start, const geometry_msgs::msg::PoseStamped& goal, 
-                          unsigned int& start_id, unsigned int& goal_id);
+      bool getStartGoalID(
+        const geometry_msgs::msg::PoseStamped& start,
+        const geometry_msgs::msg::PoseStamped& goal,
+        unsigned int& start_id,
+        unsigned int& goal_id,
+        ForwardHybridAStar::ProjectionDiagnostics * start_projection = nullptr,
+        ForwardHybridAStar::ProjectionDiagnostics * goal_projection = nullptr);
 
       unsigned int getClosestIndexFromRadiusSearch(
         const std::vector<int>& point_indices,

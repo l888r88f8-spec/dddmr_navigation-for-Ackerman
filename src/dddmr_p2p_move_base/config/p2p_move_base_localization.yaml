@@ -23,7 +23,8 @@ global_planner:
     turning_weight: 0.1                                     # 全局路径转折惩罚，越大越偏向平滑路径
     enable_detail_log: false
     a_star_expanding_radius: 0.5
-    use_forward_hybrid_astar: true
+    raw_route_backend: "graph_a_star"                       # raw_route 默认使用图搜索 A*；跨桥/上下层长距离优先走这条成熟链路
+    use_forward_hybrid_astar: true                          # 保留 ForwardHybridAStar 作为可选 raw_route backend 与 entry connector 后端
     enable_direct_path_shortcut: false
     entry_connector:
       enable: true

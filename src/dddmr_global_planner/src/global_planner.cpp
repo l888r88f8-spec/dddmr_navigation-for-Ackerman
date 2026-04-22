@@ -32,6 +32,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
+#include <cmath>
 #include <limits>
 #include <sstream>
 
@@ -125,9 +127,33 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   this->get_parameter("direct_path_distance_threshold", direct_path_distance_threshold_);
   RCLCPP_INFO(this->get_logger(), "direct_path_distance_threshold: %.2f", direct_path_distance_threshold_);
 
+  declare_parameter("raw_route_backend", rclcpp::ParameterValue(std::string("graph_a_star")));
+  this->get_parameter("raw_route_backend", raw_route_backend_);
+  std::transform(
+    raw_route_backend_.begin(),
+    raw_route_backend_.end(),
+    raw_route_backend_.begin(),
+    [](unsigned char ch) {return static_cast<char>(std::tolower(ch));});
+  if(raw_route_backend_ != "graph_a_star" && raw_route_backend_ != "forward_hybrid_astar"){
+    RCLCPP_WARN(
+      this->get_logger(),
+      "Invalid raw_route_backend '%s', fallback to 'graph_a_star'.",
+      raw_route_backend_.c_str());
+    raw_route_backend_ = "graph_a_star";
+  }
+  RCLCPP_INFO(this->get_logger(), "raw_route_backend: %s", raw_route_backend_.c_str());
+
   declare_parameter("use_forward_hybrid_astar", rclcpp::ParameterValue(true));
   this->get_parameter("use_forward_hybrid_astar", use_forward_hybrid_astar_);
-  RCLCPP_INFO(this->get_logger(), "use_forward_hybrid_astar: %d", use_forward_hybrid_astar_);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "forward_hybrid_astar backend enabled: %d",
+    use_forward_hybrid_astar_);
+  if(raw_route_backend_ == "forward_hybrid_astar" && !use_forward_hybrid_astar_){
+    RCLCPP_WARN(
+      this->get_logger(),
+      "raw_route_backend requests forward_hybrid_astar but the backend is disabled; raw_route will fall back to graph_a_star.");
+  }
 
   declare_parameter("enable_direct_path_shortcut", rclcpp::ParameterValue(false));
   this->get_parameter("enable_direct_path_shortcut", enable_direct_path_shortcut_);
@@ -698,12 +724,59 @@ bool GlobalPlanner::buildStraightLinePlan(
   return true;
 }
 
-bool GlobalPlanner::getStartGoalID(const geometry_msgs::msg::PoseStamped& start, const geometry_msgs::msg::PoseStamped& goal,
-                                    unsigned int& start_id, unsigned int& goal_id){
+bool GlobalPlanner::getStartGoalID(
+  const geometry_msgs::msg::PoseStamped& start,
+  const geometry_msgs::msg::PoseStamped& goal,
+  unsigned int& start_id,
+  unsigned int& goal_id,
+  ForwardHybridAStar::ProjectionDiagnostics * start_projection,
+  ForwardHybridAStar::ProjectionDiagnostics * goal_projection){
 
   const double search_radius = 1.0;
   const double fallback_vertical_radius = 0.5;
   const double fallback_max_nearest_distance = 3.0;
+  const auto init_projection =
+    [](ForwardHybridAStar::ProjectionDiagnostics * projection,
+       const geometry_msgs::msg::PoseStamped & pose) {
+      if(projection == nullptr){
+        return;
+      }
+      *projection = ForwardHybridAStar::ProjectionDiagnostics();
+      projection->query_x = pose.pose.position.x;
+      projection->query_y = pose.pose.position.y;
+      projection->query_z = pose.pose.position.z;
+      projection->fallback = "none";
+    };
+  const auto finalize_projection =
+    [this](
+      ForwardHybridAStar::ProjectionDiagnostics * projection,
+      unsigned int ground_id,
+      const std::vector<float> & squared_distances)
+    {
+      if(projection == nullptr){
+        return;
+      }
+      projection->success = true;
+      projection->ground_index = ground_id;
+      projection->ground_x = pcl_ground_->points[ground_id].x;
+      projection->ground_y = pcl_ground_->points[ground_id].y;
+      projection->ground_z = pcl_ground_->points[ground_id].z;
+      projection->projection_distance = std::sqrt(
+        std::pow(projection->ground_x - projection->query_x, 2.0) +
+        std::pow(projection->ground_y - projection->query_y, 2.0) +
+        std::pow(projection->ground_z - projection->query_z, 2.0));
+      if(!squared_distances.empty()){
+        const std::size_t nearest_idx =
+          static_cast<std::size_t>(std::min_element(
+            squared_distances.begin(),
+            squared_distances.end()) - squared_distances.begin());
+        projection->fallback_nearest_distance =
+          std::sqrt(static_cast<double>(squared_distances[nearest_idx]));
+      }
+    };
+
+  init_projection(start_projection, start);
+  init_projection(goal_projection, goal);
 
   //@Get goal ID
   std::vector<int> pointIdxRadiusSearch_goal;
@@ -712,6 +785,10 @@ bool GlobalPlanner::getStartGoalID(const geometry_msgs::msg::PoseStamped& start,
   pcl_goal.x = goal.pose.position.x;
   pcl_goal.y = goal.pose.position.y;
   pcl_goal.z = goal.pose.position.z;
+  std::string goal_fallback = "none";
+  double goal_fallback_z_before = goal.pose.position.z;
+  double goal_fallback_z_after = goal.pose.position.z;
+  double goal_fallback_nearest_distance = std::numeric_limits<double>::quiet_NaN();
 
   //@Compute nearest pc as goal
   //@TODO: add an edge between goal and nearest pc
@@ -728,6 +805,8 @@ bool GlobalPlanner::getStartGoalID(const geometry_msgs::msg::PoseStamped& start,
       if(kdtree_ground_->radiusSearch(pcl_goal, fallback_vertical_radius, pointIdxRadiusSearch_goal, pointRadiusSquaredDistance_goal,0)>0)
       {
         fallback_search = true;
+        goal_fallback = "vertical_search";
+        goal_fallback_z_after = z;
         break;
       }
     }
@@ -739,6 +818,8 @@ bool GlobalPlanner::getStartGoalID(const geometry_msgs::msg::PoseStamped& start,
         double nearest_distance = sqrt(pointRadiusSquaredDistance_goal[0]);
         if(nearest_distance <= fallback_max_nearest_distance){
           fallback_search = true;
+          goal_fallback = "nearest_fallback";
+          goal_fallback_nearest_distance = nearest_distance;
           RCLCPP_WARN(this->get_logger(), "Falling back to nearest goal point on the ground at %.2f m.", nearest_distance);
         }
         else{
@@ -753,6 +834,14 @@ bool GlobalPlanner::getStartGoalID(const geometry_msgs::msg::PoseStamped& start,
   }
   
   goal_id = getClosestIndexFromRadiusSearch(pointIdxRadiusSearch_goal, pointRadiusSquaredDistance_goal);
+  if(goal_projection != nullptr){
+    goal_projection->fallback = goal_fallback;
+    goal_projection->fallback_z_before = goal_fallback_z_before;
+    goal_projection->fallback_z_after =
+      goal_fallback == "nearest_fallback" ? pcl_ground_->points[goal_id].z : goal_fallback_z_after;
+    goal_projection->fallback_nearest_distance = goal_fallback_nearest_distance;
+  }
+  finalize_projection(goal_projection, goal_id, pointRadiusSquaredDistance_goal);
 
   if(enable_detail_log_){
     RCLCPP_WARN(this->get_logger(), "Selected goal: %.2f, %.2f, %.2f, Nearest-> id: %u, x: %.2f, y: %.2f, z: %.2f", 
@@ -773,6 +862,10 @@ bool GlobalPlanner::getStartGoalID(const geometry_msgs::msg::PoseStamped& start,
   pcl_start.x = start.pose.position.x;
   pcl_start.y = start.pose.position.y;
   pcl_start.z = start.pose.position.z;
+  std::string start_fallback = "none";
+  double start_fallback_z_before = start.pose.position.z;
+  double start_fallback_z_after = start.pose.position.z;
+  double start_fallback_nearest_distance = std::numeric_limits<double>::quiet_NaN();
 
   if(kdtree_ground_->radiusSearch (pcl_start, search_radius, pointIdxRadiusSearch_start, pointRadiusSquaredDistance_start)<1){
     RCLCPP_WARN(this->get_logger(), "Start is not found within %.2f m.", search_radius);
@@ -785,6 +878,8 @@ bool GlobalPlanner::getStartGoalID(const geometry_msgs::msg::PoseStamped& start,
       if(kdtree_ground_->radiusSearch(pcl_start, fallback_vertical_radius, pointIdxRadiusSearch_start, pointRadiusSquaredDistance_start,0)>0)
       {
         fallback_search = true;
+        start_fallback = "vertical_search";
+        start_fallback_z_after = z;
         break;
       }
     }
@@ -796,6 +891,8 @@ bool GlobalPlanner::getStartGoalID(const geometry_msgs::msg::PoseStamped& start,
         double nearest_distance = sqrt(pointRadiusSquaredDistance_start[0]);
         if(nearest_distance <= fallback_max_nearest_distance){
           fallback_search = true;
+          start_fallback = "nearest_fallback";
+          start_fallback_nearest_distance = nearest_distance;
           RCLCPP_WARN(this->get_logger(), "Falling back to nearest start point on the ground at %.2f m.", nearest_distance);
         }
         else{
@@ -810,6 +907,14 @@ bool GlobalPlanner::getStartGoalID(const geometry_msgs::msg::PoseStamped& start,
   }
   
   start_id = getClosestIndexFromRadiusSearch(pointIdxRadiusSearch_start, pointRadiusSquaredDistance_start);
+  if(start_projection != nullptr){
+    start_projection->fallback = start_fallback;
+    start_projection->fallback_z_before = start_fallback_z_before;
+    start_projection->fallback_z_after =
+      start_fallback == "nearest_fallback" ? pcl_ground_->points[start_id].z : start_fallback_z_after;
+    start_projection->fallback_nearest_distance = start_fallback_nearest_distance;
+  }
+  finalize_projection(start_projection, start_id, pointRadiusSquaredDistance_start);
 
   if(enable_detail_log_){
     RCLCPP_WARN(this->get_logger(), "Selected start: %.2f, %.2f, %.2f, Nearest-> id: %u, x: %.2f, y: %.2f, z: %.2f", 
@@ -1233,9 +1338,10 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
     }
     RCLCPP_WARN(
       this->get_logger(),
-      "raw route stage finished, goal_seq=%zu, request_id=%zu, stage=raw_route, success=0, result_class=%s, expansions=%zu, planning_time=%.3f, path_poses=%zu, start_ground_idx=%zu, start_ground_z=%.2f, start_projection_distance=%.3f, start_fallback=%s, goal_ground_idx=%zu, goal_ground_z=%.2f, goal_projection_distance=%.3f, goal_fallback=%s",
+      "raw route stage finished, goal_seq=%zu, request_id=%zu, stage=raw_route, backend=%s, success=0, result_class=%s, expansions=%zu, planning_time=%.3f, path_poses=%zu, start_ground_idx=%zu, start_ground_z=%.2f, start_projection_distance=%.3f, start_fallback=%s, goal_ground_idx=%zu, goal_ground_z=%.2f, goal_projection_distance=%.3f, goal_fallback=%s",
       goal_seq,
       request_id,
+      raw_route_backend_.c_str(),
       raw_route_result_class.c_str(),
       raw_route_search_diagnostics.expansions,
       raw_route_search_diagnostics.planning_time_sec,
@@ -1252,9 +1358,10 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
   else{
     RCLCPP_INFO(
       this->get_logger(),
-      "raw route stage finished, goal_seq=%zu, request_id=%zu, stage=raw_route, success=1, result_class=succeeded, expansions=%zu, planning_time=%.3f, path_poses=%zu, start_ground_idx=%zu, start_ground_z=%.2f, start_projection_distance=%.3f, start_fallback=%s, goal_ground_idx=%zu, goal_ground_z=%.2f, goal_projection_distance=%.3f, goal_fallback=%s",
+      "raw route stage finished, goal_seq=%zu, request_id=%zu, stage=raw_route, backend=%s, success=1, result_class=succeeded, expansions=%zu, planning_time=%.3f, path_poses=%zu, start_ground_idx=%zu, start_ground_z=%.2f, start_projection_distance=%.3f, start_fallback=%s, goal_ground_idx=%zu, goal_ground_z=%.2f, goal_projection_distance=%.3f, goal_fallback=%s",
       goal_seq,
       request_id,
+      raw_route_backend_.c_str(),
       raw_route_search_diagnostics.expansions,
       raw_route_search_diagnostics.planning_time_sec,
       raw_route_search_diagnostics.path_pose_count,
@@ -1813,13 +1920,27 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
     return mark_canceled();
   }
 
+  const bool raw_route_uses_forward_hybrid_astar =
+    raw_route_backend_ == "forward_hybrid_astar";
+  const auto elapsed_seconds =
+    [](const std::chrono::steady_clock::time_point & started_at) {
+      return std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - started_at).count();
+    };
   const bool allow_direct_shortcut =
-    enable_direct_path_shortcut_ && !use_forward_hybrid_astar_;
+    enable_direct_path_shortcut_ && !raw_route_uses_forward_hybrid_astar;
   if(allow_direct_shortcut && buildStraightLinePlan(start, goal, ros_path)){
+    if(search_diagnostics != nullptr){
+      search_diagnostics->success = true;
+      search_diagnostics->canceled = false;
+      search_diagnostics->expansions = 0;
+      search_diagnostics->planning_time_sec = 0.0;
+      search_diagnostics->path_pose_count = ros_path.poses.size();
+    }
     return ros_path;
   }
 
-  if(use_forward_hybrid_astar_ && forward_hybrid_astar_planner_){
+  if(raw_route_uses_forward_hybrid_astar && use_forward_hybrid_astar_ && forward_hybrid_astar_planner_){
     nav_msgs::msg::Path hybrid_path;
     bool hybrid_planning_canceled = false;
     if(forward_hybrid_astar_planner_->MakePlan(
@@ -1847,19 +1968,52 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
     }
     RCLCPP_WARN_THROTTLE(
       this->get_logger(), *clock_, 2000,
-      "Forward Hybrid A* failed, fallback to legacy A*.");
+      "ForwardHybridAStar raw_route failed, fallback to graph_a_star.");
+  }
+  else if(raw_route_uses_forward_hybrid_astar){
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger(), *clock_, 2000,
+      "raw_route_backend=forward_hybrid_astar requested but backend is unavailable, fallback to graph_a_star.");
   }
 
   if(cancel_requested && cancel_requested()){
     return mark_canceled();
   }
 
-  has_start_goal_id = getStartGoalID(start, goal, start_id, goal_id);
+  const auto graph_planning_started_at = std::chrono::steady_clock::now();
+  has_start_goal_id =
+    getStartGoalID(start, goal, start_id, goal_id, start_projection, goal_projection);
+  if(has_start_goal_id && progress_callback){
+    ForwardHybridAStar::SearchDiagnostics progress;
+    progress.success = false;
+    progress.canceled = false;
+    progress.expansions = 0;
+    progress.planning_time_sec = 0.0;
+    progress.path_pose_count = 0;
+    progress_callback(progress);
+  }
+  if(cancel_requested && cancel_requested()){
+    if(search_diagnostics != nullptr){
+      search_diagnostics->success = false;
+      search_diagnostics->canceled = true;
+      search_diagnostics->expansions = 0;
+      search_diagnostics->planning_time_sec = elapsed_seconds(graph_planning_started_at);
+      search_diagnostics->path_pose_count = 0;
+    }
+    return mark_canceled();
+  }
   if(has_start_goal_id){
     if(!use_pre_graph_)
       a_star_planner_->getPath(start_id, goal_id, path);
     else
       a_star_planner_pre_graph_->getPath(start_id, goal_id, path);  
+  }
+  if(search_diagnostics != nullptr){
+    search_diagnostics->success = !path.empty();
+    search_diagnostics->canceled = false;
+    search_diagnostics->expansions = 0;
+    search_diagnostics->planning_time_sec = elapsed_seconds(graph_planning_started_at);
+    search_diagnostics->path_pose_count = 0;
   }
 
   if(path.empty()){
@@ -1879,6 +2033,9 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
     else
       RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 5000, "Path found from: %u to %u", start_id, goal_id);
     getROSPath(path, ros_path);
+    if(search_diagnostics != nullptr){
+      search_diagnostics->path_pose_count = ros_path.poses.size();
+    }
 
     // Legacy graph A* can return a first segment that starts from projected
     // ground nodes slightly behind the current robot pose. Trim this near-start
@@ -1941,6 +2098,10 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
     }
 
     ros_path.poses.push_back(goal);
+    if(search_diagnostics != nullptr){
+      search_diagnostics->planning_time_sec = elapsed_seconds(graph_planning_started_at);
+      search_diagnostics->path_pose_count = ros_path.poses.size();
+    }
     return ros_path;
   }
 }
