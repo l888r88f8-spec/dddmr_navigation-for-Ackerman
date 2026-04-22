@@ -1155,6 +1155,11 @@ std::vector<GlobalPlanner::EntryAnchorCandidate> GlobalPlanner::selectEntryAncho
       has_start_yaw ? (x_local / planar_distance) : 0.0;
     candidate.in_vehicle_forward_half_plane =
       !has_start_yaw || candidate.vehicle_forward_projection >= -0.10;
+    if(!candidate.in_vehicle_forward_half_plane){
+      // Entry connector must remain a forward startup connection. Do not
+      // select anchors behind the vehicle just to satisfy a nicer end yaw.
+      continue;
+    }
 
     candidate.route_forward_projection =
       has_route_direction ? ((route_dir_x * dx + route_dir_y * dy) / planar_distance) : 0.0;
@@ -1282,16 +1287,6 @@ std::vector<GlobalPlanner::EntryAnchorCandidate> GlobalPlanner::selectEntryAncho
   append_unique(secondary_candidates);
   if(candidate_indices.empty()){
     append_unique(fallback_candidates);
-  }
-
-  if(candidate_indices.empty()){
-    EntryAnchorCandidate final_fallback;
-    final_fallback.index = raw_route.poses.size() - 1;
-    final_fallback.arc_distance = arc_lengths.back();
-    final_fallback.in_preferred_window = false;
-    final_fallback.ranking_bucket = "fallback";
-    final_fallback.ranking_reason = "route_tail_last_resort";
-    candidate_indices.push_back(final_fallback);
   }
 
   return candidate_indices;
@@ -1590,7 +1585,7 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
     const auto composing_started_at = std::chrono::steady_clock::now();
     publish_stage("composing_frozen_route", composing_started_at, 0, "in_progress");
     if(request_result_class != nullptr){
-      *request_result_class = "succeeded";
+      *request_result_class = "succeeded_without_entry_connector";
     }
     return true;
   }
@@ -1611,7 +1606,7 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
       entry_connector_backend_.c_str(),
       raw_route->poses.size());
     if(request_result_class != nullptr){
-      *request_result_class = "succeeded";
+      *request_result_class = "succeeded_without_entry_connector";
     }
     return true;
   }
@@ -1632,7 +1627,7 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
       request_id,
       raw_route->poses.size());
     if(request_result_class != nullptr){
-      *request_result_class = "succeeded";
+      *request_result_class = "succeeded_without_entry_connector";
     }
     return true;
   }
@@ -1905,7 +1900,7 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
         !candidate_in_window || !success_on_primary_candidate || candidate_order > 0;
     }
     if(request_result_class != nullptr){
-      *request_result_class = "succeeded";
+      *request_result_class = "succeeded_with_entry_connector";
     }
     return true;
   }
@@ -1922,7 +1917,7 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
     request_id,
     raw_route->poses.size());
   if(request_result_class != nullptr){
-    *request_result_class = "succeeded";
+    *request_result_class = "succeeded_without_entry_connector";
   }
   return true;
 }
@@ -2107,7 +2102,7 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
       "finished",
       0.0,
       0,
-      "succeeded");
+      request_result_class);
     result->path = frozen_route;
     goal_handle->succeed(result);
   }

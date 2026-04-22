@@ -83,6 +83,8 @@ Local_Planner::Local_Planner(const std::string& name): Node(name)
   rpp_wheelbase_ = 0.55;
   rpp_max_steer_ = 0.69;
   rpp_max_angular_velocity_ = 1.2;
+  route_start_front_reach_distance_ = 1.2;
+  route_start_front_projection_threshold_ = 0.05;
 }
 
 void Local_Planner::initial(
@@ -169,6 +171,28 @@ void Local_Planner::initial(
       "heading_align_angle (legacy route start alignment alias): %.2f",
       heading_align_angle_);
   }
+
+  declare_parameter(
+    "route_start_alignment.front_reach_distance",
+    rclcpp::ParameterValue(1.2));
+  this->get_parameter(
+    "route_start_alignment.front_reach_distance",
+    route_start_front_reach_distance_);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "route_start_alignment.front_reach_distance: %.2f",
+    route_start_front_reach_distance_);
+
+  declare_parameter(
+    "route_start_alignment.min_front_projection",
+    rclcpp::ParameterValue(0.05));
+  this->get_parameter(
+    "route_start_alignment.min_front_projection",
+    route_start_front_projection_threshold_);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "route_start_alignment.min_front_projection: %.2f",
+    route_start_front_projection_threshold_);
 
   declare_parameter("causal_prune_search_window", rclcpp::ParameterValue(40));
   this->get_parameter("causal_prune_search_window", causal_prune_search_window_);
@@ -1313,8 +1337,11 @@ double Local_Planner::getShortestAngleFromPose2RobotHeading(tf2::Transform m_pos
 }
 
 bool Local_Planner::isInitialHeadingAligned(){
-
   prunePlan(heading_tracking_distance_, 0.0);
+  return isInitialHeadingAlignedOnCurrentPrunePlan();
+}
+
+bool Local_Planner::isInitialHeadingAlignedOnCurrentPrunePlan(){
   tf2::Transform heading_reference_pose;
   bool have_heading_reference = false;
 
@@ -1401,6 +1428,114 @@ bool Local_Planner::isInitialHeadingAligned(){
   return std::fabs(yaw) < heading_align_angle_;
 }
 
+bool Local_Planner::isRouteStartFrontReachableOnCurrentPrunePlan(std::string * detail) const
+{
+  if(detail != nullptr){
+    detail->clear();
+  }
+
+  if(prune_plan_.poses.size() < 2){
+    if(detail != nullptr){
+      *detail = "route_start_front_check_failed: local_reference_path_too_short";
+    }
+    return false;
+  }
+
+  const double lookahead_distance = std::max(0.10, route_start_front_reach_distance_);
+  geometry_msgs::msg::PoseStamped lookahead_pose;
+  if(!selectLookaheadPose(lookahead_distance, &lookahead_pose)){
+    if(detail != nullptr){
+      *detail = "route_start_front_check_failed: lookahead_pose_unavailable";
+    }
+    return false;
+  }
+
+  const double robot_x = trans_gbl2b_.transform.translation.x;
+  const double robot_y = trans_gbl2b_.transform.translation.y;
+  const double robot_yaw = getRobotYaw();
+
+  const auto project_to_robot_x =
+    [robot_x, robot_y, robot_yaw](const geometry_msgs::msg::PoseStamped & pose) {
+      const double dx = pose.pose.position.x - robot_x;
+      const double dy = pose.pose.position.y - robot_y;
+      return std::cos(robot_yaw) * dx + std::sin(robot_yaw) * dy;
+    };
+
+  const double lookahead_x_local = project_to_robot_x(lookahead_pose);
+  if(!std::isfinite(lookahead_x_local) ||
+     lookahead_x_local < route_start_front_projection_threshold_)
+  {
+    if(detail != nullptr){
+      *detail = "route_start_front_check_failed: lookahead_not_in_front";
+    }
+    return false;
+  }
+
+  const double reach_window_sq = lookahead_distance * lookahead_distance;
+  bool has_front_reachable_pose = false;
+  for(const auto & pose : prune_plan_.poses){
+    const double dx = pose.pose.position.x - robot_x;
+    const double dy = pose.pose.position.y - robot_y;
+    const double distance_sq = dx * dx + dy * dy;
+    if(distance_sq > reach_window_sq){
+      continue;
+    }
+    if(project_to_robot_x(pose) >= route_start_front_projection_threshold_){
+      has_front_reachable_pose = true;
+      break;
+    }
+  }
+
+  if(!has_front_reachable_pose){
+    if(detail != nullptr){
+      *detail = "route_start_front_check_failed: no_front_reachable_pose_in_start_window";
+    }
+    return false;
+  }
+
+  return true;
+}
+
+dddmr_sys_core::RouteStartupStatus Local_Planner::evaluateRouteStartupStatus(std::string * detail)
+{
+  if(detail != nullptr){
+    detail->clear();
+  }
+
+  if(global_plan_.size() < 2){
+    if(detail != nullptr){
+      *detail = "route_start_alignment_failed: global_route_unavailable";
+    }
+    return dddmr_sys_core::RouteStartupStatus::kRouteUnavailable;
+  }
+
+  const double startup_check_distance =
+    std::max(heading_tracking_distance_, route_start_front_reach_distance_);
+  if(!prunePlan(startup_check_distance, 0.0)){
+    if(detail != nullptr){
+      *detail = "route_start_alignment_failed: local_reference_unavailable";
+    }
+    return dddmr_sys_core::RouteStartupStatus::kRouteUnavailable;
+  }
+
+  std::string front_detail;
+  if(!isRouteStartFrontReachableOnCurrentPrunePlan(&front_detail)){
+    if(detail != nullptr){
+      *detail = front_detail;
+    }
+    return dddmr_sys_core::RouteStartupStatus::kFrontUnreachable;
+  }
+
+  if(!isInitialHeadingAlignedOnCurrentPrunePlan()){
+    if(detail != nullptr){
+      *detail = "route_start_alignment_failed: heading_tolerance_unsatisfied";
+    }
+    return dddmr_sys_core::RouteStartupStatus::kAlignmentUnsatisfied;
+  }
+
+  return dddmr_sys_core::RouteStartupStatus::kAligned;
+}
+
 bool Local_Planner::isGoalHeadingAligned(){
 
   if(global_plan_.empty()){
@@ -1457,7 +1592,7 @@ bool Local_Planner::isGoalPositionReached()
 
 bool Local_Planner::isRouteStartAligned()
 {
-  return isInitialHeadingAligned();
+  return evaluateRouteStartupStatus(nullptr) == dddmr_sys_core::RouteStartupStatus::kAligned;
 }
 
 bool Local_Planner::isGoalHeadingSatisfied()

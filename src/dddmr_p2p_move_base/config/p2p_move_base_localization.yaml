@@ -16,7 +16,7 @@ p2p_move_base:
 global_plan_manager:
   ros__parameters:
     route_action_name: "get_plan"
-    route_request_frequency: 0.1                             # Route layer should be event-driven / low-frequency, not polled like a local reconnect service
+    route_request_frequency: -1.0                             # Route layer should be event-driven / low-frequency, not polled like a local reconnect service
 
 global_planner:
   ros__parameters:
@@ -139,10 +139,10 @@ local_planner:
       forward_distance: 8.0                                  # 局部参考路径的前向窗口长度，越大越偏向远处目标
       backward_distance: 1.0                                 # 局部参考路径保留车后方窗口长度，用于回看/裁剪稳定性
     heading_tracking_distance: 0.5                           # 用于估计当前路径朝向的前视距离
-    # Ackermann platforms cannot rotate in place, so we skip the
-    # initial heading-alignment phase and let the path follower turn while moving.
     route_start_alignment:
-      heading_tolerance: 3.2                                 # 起步对齐阈值；阿克曼车这里设大表示主流程直接进入 route tracking
+      heading_tolerance: 0.8                                 # 起步接入阶段要求朝向与 frozen route 首段基本一致
+      front_reach_distance: 1.2                              # 起步阶段检查前方可达性的窗口长度（米）
+      min_front_projection: 0.05                             # 前向可达最小投影阈值（base_link x 轴）
     causal_prune_search_window: 40                           # causal prune 仅在当前进度附近搜索，避免跳到欧氏近但顺序错误的后续段
     causal_prune_max_index_jump: 15                          # 单周期允许推进的最大索引步长
     causal_prune_max_arc_jump: 2.0                           # 单周期允许推进的最大路径弧长，单位 m

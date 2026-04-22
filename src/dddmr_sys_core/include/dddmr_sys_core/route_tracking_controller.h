@@ -13,6 +13,14 @@
 
 namespace dddmr_sys_core {
 
+enum class RouteStartupStatus
+{
+  kAligned = 0,
+  kAlignmentUnsatisfied,
+  kFrontUnreachable,
+  kRouteUnavailable
+};
+
 /**
  * Stable controller-side abstraction consumed by the goal orchestrator.
  *
@@ -39,6 +47,15 @@ public:
   virtual bool isRouteStartAligned() = 0;
   virtual bool isGoalHeadingSatisfied() = 0;
   virtual geometry_msgs::msg::TransformStamped getGlobalPose() = 0;
+  virtual RouteStartupStatus evaluateRouteStartupStatus(std::string * detail)
+  {
+    if(detail != nullptr){
+      detail->clear();
+    }
+    return isRouteStartAligned() ?
+      RouteStartupStatus::kAligned :
+      RouteStartupStatus::kAlignmentUnsatisfied;
+  }
 };
 
 }  // namespace dddmr_sys_core
