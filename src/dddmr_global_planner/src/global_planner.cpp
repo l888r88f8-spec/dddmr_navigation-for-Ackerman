@@ -159,6 +159,48 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   this->get_parameter("enable_direct_path_shortcut", enable_direct_path_shortcut_);
   RCLCPP_DEBUG(this->get_logger(), "enable_direct_path_shortcut: %d", enable_direct_path_shortcut_);
 
+  // Keep graph A* as topology backbone (bridge/ramp traversability) and only
+  // smooth the sampled raw route with bounded lateral displacement.
+  declare_parameter("graph_path_smoothing.enable", rclcpp::ParameterValue(true));
+  this->get_parameter("graph_path_smoothing.enable", graph_path_smoothing_enable_);
+  declare_parameter("graph_path_smoothing.iterations", rclcpp::ParameterValue(6));
+  this->get_parameter("graph_path_smoothing.iterations", graph_path_smoothing_iterations_);
+  graph_path_smoothing_iterations_ = std::max(graph_path_smoothing_iterations_, 0);
+  declare_parameter("graph_path_smoothing.weight", rclcpp::ParameterValue(0.35));
+  this->get_parameter("graph_path_smoothing.weight", graph_path_smoothing_weight_);
+  graph_path_smoothing_weight_ = std::clamp(graph_path_smoothing_weight_, 0.0, 1.0);
+  declare_parameter("graph_path_smoothing.max_shift", rclcpp::ParameterValue(0.30));
+  this->get_parameter("graph_path_smoothing.max_shift", graph_path_smoothing_max_shift_);
+  graph_path_smoothing_max_shift_ = std::max(graph_path_smoothing_max_shift_, 0.0);
+  declare_parameter("graph_path_smoothing.lock_start_distance", rclcpp::ParameterValue(1.2));
+  this->get_parameter(
+    "graph_path_smoothing.lock_start_distance",
+    graph_path_smoothing_lock_start_distance_);
+  graph_path_smoothing_lock_start_distance_ =
+    std::max(graph_path_smoothing_lock_start_distance_, 0.0);
+  declare_parameter("graph_path_smoothing.lock_goal_distance", rclcpp::ParameterValue(1.2));
+  this->get_parameter(
+    "graph_path_smoothing.lock_goal_distance",
+    graph_path_smoothing_lock_goal_distance_);
+  graph_path_smoothing_lock_goal_distance_ =
+    std::max(graph_path_smoothing_lock_goal_distance_, 0.0);
+  declare_parameter("graph_path_smoothing.ground_search_radius", rclcpp::ParameterValue(0.8));
+  this->get_parameter(
+    "graph_path_smoothing.ground_search_radius",
+    graph_path_smoothing_ground_search_radius_);
+  graph_path_smoothing_ground_search_radius_ =
+    std::max(graph_path_smoothing_ground_search_radius_, 0.1);
+  RCLCPP_DEBUG(
+    this->get_logger(),
+    "graph_path_smoothing: enable=%d, iterations=%d, weight=%.2f, max_shift=%.2f, lock_start=%.2f, lock_goal=%.2f, ground_search_radius=%.2f",
+    graph_path_smoothing_enable_ ? 1 : 0,
+    graph_path_smoothing_iterations_,
+    graph_path_smoothing_weight_,
+    graph_path_smoothing_max_shift_,
+    graph_path_smoothing_lock_start_distance_,
+    graph_path_smoothing_lock_goal_distance_,
+    graph_path_smoothing_ground_search_radius_);
+
   declare_parameter("entry_connector.enable", rclcpp::ParameterValue(true));
   this->get_parameter("entry_connector.enable", enable_entry_connector_);
   RCLCPP_DEBUG(this->get_logger(), "entry_connector.enable: %d", enable_entry_connector_);
@@ -607,6 +649,199 @@ void GlobalPlanner::getROSPath(std::vector<unsigned int>& path_id, nav_msgs::msg
     }
     
   }
+}
+
+void GlobalPlanner::refreshPathOrientations(nav_msgs::msg::Path * path) const
+{
+  if(path == nullptr || path->poses.empty()){
+    return;
+  }
+
+  if(path->poses.size() == 1){
+    return;
+  }
+
+  for(std::size_t i = 0; i < path->poses.size(); ++i){
+    const std::size_t prev_idx = (i > 0) ? i - 1 : i;
+    const std::size_t next_idx = (i + 1 < path->poses.size()) ? i + 1 : i;
+    if(prev_idx == next_idx){
+      continue;
+    }
+
+    const double vx =
+      path->poses[next_idx].pose.position.x - path->poses[prev_idx].pose.position.x;
+    const double vy =
+      path->poses[next_idx].pose.position.y - path->poses[prev_idx].pose.position.y;
+    const double vz =
+      path->poses[next_idx].pose.position.z - path->poses[prev_idx].pose.position.z;
+    const double tangent_norm = std::sqrt(vx * vx + vy * vy + vz * vz);
+    if(tangent_norm < 1e-6){
+      continue;
+    }
+
+    tf2::Quaternion q;
+    if(std::fabs(vz) > 1e-6){
+      tf2::Vector3 axis_vector(vx / tangent_norm, vy / tangent_norm, vz / tangent_norm);
+      tf2::Vector3 up_vector(1.0, 0.0, 0.0);
+      tf2::Vector3 right_vector = axis_vector.cross(up_vector);
+      const double right_norm = right_vector.length();
+      if(right_norm > 1e-6){
+        right_vector /= right_norm;
+        const double axis_dot =
+          std::clamp(static_cast<double>(axis_vector.dot(up_vector)), -1.0, 1.0);
+        q = tf2::Quaternion(right_vector, -1.0 * std::acos(axis_dot));
+      }
+      else{
+        q.setRPY(0.0, 0.0, std::atan2(vy, vx));
+      }
+    }
+    else{
+      q.setRPY(0.0, 0.0, std::atan2(vy, vx));
+    }
+    q.normalize();
+    path->poses[i].pose.orientation.x = q.getX();
+    path->poses[i].pose.orientation.y = q.getY();
+    path->poses[i].pose.orientation.z = q.getZ();
+    path->poses[i].pose.orientation.w = q.getW();
+  }
+}
+
+void GlobalPlanner::smoothGraphPathForAckermann(nav_msgs::msg::Path * path) const
+{
+  if(path == nullptr || path->poses.size() < 5){
+    return;
+  }
+  if(!graph_path_smoothing_enable_ ||
+     graph_path_smoothing_iterations_ <= 0 ||
+     graph_path_smoothing_weight_ <= 0.0 ||
+     graph_path_smoothing_max_shift_ <= 0.0)
+  {
+    return;
+  }
+
+  std::vector<double> arc_lengths(path->poses.size(), 0.0);
+  for(std::size_t i = 1; i < path->poses.size(); ++i){
+    const double dx =
+      path->poses[i].pose.position.x - path->poses[i - 1].pose.position.x;
+    const double dy =
+      path->poses[i].pose.position.y - path->poses[i - 1].pose.position.y;
+    const double dz =
+      path->poses[i].pose.position.z - path->poses[i - 1].pose.position.z;
+    arc_lengths[i] = arc_lengths[i - 1] + std::sqrt(dx * dx + dy * dy + dz * dz);
+  }
+  const double total_length = arc_lengths.back();
+  if(!std::isfinite(total_length) || total_length < 0.5){
+    return;
+  }
+
+  std::vector<double> reference_x(path->poses.size(), 0.0);
+  std::vector<double> reference_y(path->poses.size(), 0.0);
+  for(std::size_t i = 0; i < path->poses.size(); ++i){
+    reference_x[i] = path->poses[i].pose.position.x;
+    reference_y[i] = path->poses[i].pose.position.y;
+  }
+
+  double inscribed_radius = 0.3;
+  if(perception_3d_ros_ && perception_3d_ros_->getGlobalUtils()){
+    inscribed_radius = std::max(
+      0.05,
+      static_cast<double>(perception_3d_ros_->getGlobalUtils()->getInscribedRadius()));
+  }
+
+  std::size_t total_adjusted_points = 0;
+  for(int iteration = 0; iteration < graph_path_smoothing_iterations_; ++iteration){
+    const auto previous = path->poses;
+    bool iteration_changed = false;
+
+    for(std::size_t i = 1; i + 1 < path->poses.size(); ++i){
+      if(arc_lengths[i] <= graph_path_smoothing_lock_start_distance_){
+        continue;
+      }
+      if((total_length - arc_lengths[i]) <= graph_path_smoothing_lock_goal_distance_){
+        continue;
+      }
+
+      const double prev_x = previous[i - 1].pose.position.x;
+      const double prev_y = previous[i - 1].pose.position.y;
+      const double next_x = previous[i + 1].pose.position.x;
+      const double next_y = previous[i + 1].pose.position.y;
+      const double curr_x = previous[i].pose.position.x;
+      const double curr_y = previous[i].pose.position.y;
+
+      double target_x =
+        curr_x + graph_path_smoothing_weight_ * (0.5 * (prev_x + next_x) - curr_x);
+      double target_y =
+        curr_y + graph_path_smoothing_weight_ * (0.5 * (prev_y + next_y) - curr_y);
+
+      const double reference_dx = target_x - reference_x[i];
+      const double reference_dy = target_y - reference_y[i];
+      const double reference_shift = std::hypot(reference_dx, reference_dy);
+      if(reference_shift > graph_path_smoothing_max_shift_ && reference_shift > 1e-6){
+        const double scale = graph_path_smoothing_max_shift_ / reference_shift;
+        target_x = reference_x[i] + reference_dx * scale;
+        target_y = reference_y[i] + reference_dy * scale;
+      }
+
+      const double candidate_step = std::hypot(target_x - curr_x, target_y - curr_y);
+      if(candidate_step < 1e-5){
+        continue;
+      }
+
+      pcl::PointXYZI candidate;
+      candidate.x = target_x;
+      candidate.y = target_y;
+      candidate.z = previous[i].pose.position.z;
+
+      if(kdtree_ground_){
+        std::vector<int> ground_indices;
+        std::vector<float> ground_squared_distances;
+        if(kdtree_ground_->radiusSearch(
+             candidate,
+             graph_path_smoothing_ground_search_radius_,
+             ground_indices,
+             ground_squared_distances) < 1)
+        {
+          continue;
+        }
+      }
+
+      if(kdtree_map_){
+        std::vector<int> map_indices;
+        std::vector<float> map_squared_distances;
+        if(kdtree_map_->radiusSearch(
+             candidate,
+             inscribed_radius,
+             map_indices,
+             map_squared_distances) > 1)
+        {
+          continue;
+        }
+      }
+
+      path->poses[i].pose.position.x = target_x;
+      path->poses[i].pose.position.y = target_y;
+      iteration_changed = true;
+      ++total_adjusted_points;
+    }
+
+    if(!iteration_changed){
+      break;
+    }
+  }
+
+  path->poses.front().pose.position.x = reference_x.front();
+  path->poses.front().pose.position.y = reference_y.front();
+  path->poses.back().pose.position.x = reference_x.back();
+  path->poses.back().pose.position.y = reference_y.back();
+
+  refreshPathOrientations(path);
+
+  RCLCPP_DEBUG(
+    this->get_logger(),
+    "graph_path_smoothing applied, poses=%zu, adjusted_points=%zu, iterations=%d",
+    path->poses.size(),
+    total_adjusted_points,
+    graph_path_smoothing_iterations_);
 }
 
 unsigned int GlobalPlanner::getClosestIndexFromRadiusSearch(
@@ -2365,6 +2600,7 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
     }
 
     ros_path.poses.push_back(goal);
+    smoothGraphPathForAckermann(&ros_path);
     if(search_diagnostics != nullptr){
       search_diagnostics->planning_time_sec = elapsed_seconds(graph_planning_started_at);
       search_diagnostics->path_pose_count = ros_path.poses.size();

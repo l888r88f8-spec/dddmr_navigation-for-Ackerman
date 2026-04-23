@@ -165,6 +165,13 @@ class GlobalPlanner : public rclcpp::Node {
       double entry_connector_min_anchor_distance_;
       double entry_connector_max_anchor_distance_;
       bool entry_connector_force_goal_heading_;
+      bool graph_path_smoothing_enable_;
+      int graph_path_smoothing_iterations_;
+      double graph_path_smoothing_weight_;
+      double graph_path_smoothing_max_shift_;
+      double graph_path_smoothing_lock_start_distance_;
+      double graph_path_smoothing_lock_goal_distance_;
+      double graph_path_smoothing_ground_search_radius_;
       size_t static_ground_size_;
       bool use_pre_graph_;
       ForwardHybridAStar::Config forward_hybrid_astar_config_;
@@ -306,6 +313,8 @@ class GlobalPlanner : public rclcpp::Node {
 
       void pubStaticGraph();
       void getROSPath(std::vector<unsigned int>& path_id, nav_msgs::msg::Path& ros_path);
+      void smoothGraphPathForAckermann(nav_msgs::msg::Path * path) const;
+      void refreshPathOrientations(nav_msgs::msg::Path * path) const;
       void pubWeight();
       
       std::mutex protect_kdtree_ground_;

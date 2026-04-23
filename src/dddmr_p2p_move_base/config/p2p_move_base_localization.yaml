@@ -26,6 +26,14 @@ global_planner:
     raw_route_backend: "graph_a_star"                       # raw_route 默认使用图搜索 A*；跨桥/上下层长距离优先走这条成熟链路
     use_forward_hybrid_astar: false                          # 仅控制 raw_route 是否可显式切到 ForwardHybridAStar
     enable_direct_path_shortcut: false
+    graph_path_smoothing:
+      enable: true                                           # graph A* 输出后做受限平滑，提升 Ackermann 可跟踪性
+      iterations: 8                                          # 迭代次数，越大越平滑
+      weight: 0.35                                           # 单次平滑强度，建议保持 0.2~0.5
+      max_shift: 0.25                                        # 每个点相对原始图路径最大横向偏移，避免跨越桥边/坡边
+      lock_start_distance: 1.2                               # 起点附近锁定，不改首段起步几何
+      lock_goal_distance: 1.2                                # 终点附近锁定，不改末段接近几何
+      ground_search_radius: 0.8                              # 候选点需在地面点附近，抑制“漂离可行域”
     entry_connector:
       enable: true
       backend: "forward_hybrid_astar"                       # raw_route 走 graph_a_star 时，起步接入仍默认使用 ForwardHybridAStar
