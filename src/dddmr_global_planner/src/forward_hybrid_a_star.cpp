@@ -1024,7 +1024,7 @@ bool ForwardHybridAStar::MakePlan(
   }
 
   if (!debug_label.empty() && start_projection != nullptr && goal_projection != nullptr) {
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       logger_,
       "%s planning start: start_world=(%.2f, %.2f, %.2f) -> ground=(%.2f, %.2f, %.2f) idx=%zu dist=%.3f fallback=%s | goal_world=(%.2f, %.2f, %.2f) -> ground=(%.2f, %.2f, %.2f) idx=%zu dist=%.3f fallback=%s",
       debug_label.c_str(),
@@ -1046,7 +1046,7 @@ bool ForwardHybridAStar::MakePlan(
       goal_projection->ground_index,
       goal_projection->projection_distance,
       goal_projection->fallback.c_str());
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       logger_,
       "%s start projection detail: fallback=%s, z_before=%.2f, z_after=%.2f, nearest_ground_distance=%.3f",
       debug_label.c_str(),
@@ -1054,7 +1054,7 @@ bool ForwardHybridAStar::MakePlan(
       start_projection->fallback_z_before,
       start_projection->fallback_z_after,
       start_projection->fallback_nearest_distance);
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       logger_,
       "%s goal projection detail: fallback=%s, z_before=%.2f, z_after=%.2f, nearest_ground_distance=%.3f",
       debug_label.c_str(),
@@ -1254,7 +1254,7 @@ bool ForwardHybridAStar::MakePlan(
 
   if (goal_state_id == kInvalidStateId) {
     if (!debug_label.empty()) {
-      RCLCPP_WARN(
+      RCLCPP_DEBUG(
         logger_,
         "%s planning finished, success=0, expansions=%zu, planning_time=%.3f, path_poses=%zu",
         debug_label.c_str(),
@@ -1274,7 +1274,7 @@ bool ForwardHybridAStar::MakePlan(
     use_goal_heading,
     ros_path);
   if (!debug_label.empty()) {
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       logger_,
       "%s planning finished, success=%d, expansions=%zu, planning_time=%.3f, path_poses=%zu",
       debug_label.c_str(),

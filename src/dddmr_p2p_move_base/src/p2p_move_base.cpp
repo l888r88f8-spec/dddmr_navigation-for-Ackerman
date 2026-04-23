@@ -55,7 +55,7 @@ rclcpp_action::GoalResponse P2PMoveBase::handle_goal(
 rclcpp_action::CancelResponse P2PMoveBase::handle_cancel(
   const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> goal_handle)
 {
-  RCLCPP_INFO(this->get_logger(), "Received request to cancel goal");
+  RCLCPP_DEBUG(this->get_logger(), "Received request to cancel goal");
   (void)goal_handle;
   return rclcpp_action::CancelResponse::ACCEPT;
 }
@@ -63,7 +63,7 @@ rclcpp_action::CancelResponse P2PMoveBase::handle_cancel(
 void P2PMoveBase::handle_accepted(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> goal_handle)
 {
   if (is_active(current_handle_)){
-    RCLCPP_INFO(this->get_logger(), "An older goal is active, cancelling current one.");
+    RCLCPP_DEBUG(this->get_logger(), "An older goal is active, cancelling current one.");
     auto result = std::make_shared<dddmr_sys_core::action::PToPMoveBase::Result>();
     current_handle_->abort(result);
     return;
@@ -115,13 +115,13 @@ void P2PMoveBase::initial(
   this->get_parameter("drive_trajectory_generator_name", legacy_tracking_controller_name);
   if(tracking_controller_name_.empty()){
     tracking_controller_name_ = legacy_tracking_controller_name;
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "drive_trajectory_generator_name (legacy tracking controller alias): %s",
       tracking_controller_name_.c_str());
   }
   else{
-    RCLCPP_INFO(this->get_logger(), "tracking_controller_name: %s", tracking_controller_name_.c_str());
+    RCLCPP_DEBUG(this->get_logger(), "tracking_controller_name: %s", tracking_controller_name_.c_str());
   }
 
   this->declare_parameter("alignment_controller_name", rclcpp::ParameterValue(""));
@@ -131,13 +131,13 @@ void P2PMoveBase::initial(
   this->get_parameter("rotate_trajectory_generator_name", legacy_alignment_controller_name);
   if(alignment_controller_name_.empty()){
     alignment_controller_name_ = legacy_alignment_controller_name;
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "rotate_trajectory_generator_name (legacy alignment controller alias): %s",
       alignment_controller_name_.c_str());
   }
   else{
-    RCLCPP_INFO(this->get_logger(), "alignment_controller_name: %s", alignment_controller_name_.c_str());
+    RCLCPP_DEBUG(this->get_logger(), "alignment_controller_name: %s", alignment_controller_name_.c_str());
   }
 
   this->declare_parameter("recovery_action_name", rclcpp::ParameterValue(""));
@@ -152,13 +152,13 @@ void P2PMoveBase::initial(
     RCLCPP_WARN(this->get_logger(), "recovery_action_name is empty, explicit recovery action is disabled.");
   }
   else if(recovery_action_name_ == legacy_recovery_action_name){
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "recovery_behavior_name (legacy recovery action alias): %s",
       recovery_action_name_.c_str());
   }
   else{
-    RCLCPP_INFO(this->get_logger(), "recovery_action_name: %s", recovery_action_name_.c_str());
+    RCLCPP_DEBUG(this->get_logger(), "recovery_action_name: %s", recovery_action_name_.c_str());
   }
 
   //@Create action server
@@ -171,7 +171,7 @@ void P2PMoveBase::initial(
     rcl_action_server_get_default_options(),
     action_server_group_);
 
-  RCLCPP_INFO(this->get_logger(), "\033[1;32m---->\033[0m P2P move base launched.");
+  RCLCPP_DEBUG(this->get_logger(), "\033[1;32m---->\033[0m P2P move base launched.");
 
 }
 
@@ -282,7 +282,7 @@ bool P2PMoveBase::syncRouteReferenceFromManager(const std::string & consumer_lab
   current_route_has_entry_connector_ = has_entry_connector;
   current_route_result_class_ = route_result_class;
   route_controller_->setRoute(route, route_version, goal_seq, source_label);
-  RCLCPP_INFO_THROTTLE(
+  RCLCPP_DEBUG_THROTTLE(
     this->get_logger(), *clock_, 2000,
     "route reference synced (%s), route_version=%zu, goal_seq=%zu, source=%s, result_class=%s, has_entry_connector=%d, poses=%zu",
     consumer_label.c_str(),
@@ -324,11 +324,11 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
     if(!goal_handle->is_active()){
       
       if(FSM_->isPhase(FSM::NavigationPhase::kRecoveryAction)){
-        RCLCPP_INFO(this->get_logger(), "navigation is in recovery action state, cancel recovery behaviors.");
+        RCLCPP_DEBUG(this->get_logger(), "navigation is in recovery action state, cancel recovery behaviors.");
         recovery_behaviors_client_ptr_->async_cancel_all_goals();
       }
 
-      RCLCPP_INFO(this->get_logger(), "P2P move base preempted.");
+      RCLCPP_DEBUG(this->get_logger(), "P2P move base preempted.");
       publishZeroVelocity();
       terminal_goal_reason_ = "goal preempted";
       route_manager_->stop("goal preempted");
@@ -338,12 +338,12 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
     if(goal_handle->is_canceling()){
 
       if(FSM_->isPhase(FSM::NavigationPhase::kRecoveryAction)){
-        RCLCPP_INFO(this->get_logger(), "navigation is in recovery action state, cancel recovery behaviors.");
+        RCLCPP_DEBUG(this->get_logger(), "navigation is in recovery action state, cancel recovery behaviors.");
         recovery_behaviors_client_ptr_->async_cancel_all_goals();
       }
 
       goal_handle->canceled(result);
-      RCLCPP_INFO(this->get_logger(), "P2P move base cancelled.");
+      RCLCPP_DEBUG(this->get_logger(), "P2P move base cancelled.");
       publishZeroVelocity();
       terminal_goal_reason_ = "goal canceled";
       route_manager_->stop("goal canceled");
@@ -695,7 +695,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
   if(FSM_->isPhase(FSM::NavigationPhase::kRouteTracking)){
     if(route_controller_->isGoalPositionReached()){
       publishZeroVelocity();
-      RCLCPP_INFO(this->get_logger(), "goal position tolerance reached, entering goal alignment");
+      RCLCPP_DEBUG(this->get_logger(), "goal position tolerance reached, entering goal alignment");
       FSM_->setPhase(FSM::NavigationPhase::kGoalAlignment, "goal position reached");
       return false;
     }
@@ -745,7 +745,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
     }
 
     if(is_recoverying_succeed_){
-      RCLCPP_INFO(this->get_logger(), "recovery action completed, request a fresh route");
+      RCLCPP_DEBUG(this->get_logger(), "recovery action completed, request a fresh route");
       FSM_->recovery_attempt_count_++;
       FSM_->last_valid_plan_ = clock_->now();
       FSM_->setPhase(FSM::NavigationPhase::kRouteRequest, "recovery action completed");
@@ -838,7 +838,7 @@ void P2PMoveBase::recovery_behaviors_client_goal_response_callback(const rclcpp_
     is_recoverying_ = false;
     is_recoverying_succeed_ = false;
   } else {
-    RCLCPP_INFO(this->get_logger(), "recovery action accepted by recovery behaviors server, waiting for result");
+    RCLCPP_DEBUG(this->get_logger(), "recovery action accepted by recovery behaviors server, waiting for result");
   }
 }
 
@@ -848,7 +848,7 @@ void P2PMoveBase::recovery_behaviors_client_result_callback(const rclcpp_action:
   switch (result.code) {
     case rclcpp_action::ResultCode::SUCCEEDED:
       is_recoverying_succeed_ = true;
-      RCLCPP_INFO(this->get_logger(), "recovery action finished successfully");
+      RCLCPP_DEBUG(this->get_logger(), "recovery action finished successfully");
       break;
     case rclcpp_action::ResultCode::ABORTED:
       RCLCPP_ERROR(this->get_logger(), "recovery action was aborted");

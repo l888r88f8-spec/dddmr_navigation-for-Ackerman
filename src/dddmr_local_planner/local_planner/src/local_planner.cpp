@@ -94,15 +94,15 @@ void Local_Planner::initial(
 
   declare_parameter("odom_topic", rclcpp::ParameterValue("odom"));
   this->get_parameter("odom_topic", odom_topic_);
-  RCLCPP_INFO(this->get_logger(), "odom_topic: %s", odom_topic_.c_str());
+  RCLCPP_DEBUG(this->get_logger(), "odom_topic: %s", odom_topic_.c_str());
 
   declare_parameter("odom_topic_qos", rclcpp::ParameterValue("reliable"));
   this->get_parameter("odom_topic_qos", odom_topic_qos_);
-  RCLCPP_INFO(this->get_logger(), "odom_topic_qos: %s", odom_topic_qos_.c_str());
+  RCLCPP_DEBUG(this->get_logger(), "odom_topic_qos: %s", odom_topic_qos_.c_str());
 
   declare_parameter("compute_best_trajectory_in_odomCb", rclcpp::ParameterValue(false));
   this->get_parameter("compute_best_trajectory_in_odomCb", compute_best_trajectory_in_odomCb_);
-  RCLCPP_INFO(this->get_logger(), "compute_best_trajectory_in_odomCb: %d", compute_best_trajectory_in_odomCb_);
+  RCLCPP_DEBUG(this->get_logger(), "compute_best_trajectory_in_odomCb: %d", compute_best_trajectory_in_odomCb_);
 
   declare_parameter(
     "local_reference.forward_distance",
@@ -115,10 +115,10 @@ void Local_Planner::initial(
   this->get_parameter("forward_prune", forward_prune_);
   if(std::isfinite(configured_forward_reference_distance)){
     forward_prune_ = configured_forward_reference_distance;
-    RCLCPP_INFO(this->get_logger(), "local_reference.forward_distance: %.2f", forward_prune_);
+    RCLCPP_DEBUG(this->get_logger(), "local_reference.forward_distance: %.2f", forward_prune_);
   }
   else{
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "forward_prune (legacy local reference alias): %.2f",
       forward_prune_);
@@ -135,10 +135,10 @@ void Local_Planner::initial(
   this->get_parameter("backward_prune", backward_prune_);
   if(std::isfinite(configured_backward_reference_distance)){
     backward_prune_ = configured_backward_reference_distance;
-    RCLCPP_INFO(this->get_logger(), "local_reference.backward_distance: %.2f", backward_prune_);
+    RCLCPP_DEBUG(this->get_logger(), "local_reference.backward_distance: %.2f", backward_prune_);
   }
   else{
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "backward_prune (legacy local reference alias): %.2f",
       backward_prune_);
@@ -146,7 +146,7 @@ void Local_Planner::initial(
 
   declare_parameter("heading_tracking_distance", rclcpp::ParameterValue(0.5));
   this->get_parameter("heading_tracking_distance", heading_tracking_distance_);
-  RCLCPP_INFO(this->get_logger(), "heading_tracking_distance: %.2f", heading_tracking_distance_);
+  RCLCPP_DEBUG(this->get_logger(), "heading_tracking_distance: %.2f", heading_tracking_distance_);
 
   declare_parameter(
     "route_start_alignment.heading_tolerance",
@@ -160,13 +160,13 @@ void Local_Planner::initial(
   this->get_parameter("heading_align_angle", heading_align_angle_);
   if(std::isfinite(configured_route_start_alignment_tolerance)){
     heading_align_angle_ = configured_route_start_alignment_tolerance;
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "route_start_alignment.heading_tolerance: %.2f",
       heading_align_angle_);
   }
   else{
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "heading_align_angle (legacy route start alignment alias): %.2f",
       heading_align_angle_);
@@ -178,7 +178,7 @@ void Local_Planner::initial(
   this->get_parameter(
     "route_start_alignment.front_reach_distance",
     route_start_front_reach_distance_);
-  RCLCPP_INFO(
+  RCLCPP_DEBUG(
     this->get_logger(),
     "route_start_alignment.front_reach_distance: %.2f",
     route_start_front_reach_distance_);
@@ -189,54 +189,54 @@ void Local_Planner::initial(
   this->get_parameter(
     "route_start_alignment.min_front_projection",
     route_start_front_projection_threshold_);
-  RCLCPP_INFO(
+  RCLCPP_DEBUG(
     this->get_logger(),
     "route_start_alignment.min_front_projection: %.2f",
     route_start_front_projection_threshold_);
 
   declare_parameter("causal_prune_search_window", rclcpp::ParameterValue(40));
   this->get_parameter("causal_prune_search_window", causal_prune_search_window_);
-  RCLCPP_INFO(this->get_logger(), "causal_prune_search_window: %zu", causal_prune_search_window_);
+  RCLCPP_DEBUG(this->get_logger(), "causal_prune_search_window: %zu", causal_prune_search_window_);
 
   declare_parameter("causal_prune_max_index_jump", rclcpp::ParameterValue(15));
   this->get_parameter("causal_prune_max_index_jump", causal_prune_max_index_jump_);
-  RCLCPP_INFO(this->get_logger(), "causal_prune_max_index_jump: %zu", causal_prune_max_index_jump_);
+  RCLCPP_DEBUG(this->get_logger(), "causal_prune_max_index_jump: %zu", causal_prune_max_index_jump_);
 
   declare_parameter("causal_prune_max_arc_jump", rclcpp::ParameterValue(2.0));
   this->get_parameter("causal_prune_max_arc_jump", causal_prune_max_arc_jump_);
-  RCLCPP_INFO(this->get_logger(), "causal_prune_max_arc_jump: %.2f", causal_prune_max_arc_jump_);
+  RCLCPP_DEBUG(this->get_logger(), "causal_prune_max_arc_jump: %.2f", causal_prune_max_arc_jump_);
 
   declare_parameter("causal_prune_max_lateral_distance", rclcpp::ParameterValue(1.0));
   this->get_parameter("causal_prune_max_lateral_distance", causal_prune_max_lateral_distance_);
-  RCLCPP_INFO(this->get_logger(), "causal_prune_max_lateral_distance: %.2f", causal_prune_max_lateral_distance_);
+  RCLCPP_DEBUG(this->get_logger(), "causal_prune_max_lateral_distance: %.2f", causal_prune_max_lateral_distance_);
 
   declare_parameter("causal_prune_max_heading_error", rclcpp::ParameterValue(1.75));
   this->get_parameter("causal_prune_max_heading_error", causal_prune_max_heading_error_);
-  RCLCPP_INFO(this->get_logger(), "causal_prune_max_heading_error: %.2f", causal_prune_max_heading_error_);
+  RCLCPP_DEBUG(this->get_logger(), "causal_prune_max_heading_error: %.2f", causal_prune_max_heading_error_);
 
   declare_parameter("min_heading_reference_length", rclcpp::ParameterValue(0.3));
   this->get_parameter("min_heading_reference_length", min_heading_reference_length_);
-  RCLCPP_INFO(this->get_logger(), "min_heading_reference_length: %.2f", min_heading_reference_length_);
+  RCLCPP_DEBUG(this->get_logger(), "min_heading_reference_length: %.2f", min_heading_reference_length_);
 
   declare_parameter("max_heading_reference_stale_cycles", rclcpp::ParameterValue(10));
   this->get_parameter("max_heading_reference_stale_cycles", max_heading_reference_stale_cycles_);
-  RCLCPP_INFO(this->get_logger(), "max_heading_reference_stale_cycles: %zu", max_heading_reference_stale_cycles_);
+  RCLCPP_DEBUG(this->get_logger(), "max_heading_reference_stale_cycles: %zu", max_heading_reference_stale_cycles_);
 
   declare_parameter("max_prune_failure_cycles", rclcpp::ParameterValue(10));
   this->get_parameter("max_prune_failure_cycles", max_prune_failure_cycles_);
-  RCLCPP_INFO(this->get_logger(), "max_prune_failure_cycles: %zu", max_prune_failure_cycles_);
+  RCLCPP_DEBUG(this->get_logger(), "max_prune_failure_cycles: %zu", max_prune_failure_cycles_);
 
   declare_parameter("cached_pruned_path_timeout_sec", rclcpp::ParameterValue(0.8));
   this->get_parameter("cached_pruned_path_timeout_sec", cached_pruned_path_timeout_sec_);
-  RCLCPP_INFO(this->get_logger(), "cached_pruned_path_timeout_sec: %.2f", cached_pruned_path_timeout_sec_);
+  RCLCPP_DEBUG(this->get_logger(), "cached_pruned_path_timeout_sec: %.2f", cached_pruned_path_timeout_sec_);
 
   declare_parameter("prune_plane_timeout", rclcpp::ParameterValue(3.0));
   this->get_parameter("prune_plane_timeout", prune_plane_timeout_);
-  RCLCPP_INFO(this->get_logger(), "prune_plane_timeout: %.2f", prune_plane_timeout_);
+  RCLCPP_DEBUG(this->get_logger(), "prune_plane_timeout: %.2f", prune_plane_timeout_);
 
   declare_parameter("xy_goal_tolerance", rclcpp::ParameterValue(0.3));
   this->get_parameter("xy_goal_tolerance", xy_goal_tolerance_);
-  RCLCPP_INFO(this->get_logger(), "xy_goal_tolerance: %.2f", xy_goal_tolerance_);
+  RCLCPP_DEBUG(this->get_logger(), "xy_goal_tolerance: %.2f", xy_goal_tolerance_);
 
   declare_parameter(
     "goal_alignment.heading_tolerance",
@@ -249,13 +249,13 @@ void Local_Planner::initial(
   this->get_parameter("yaw_goal_tolerance", yaw_goal_tolerance_);
   if(std::isfinite(configured_goal_alignment_tolerance)){
     yaw_goal_tolerance_ = configured_goal_alignment_tolerance;
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "goal_alignment.heading_tolerance: %.2f",
       yaw_goal_tolerance_);
   }
   else{
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "yaw_goal_tolerance (legacy goal alignment alias): %.2f",
       yaw_goal_tolerance_);
@@ -263,7 +263,7 @@ void Local_Planner::initial(
 
   declare_parameter("controller_frequency", rclcpp::ParameterValue(10.0));
   this->get_parameter("controller_frequency", controller_frequency_);
-  RCLCPP_INFO(this->get_logger(), "controller_frequency: %.2f", controller_frequency_);
+  RCLCPP_DEBUG(this->get_logger(), "controller_frequency: %.2f", controller_frequency_);
 
   declare_parameter("controller_backend", rclcpp::ParameterValue("legacy_rollout"));
   this->get_parameter("controller_backend", controller_backend_);
@@ -277,7 +277,7 @@ void Local_Planner::initial(
       controller_backend_.c_str());
     controller_backend_ = "legacy_rollout";
   }
-  RCLCPP_INFO(this->get_logger(), "controller_backend: %s", controller_backend_.c_str());
+  RCLCPP_DEBUG(this->get_logger(), "controller_backend: %s", controller_backend_.c_str());
 
   declare_parameter("rpp.critic_trajectory_generator_name", rclcpp::ParameterValue("ackermann_simple"));
   this->get_parameter("rpp.critic_trajectory_generator_name", rpp_critic_trajectory_generator_name_);
@@ -310,46 +310,46 @@ void Local_Planner::initial(
   declare_parameter("rpp.max_angular_velocity", rclcpp::ParameterValue(1.2));
   this->get_parameter("rpp.max_angular_velocity", rpp_max_angular_velocity_);
   if(controller_backend_ == "regulated_pure_pursuit"){
-    RCLCPP_INFO(this->get_logger(), "rpp.critic_trajectory_generator_name: %s", rpp_critic_trajectory_generator_name_.c_str());
-    RCLCPP_INFO(this->get_logger(), "rpp.nominal_linear_speed: %.2f", rpp_nominal_linear_speed_);
-    RCLCPP_INFO(this->get_logger(), "rpp.min_linear_speed: %.2f", rpp_min_linear_speed_);
-    RCLCPP_INFO(this->get_logger(), "rpp.alignment_linear_speed: %.2f", rpp_alignment_linear_speed_);
-    RCLCPP_INFO(this->get_logger(), "rpp.goal_slowdown_distance: %.2f", rpp_goal_slowdown_distance_);
-    RCLCPP_INFO(this->get_logger(), "rpp.min_lookahead_distance: %.2f", rpp_min_lookahead_distance_);
-    RCLCPP_INFO(this->get_logger(), "rpp.max_lookahead_distance: %.2f", rpp_max_lookahead_distance_);
-    RCLCPP_INFO(this->get_logger(), "rpp.lookahead_time: %.2f", rpp_lookahead_time_);
-    RCLCPP_INFO(this->get_logger(), "rpp.alignment_lookahead_distance: %.2f", rpp_alignment_lookahead_distance_);
-    RCLCPP_INFO(this->get_logger(), "rpp.max_lateral_accel: %.2f", rpp_max_lateral_accel_);
-    RCLCPP_INFO(this->get_logger(), "rpp.prediction_horizon_sec: %.2f", rpp_prediction_horizon_sec_);
-    RCLCPP_INFO(this->get_logger(), "rpp.prediction_step_sec: %.2f", rpp_prediction_step_sec_);
-    RCLCPP_INFO(this->get_logger(), "rpp.wheelbase: %.2f", rpp_wheelbase_);
-    RCLCPP_INFO(this->get_logger(), "rpp.max_steer: %.2f", rpp_max_steer_);
-    RCLCPP_INFO(this->get_logger(), "rpp.max_angular_velocity: %.2f", rpp_max_angular_velocity_);
+    RCLCPP_DEBUG(this->get_logger(), "rpp.critic_trajectory_generator_name: %s", rpp_critic_trajectory_generator_name_.c_str());
+    RCLCPP_DEBUG(this->get_logger(), "rpp.nominal_linear_speed: %.2f", rpp_nominal_linear_speed_);
+    RCLCPP_DEBUG(this->get_logger(), "rpp.min_linear_speed: %.2f", rpp_min_linear_speed_);
+    RCLCPP_DEBUG(this->get_logger(), "rpp.alignment_linear_speed: %.2f", rpp_alignment_linear_speed_);
+    RCLCPP_DEBUG(this->get_logger(), "rpp.goal_slowdown_distance: %.2f", rpp_goal_slowdown_distance_);
+    RCLCPP_DEBUG(this->get_logger(), "rpp.min_lookahead_distance: %.2f", rpp_min_lookahead_distance_);
+    RCLCPP_DEBUG(this->get_logger(), "rpp.max_lookahead_distance: %.2f", rpp_max_lookahead_distance_);
+    RCLCPP_DEBUG(this->get_logger(), "rpp.lookahead_time: %.2f", rpp_lookahead_time_);
+    RCLCPP_DEBUG(this->get_logger(), "rpp.alignment_lookahead_distance: %.2f", rpp_alignment_lookahead_distance_);
+    RCLCPP_DEBUG(this->get_logger(), "rpp.max_lateral_accel: %.2f", rpp_max_lateral_accel_);
+    RCLCPP_DEBUG(this->get_logger(), "rpp.prediction_horizon_sec: %.2f", rpp_prediction_horizon_sec_);
+    RCLCPP_DEBUG(this->get_logger(), "rpp.prediction_step_sec: %.2f", rpp_prediction_step_sec_);
+    RCLCPP_DEBUG(this->get_logger(), "rpp.wheelbase: %.2f", rpp_wheelbase_);
+    RCLCPP_DEBUG(this->get_logger(), "rpp.max_steer: %.2f", rpp_max_steer_);
+    RCLCPP_DEBUG(this->get_logger(), "rpp.max_angular_velocity: %.2f", rpp_max_angular_velocity_);
   }
 
   declare_parameter("debug_publish.robot_cuboid", rclcpp::ParameterValue(false));
   this->get_parameter("debug_publish.robot_cuboid", debug_publish_robot_cuboid_);
-  RCLCPP_INFO(this->get_logger(), "debug_publish.robot_cuboid: %d", debug_publish_robot_cuboid_);
+  RCLCPP_DEBUG(this->get_logger(), "debug_publish.robot_cuboid: %d", debug_publish_robot_cuboid_);
 
   declare_parameter("debug_publish.aggregated_pc", rclcpp::ParameterValue(false));
   this->get_parameter("debug_publish.aggregated_pc", debug_publish_aggregated_pc_);
-  RCLCPP_INFO(this->get_logger(), "debug_publish.aggregated_pc: %d", debug_publish_aggregated_pc_);
+  RCLCPP_DEBUG(this->get_logger(), "debug_publish.aggregated_pc: %d", debug_publish_aggregated_pc_);
 
   declare_parameter("debug_publish.prune_plan", rclcpp::ParameterValue(false));
   this->get_parameter("debug_publish.prune_plan", debug_publish_prune_plan_);
-  RCLCPP_INFO(this->get_logger(), "debug_publish.prune_plan: %d", debug_publish_prune_plan_);
+  RCLCPP_DEBUG(this->get_logger(), "debug_publish.prune_plan: %d", debug_publish_prune_plan_);
 
   declare_parameter("debug_publish.accepted_trajectory", rclcpp::ParameterValue(false));
   this->get_parameter("debug_publish.accepted_trajectory", debug_publish_accepted_trajectory_);
-  RCLCPP_INFO(this->get_logger(), "debug_publish.accepted_trajectory: %d", debug_publish_accepted_trajectory_);
+  RCLCPP_DEBUG(this->get_logger(), "debug_publish.accepted_trajectory: %d", debug_publish_accepted_trajectory_);
 
   declare_parameter("debug_publish.best_trajectory", rclcpp::ParameterValue(false));
   this->get_parameter("debug_publish.best_trajectory", debug_publish_best_trajectory_);
-  RCLCPP_INFO(this->get_logger(), "debug_publish.best_trajectory: %d", debug_publish_best_trajectory_);
+  RCLCPP_DEBUG(this->get_logger(), "debug_publish.best_trajectory: %d", debug_publish_best_trajectory_);
 
   declare_parameter("debug_publish.all_trajectories", rclcpp::ParameterValue(false));
   this->get_parameter("debug_publish.all_trajectories", debug_publish_all_trajectories_);
-  RCLCPP_INFO(this->get_logger(), "debug_publish.all_trajectories: %d", debug_publish_all_trajectories_);
+  RCLCPP_DEBUG(this->get_logger(), "debug_publish.all_trajectories: %d", debug_publish_all_trajectories_);
 
 
   //@Initialize transform listener and broadcaster
@@ -470,7 +470,7 @@ void Local_Planner::publishDebugPath(
   publisher->publish(output);
 
   if(throttle_log){
-    RCLCPP_INFO_THROTTLE(
+    RCLCPP_DEBUG_THROTTLE(
       this->get_logger().get_child(name_), *clock_, 2000,
       "%s published, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, poses=%zu",
       stage_label.c_str(),
@@ -481,7 +481,7 @@ void Local_Planner::publishDebugPath(
       output.poses.size());
   }
   else{
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger().get_child(name_),
       "%s published, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, poses=%zu",
       stage_label.c_str(),
@@ -999,7 +999,7 @@ bool Local_Planner::selectCausalPruneAnchor(
   if(fallback_distance <= causal_prune_max_lateral_distance_ * 1.5){
     *anchor_index = current_index;
     *robot_to_route_distance = fallback_distance;
-    RCLCPP_WARN_THROTTLE(
+    RCLCPP_DEBUG_THROTTLE(
       this->get_logger().get_child(name_), *clock_, 2000,
       "causal prune rejected jump, keeping current progress index, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu",
       route_version_,
@@ -1017,7 +1017,7 @@ bool Local_Planner::selectCausalPruneAnchor(
     if(lateral_distance <= causal_prune_max_lateral_distance_ * 1.25){
       *anchor_index = idx;
       *robot_to_route_distance = lateral_distance;
-      RCLCPP_WARN_THROTTLE(
+      RCLCPP_DEBUG_THROTTLE(
         this->get_logger().get_child(name_), *clock_, 2000,
         "causal prune accepted only a small progress step, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, next_index=%zu",
         route_version_,
@@ -1259,7 +1259,7 @@ void Local_Planner::parseCuboid(){
   marker_edge_.id = 3; marker_edge_.scale.x = 0.03;
   marker_edge_.color.r = 0.9; marker_edge_.color.g = 1; marker_edge_.color.b = 0; marker_edge_.color.a = 0.8;
   //@ parse cuboid, currently the cuboid in local planner is just for visualization
-  RCLCPP_INFO(this->get_logger().get_child(name_), "Start to parse cuboid.");
+  RCLCPP_DEBUG(this->get_logger().get_child(name_), "Start to parse cuboid.");
   std::vector<std::string> cuboid_vertex_queue = {"cuboid.flb", "cuboid.frb", "cuboid.flt", "cuboid.frt", "cuboid.blb", "cuboid.brb", "cuboid.blt", "cuboid.brt"};
   std::map<std::string, std::vector<double>> cuboid_vertex_parameter_map;
 
@@ -1273,7 +1273,7 @@ void Local_Planner::parseCuboid(){
     marker_edge_.points.push_back(pt);
     cuboid_vertex_parameter_map[*it] = p;
   }
-  RCLCPP_INFO(this->get_logger().get_child(name_), "Cuboid vertex are loaded, start to connect edges.");
+  RCLCPP_DEBUG(this->get_logger().get_child(name_), "Cuboid vertex are loaded, start to connect edges.");
   std::vector<std::string> cuboid_vertex_connect = {"cuboid.flb", "cuboid.blb", "cuboid.flt", "cuboid.blt", "cuboid.frb", "cuboid.brb", "cuboid.frt", "cuboid.brt",
                                                       "cuboid.flt", "cuboid.flb", "cuboid.frt", "cuboid.frb", "cuboid.blt", "cuboid.blb", "cuboid.brt", "cuboid.brb"};
   for(auto it=cuboid_vertex_connect.begin(); it!=cuboid_vertex_connect.end();it++){
@@ -1356,7 +1356,7 @@ bool Local_Planner::isInitialHeadingAlignedOnCurrentPrunePlan(){
             &heading_reference_pose)){
     cacheHeadingReference(heading_reference_pose);
     have_heading_reference = true;
-    RCLCPP_INFO_THROTTLE(
+    RCLCPP_DEBUG_THROTTLE(
       this->get_logger().get_child(name_), *clock_, 2000,
       "heading check degraded to route tangent, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu",
       route_version_,
@@ -1370,7 +1370,7 @@ bool Local_Planner::isInitialHeadingAlignedOnCurrentPrunePlan(){
     have_heading_reference = true;
     ++heading_reference_stale_cycles_;
     consecutive_heading_reference_failure_cycles_ = 0;
-    RCLCPP_INFO_THROTTLE(
+    RCLCPP_DEBUG_THROTTLE(
       this->get_logger().get_child(name_), *clock_, 2000,
       "heading check reused previous valid heading reference, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, stale_cycles=%zu",
       route_version_,
@@ -1384,7 +1384,7 @@ bool Local_Planner::isInitialHeadingAlignedOnCurrentPrunePlan(){
             prune_plan_.poses, 0, min_heading_reference_length_, &heading_reference_pose)){
     cacheHeadingReference(heading_reference_pose);
     have_heading_reference = true;
-    RCLCPP_INFO_THROTTLE(
+    RCLCPP_DEBUG_THROTTLE(
       this->get_logger().get_child(name_), *clock_, 2000,
       "heading check degraded to short local prune tangent, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu",
       route_version_,
@@ -1396,7 +1396,7 @@ bool Local_Planner::isInitialHeadingAlignedOnCurrentPrunePlan(){
           buildHeadingReferenceFromPoseOrientation(prune_plan_.poses.back(), &heading_reference_pose)){
     cacheHeadingReference(heading_reference_pose);
     have_heading_reference = true;
-    RCLCPP_INFO_THROTTLE(
+    RCLCPP_DEBUG_THROTTLE(
       this->get_logger().get_child(name_), *clock_, 2000,
       "heading check degraded to local path tail orientation, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu",
       route_version_,
@@ -1612,7 +1612,7 @@ void Local_Planner::setRoute(
     goal_seq_ == goal_seq &&
     route_source_label_ == source_label)
   {
-    RCLCPP_INFO_THROTTLE(
+    RCLCPP_DEBUG_THROTTLE(
       this->get_logger().get_child(name_), *clock_, 5000,
       "reuse delivered route in route controller, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu",
       route_version,
@@ -1660,7 +1660,7 @@ void Local_Planner::setRoute(
   kdtree_global_plan_.reset(new pcl::KdTreeFLANN<pcl::PointXYZ>());
   kdtree_global_plan_->setInputCloud (pcl_global_plan_);
   rebuildGlobalPlanArcLengths();
-  RCLCPP_INFO(
+  RCLCPP_DEBUG(
     this->get_logger().get_child(name_),
     "receive new route reference, route_version=%zu, goal_seq=%zu, source=%s, poses=%zu, local_route_progress_index=%zu",
     route_version_,

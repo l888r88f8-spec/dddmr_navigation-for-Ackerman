@@ -62,7 +62,7 @@ rclcpp_action::GoalResponse GlobalPlanner::handle_goal(
 rclcpp_action::CancelResponse GlobalPlanner::handle_cancel(
   const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle)
 {
-  RCLCPP_INFO(
+  RCLCPP_DEBUG(
     this->get_logger(),
     "Received request to cancel planner goal; computation will stop at the next cancel check.");
   (void)goal_handle;
@@ -84,7 +84,7 @@ void GlobalPlanner::handle_accepted(const std::shared_ptr<rclcpp_action::ServerG
 {
   rclcpp::Rate r(20);
   while (is_active(current_handle_)) {
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000, "Wait for current handle to join");
+    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *clock_, 1000, "Wait for current handle to join");
     r.sleep();
   }
   {
@@ -113,19 +113,19 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   
   declare_parameter("turning_weight", rclcpp::ParameterValue(0.1));
   this->get_parameter("turning_weight", turning_weight_);
-  RCLCPP_INFO(this->get_logger(), "turning_weight: %.2f", turning_weight_);    
+  RCLCPP_DEBUG(this->get_logger(), "turning_weight: %.2f", turning_weight_);    
 
   declare_parameter("enable_detail_log", rclcpp::ParameterValue(false));
   this->get_parameter("enable_detail_log", enable_detail_log_);
-  RCLCPP_INFO(this->get_logger(), "enable_detail_log: %d", enable_detail_log_);    
+  RCLCPP_DEBUG(this->get_logger(), "enable_detail_log: %d", enable_detail_log_);    
 
   declare_parameter("a_star_expanding_radius", rclcpp::ParameterValue(0.5));
   this->get_parameter("a_star_expanding_radius", a_star_expanding_radius_);
-  RCLCPP_INFO(this->get_logger(), "a_star_expanding_radius: %.2f", a_star_expanding_radius_);    
+  RCLCPP_DEBUG(this->get_logger(), "a_star_expanding_radius: %.2f", a_star_expanding_radius_);    
 
   declare_parameter("direct_path_distance_threshold", rclcpp::ParameterValue(3.0));
   this->get_parameter("direct_path_distance_threshold", direct_path_distance_threshold_);
-  RCLCPP_INFO(this->get_logger(), "direct_path_distance_threshold: %.2f", direct_path_distance_threshold_);
+  RCLCPP_DEBUG(this->get_logger(), "direct_path_distance_threshold: %.2f", direct_path_distance_threshold_);
 
   declare_parameter("raw_route_backend", rclcpp::ParameterValue(std::string("graph_a_star")));
   this->get_parameter("raw_route_backend", raw_route_backend_);
@@ -141,11 +141,11 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
       raw_route_backend_.c_str());
     raw_route_backend_ = "graph_a_star";
   }
-  RCLCPP_INFO(this->get_logger(), "raw_route_backend: %s", raw_route_backend_.c_str());
+  RCLCPP_DEBUG(this->get_logger(), "raw_route_backend: %s", raw_route_backend_.c_str());
 
   declare_parameter("use_forward_hybrid_astar", rclcpp::ParameterValue(true));
   this->get_parameter("use_forward_hybrid_astar", use_forward_hybrid_astar_);
-  RCLCPP_INFO(
+  RCLCPP_DEBUG(
     this->get_logger(),
     "raw_route forward_hybrid_astar backend enabled: %d",
     use_forward_hybrid_astar_);
@@ -157,11 +157,11 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
 
   declare_parameter("enable_direct_path_shortcut", rclcpp::ParameterValue(false));
   this->get_parameter("enable_direct_path_shortcut", enable_direct_path_shortcut_);
-  RCLCPP_INFO(this->get_logger(), "enable_direct_path_shortcut: %d", enable_direct_path_shortcut_);
+  RCLCPP_DEBUG(this->get_logger(), "enable_direct_path_shortcut: %d", enable_direct_path_shortcut_);
 
   declare_parameter("entry_connector.enable", rclcpp::ParameterValue(true));
   this->get_parameter("entry_connector.enable", enable_entry_connector_);
-  RCLCPP_INFO(this->get_logger(), "entry_connector.enable: %d", enable_entry_connector_);
+  RCLCPP_DEBUG(this->get_logger(), "entry_connector.enable: %d", enable_entry_connector_);
 
   declare_parameter(
     "entry_connector.backend",
@@ -179,7 +179,7 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
       entry_connector_backend_.c_str());
     entry_connector_backend_ = "forward_hybrid_astar";
   }
-  RCLCPP_INFO(
+  RCLCPP_DEBUG(
     this->get_logger(),
     "entry_connector.backend: %s",
     entry_connector_backend_.c_str());
@@ -195,7 +195,7 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   if(entry_connector_max_anchor_distance_ < entry_connector_min_anchor_distance_){
     std::swap(entry_connector_max_anchor_distance_, entry_connector_min_anchor_distance_);
   }
-  RCLCPP_INFO(
+  RCLCPP_DEBUG(
     this->get_logger(),
     "entry_connector anchor distance window: [%.2f, %.2f]",
     entry_connector_min_anchor_distance_,
@@ -205,7 +205,7 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   this->get_parameter(
     "entry_connector.force_goal_heading",
     entry_connector_force_goal_heading_);
-  RCLCPP_INFO(
+  RCLCPP_DEBUG(
     this->get_logger(),
     "entry_connector.force_goal_heading: %d",
     entry_connector_force_goal_heading_);
@@ -251,7 +251,7 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
     "hybrid_astar.rearward_hard_reject_distance",
     forward_hybrid_astar_config_.rearward_hard_reject_distance);
 
-  RCLCPP_INFO(
+  RCLCPP_DEBUG(
     this->get_logger(),
     "hybrid_astar: wheelbase=%.6f max_steer=%.3f heading_bins=%d primitive_len=%.2f primitive_step=%.2f",
     forward_hybrid_astar_config_.wheelbase,
@@ -259,7 +259,7 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
     forward_hybrid_astar_config_.heading_bin_count,
     forward_hybrid_astar_config_.primitive_length,
     forward_hybrid_astar_config_.primitive_step);
-  RCLCPP_INFO(
+  RCLCPP_DEBUG(
     this->get_logger(),
     "hybrid_astar: goal_tol=(%.2f, %.2f) use_goal_heading=%d proj_radius=%.2f",
     forward_hybrid_astar_config_.goal_position_tolerance,
@@ -269,7 +269,7 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
 
   declare_parameter("use_pre_graph", rclcpp::ParameterValue(false));
   this->get_parameter("use_pre_graph", use_pre_graph_);
-  RCLCPP_INFO(this->get_logger(), "use_pre_graph: %d", use_pre_graph_);    
+  RCLCPP_DEBUG(this->get_logger(), "use_pre_graph: %d", use_pre_graph_);    
 
 
   tf_listener_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -348,7 +348,7 @@ void GlobalPlanner::checkPerception3DThread(){
     *kdtree_map_ = *(perception_3d_ros_->getSharedDataPtr()->kdtree_map_);
     *pcl_map_ = *(perception_3d_ros_->getSharedDataPtr()->pcl_map_);
     static_graph_ = *perception_3d_ros_->getSharedDataPtr()->sGraph_ptr_; //@ node weight
-    RCLCPP_INFO(this->get_logger(), "Ground and Kd-tree ground have been received from perception_3d.");
+    RCLCPP_DEBUG(this->get_logger(), "Ground and Kd-tree ground have been received from perception_3d.");
     getStaticGraphFromPerception3D();
     static_ground_size_ = perception_3d_ros_->getSharedDataPtr()->static_ground_size_;
   }
@@ -358,7 +358,7 @@ void GlobalPlanner::checkPerception3DThread(){
 void GlobalPlanner::cbClickedPoint(const geometry_msgs::msg::PointStamped::SharedPtr clicked_goal){
   
   if(!perception_3d_ros_->getSharedDataPtr()->is_static_layer_ready_){
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000, "Received clicked goal before static layer is ready");
+    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *clock_, 1000, "Received clicked goal before static layer is ready");
     return;
   }
 
@@ -386,7 +386,7 @@ void GlobalPlanner::cbClickedPoint(const geometry_msgs::msg::PointStamped::Share
   }
   catch (tf2::TransformException& e)
   {
-    RCLCPP_INFO(this->get_logger(), "Failed to transform pointcloud: %s", e.what());
+    RCLCPP_DEBUG(this->get_logger(), "Failed to transform pointcloud: %s", e.what());
     return;
   }
   
@@ -421,7 +421,7 @@ void GlobalPlanner::cbClickedPoint(const geometry_msgs::msg::PointStamped::Share
   const std::size_t route_version = ++debug_route_version_;
   publishRawRouteDebugPath(raw_route, goal_seq, route_version, "clicked_goal_raw_route");
   if(!connector_used_fallback && connector_pose_count > 0){
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "entry connector generated successfully, anchor_index=%zu, anchor_distance=%.2f, connector_poses=%zu, route_tail_poses=%zu, frozen_route_poses=%zu",
       anchor_index,
@@ -445,7 +445,7 @@ void GlobalPlanner::cbClickedPoint(const geometry_msgs::msg::PointStamped::Share
     route_version,
     connector_used_fallback ? "clicked_goal_frozen_route_fallback" : "clicked_goal_frozen_route");
   pub_path_->publish(frozen_route);
-  RCLCPP_INFO(this->get_logger(), "Frozen route found for clicked goal.");
+  RCLCPP_DEBUG(this->get_logger(), "Frozen route found for clicked goal.");
 
 }
 
@@ -581,7 +581,7 @@ void GlobalPlanner::getROSPath(std::vector<unsigned int>& path_id, nav_msgs::msg
       pst.pose.orientation.w = q.getW();
     }
 
-    //RCLCPP_INFO(this->get_logger(), "%.2f, %.2f, %.2f,%.2f, %.2f, %.2f, %.2f", vx, vy, vz, q.getX(), q.getY(), q.getZ(), q.getW());
+    //RCLCPP_DEBUG(this->get_logger(), "%.2f, %.2f, %.2f,%.2f, %.2f, %.2f, %.2f", vx, vy, vz, q.getX(), q.getY(), q.getZ(), q.getW());
     //@Interpolation to make global plan smoother and better resolution for local planner
     geometry_msgs::msg::PoseStamped pst_inter_polate = pst;
     if(it<path_id.size()-1){
@@ -737,7 +737,7 @@ bool GlobalPlanner::buildStraightLinePlan(
   }
 
   if(enable_detail_log_){
-    RCLCPP_INFO(this->get_logger(),
+    RCLCPP_DEBUG(this->get_logger(),
       "Use straight-line plan for nearby goal, distance: %.2f m, poses: %zu",
       distance, ros_path.poses.size());
   }
@@ -865,12 +865,12 @@ bool GlobalPlanner::getStartGoalID(
   finalize_projection(goal_projection, goal_id, pointRadiusSquaredDistance_goal);
 
   if(enable_detail_log_){
-    RCLCPP_WARN(this->get_logger(), "Selected goal: %.2f, %.2f, %.2f, Nearest-> id: %u, x: %.2f, y: %.2f, z: %.2f", 
+    RCLCPP_DEBUG(this->get_logger(), "Selected goal: %.2f, %.2f, %.2f, Nearest-> id: %u, x: %.2f, y: %.2f, z: %.2f", 
       goal.pose.position.x, goal.pose.position.y, goal.pose.position.z, goal_id, 
       pcl_ground_->points[goal_id].x, pcl_ground_->points[goal_id].y, pcl_ground_->points[goal_id].z);
   }
   else{
-    RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 5000, "Selected goal: %.2f, %.2f, %.2f, Nearest-> id: %u, x: %.2f, y: %.2f, z: %.2f", 
+    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *clock_, 5000, "Selected goal: %.2f, %.2f, %.2f, Nearest-> id: %u, x: %.2f, y: %.2f, z: %.2f", 
       goal.pose.position.x, goal.pose.position.y, goal.pose.position.z, goal_id, 
       pcl_ground_->points[goal_id].x, pcl_ground_->points[goal_id].y, pcl_ground_->points[goal_id].z);
   }
@@ -938,12 +938,12 @@ bool GlobalPlanner::getStartGoalID(
   finalize_projection(start_projection, start_id, pointRadiusSquaredDistance_start);
 
   if(enable_detail_log_){
-    RCLCPP_WARN(this->get_logger(), "Selected start: %.2f, %.2f, %.2f, Nearest-> id: %u, x: %.2f, y: %.2f, z: %.2f", 
+    RCLCPP_DEBUG(this->get_logger(), "Selected start: %.2f, %.2f, %.2f, Nearest-> id: %u, x: %.2f, y: %.2f, z: %.2f", 
       start.pose.position.x, start.pose.position.y, start.pose.position.z, start_id, 
       pcl_ground_->points[start_id].x, pcl_ground_->points[start_id].y, pcl_ground_->points[start_id].z);
   }
   else{
-    RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 5000, "Selected start: %.2f, %.2f, %.2f, Nearest-> id: %u, x: %.2f, y: %.2f, z: %.2f", 
+    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *clock_, 5000, "Selected start: %.2f, %.2f, %.2f, Nearest-> id: %u, x: %.2f, y: %.2f, z: %.2f", 
       start.pose.position.x, start.pose.position.y, start.pose.position.z, start_id, 
       pcl_ground_->points[start_id].x, pcl_ground_->points[start_id].y, pcl_ground_->points[start_id].z);
 
@@ -966,7 +966,7 @@ void GlobalPlanner::publishRawRouteDebugPath(
     pose.header = debug_path.header;
   }
   pub_raw_route_path_->publish(debug_path);
-  RCLCPP_INFO(
+  RCLCPP_DEBUG(
     this->get_logger(),
     "raw_route_path published, route_version=%zu, goal_seq=%zu, source=%s, poses=%zu",
     route_version,
@@ -988,7 +988,7 @@ void GlobalPlanner::publishFrozenRouteDebugPath(
     pose.header = debug_path.header;
   }
   pub_frozen_route_path_->publish(debug_path);
-  RCLCPP_INFO(
+  RCLCPP_DEBUG(
     this->get_logger(),
     "frozen_route_path published, route_version=%zu, goal_seq=%zu, source=%s, poses=%zu",
     route_version,
@@ -1153,8 +1153,11 @@ std::vector<GlobalPlanner::EntryAnchorCandidate> GlobalPlanner::selectEntryAncho
       has_start_yaw ? (std::cos(start_yaw) * dx + std::sin(start_yaw) * dy) : dx;
     candidate.vehicle_forward_projection =
       has_start_yaw ? (x_local / planar_distance) : 0.0;
+    // Ordinary forward startup mode accepts both left-front and right-front
+    // anchors, but rejects anchors behind the vehicle.
+    constexpr double kVehicleRearAllowance = 0.02;
     candidate.in_vehicle_forward_half_plane =
-      !has_start_yaw || candidate.vehicle_forward_projection >= -0.10;
+      !has_start_yaw || x_local >= -kVehicleRearAllowance;
     if(!candidate.in_vehicle_forward_half_plane){
       // Entry connector must remain a forward startup connection. Do not
       // select anchors behind the vehicle just to satisfy a nicer end yaw.
@@ -1194,15 +1197,21 @@ std::vector<GlobalPlanner::EntryAnchorCandidate> GlobalPlanner::selectEntryAncho
 
     if(candidate.in_preferred_window &&
        candidate.has_valid_anchor_pose &&
-       candidate.in_route_forward_half_plane &&
-       candidate.in_goal_forward_half_plane &&
        candidate.approach_alignment >= -0.10)
     {
       candidate.ranking_bucket = "preferred";
-      candidate.ranking_reason =
-        candidate.in_vehicle_forward_half_plane ?
-        "route_goal_forward" :
-        "route_goal_forward_vehicle_heading_opposed";
+      if(candidate.in_route_forward_half_plane && candidate.in_goal_forward_half_plane){
+        candidate.ranking_reason = "route_goal_forward";
+      }
+      else if(candidate.in_route_forward_half_plane){
+        candidate.ranking_reason = "route_forward_left_or_right";
+      }
+      else if(candidate.in_goal_forward_half_plane){
+        candidate.ranking_reason = "goal_forward_left_or_right";
+      }
+      else{
+        candidate.ranking_reason = "front_left_or_right";
+      }
       preferred_candidates.push_back(candidate);
       continue;
     }
@@ -1534,7 +1543,7 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
       goal_projection.fallback.c_str());
   }
   else{
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "raw route stage finished, goal_seq=%zu, request_id=%zu, stage=raw_route, backend=%s, success=1, result_class=succeeded, expansions=%zu, planning_time=%.3f, path_poses=%zu, start_ground_idx=%zu, start_ground_z=%.2f, start_projection_distance=%.3f, start_fallback=%s, goal_ground_idx=%zu, goal_ground_z=%.2f, goal_projection_distance=%.3f, goal_fallback=%s",
       goal_seq,
@@ -1627,7 +1636,7 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
       request_id,
       raw_route->poses.size());
     if(request_result_class != nullptr){
-      *request_result_class = "succeeded_without_entry_connector";
+      *request_result_class = "startup_connector_missing";
     }
     return true;
   }
@@ -1652,7 +1661,7 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
         << " approach_alignment=" << candidate.approach_alignment
         << " force_goal_heading=" << (candidate.force_goal_heading ? 1 : 0);
     }
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "entry connector candidate ranking, goal_seq=%zu, request_id=%zu, stage=entry_connector, candidate_count=%zu, logged_candidates=%zu, summary=%s",
       goal_seq,
@@ -1704,7 +1713,7 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
       continue;
     }
 
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "entry connector candidate start, goal_seq=%zu, request_id=%zu, stage=entry_connector, entry_connector_enabled=%d, entry_connector_backend=%s, candidate_order=%zu, anchor_index=%zu, anchor_arc_distance=%.2f, preferred_window=%d, ranking_bucket=%s, ranking_reason=%s, vehicle_side=%s, route_side=%s, goal_side=%s, vehicle_forward_projection=%.3f, route_forward_projection=%.3f, goal_forward_projection=%.3f, approach_alignment=%.3f, force_goal_heading=%d, anchor_pose=(%.2f, %.2f, %.2f), anchor_yaw=%.2f",
       goal_seq,
@@ -1839,7 +1848,7 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
       return false;
     }
 
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "entry connector candidate result, goal_seq=%zu, request_id=%zu, stage=entry_connector, candidate_order=%zu, anchor_index=%zu, preferred_window=%d, ranking_bucket=%s, ranking_reason=%s, vehicle_side=%s, route_side=%s, goal_side=%s, approach_alignment=%.3f, force_goal_heading=%d, success=1, expansions=%zu, planning_time=%.3f, connector_poses=%zu, anchor_ground_idx=%zu, anchor_ground_z=%.2f, anchor_projection_distance=%.3f, anchor_fallback=%s",
       goal_seq,
@@ -1917,7 +1926,7 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
     request_id,
     raw_route->poses.size());
   if(request_result_class != nullptr){
-    *request_result_class = "succeeded_without_entry_connector";
+    *request_result_class = "startup_connector_missing";
   }
   return true;
 }
@@ -1959,20 +1968,20 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
 
   const auto finish_canceled =
     [this, &goal_handle, &result](const std::string & reason) {
-      RCLCPP_INFO(this->get_logger(), "%s", reason.c_str());
+      RCLCPP_WARN(this->get_logger(), "%s", reason.c_str());
       goal_handle->canceled(result);
       clearCurrentHandleIfMatches(goal_handle);
     };
 
   if(!perception_3d_ros_->getSharedDataPtr()->is_static_layer_ready_){
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000, "Received the request before static layer is ready");
+    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *clock_, 1000, "Received the request before static layer is ready");
     goal_handle->abort(result);
     clearCurrentHandleIfMatches(goal_handle);
     return;
   }
 
   if(!goal_handle->get_goal()->activate_threading){
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000, "Deactivate thread");
+    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *clock_, 1000, "Deactivate thread");
     goal_handle->succeed(result);
     clearCurrentHandleIfMatches(goal_handle);
     return;
@@ -2046,7 +2055,7 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
   else{
     const std::size_t route_version = ++debug_route_version_;
     publishRawRouteDebugPath(raw_route, goal_seq, route_version, "get_plan_raw_route");
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "raw route generated, goal_seq=%zu, route_version=%zu, poses=%zu",
       goal_seq,
@@ -2080,7 +2089,7 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
       goal_seq,
       route_version,
       connector_used_fallback ? "get_plan_frozen_route_fallback" : "get_plan_frozen_route");
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "frozen route composed, goal_seq=%zu, route_version=%zu, route_tail_poses=%zu, connector_poses=%zu, frozen_route_poses=%zu, anchor_index=%zu, anchor_distance=%.2f",
       goal_seq,
@@ -2091,7 +2100,7 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
       anchor_index,
       anchor_distance);
     pub_path_->publish(frozen_route);
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       this->get_logger(),
       "frozen route published for goal_seq=%zu, route_version=%zu",
       goal_seq,
@@ -2287,9 +2296,9 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
   }
   else{
     if(enable_detail_log_)
-      RCLCPP_INFO(this->get_logger(), "Path found from: %u to %u", start_id, goal_id);
+      RCLCPP_DEBUG(this->get_logger(), "Path found from: %u to %u", start_id, goal_id);
     else
-      RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 5000, "Path found from: %u to %u", start_id, goal_id);
+      RCLCPP_DEBUG_THROTTLE(this->get_logger(), *clock_, 5000, "Path found from: %u to %u", start_id, goal_id);
     getROSPath(path, ros_path);
     if(search_diagnostics != nullptr){
       search_diagnostics->path_pose_count = ros_path.poses.size();
@@ -2374,7 +2383,7 @@ void GlobalPlanner::getStaticGraphFromPerception3D(){
   static_graph = static_graph_.getGraphPtr();
   pubStaticGraph();
   
-  RCLCPP_INFO(this->get_logger(), "Static graph is generated with size: %lu", static_graph_.getSize());
+  RCLCPP_DEBUG(this->get_logger(), "Static graph is generated with size: %lu", static_graph_.getSize());
   */
 
   if(!has_initialized_){

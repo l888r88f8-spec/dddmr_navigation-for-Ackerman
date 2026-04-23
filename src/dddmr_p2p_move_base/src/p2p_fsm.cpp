@@ -50,23 +50,23 @@ FSM::FSM(const rclcpp::node_interfaces::NodeLoggingInterface::SharedPtr& m_logge
     route_request_patience.as_double() >= 0.0 ?
     route_request_patience.as_double() :
     planner_patience.as_double();
-  RCLCPP_INFO(logger_->get_logger(), "route_request_patience: %.2f", route_request_patience_);  
+  RCLCPP_DEBUG(logger_->get_logger(), "route_request_patience: %.2f", route_request_patience_);  
 
   //Controlling related
   parameter_->declare_parameter("oscillation_distance", rclcpp::ParameterValue(10.0));
   rclcpp::Parameter oscillation_distance = parameter_->get_parameter("oscillation_distance");
   oscillation_distance_ = oscillation_distance.as_double();
-  RCLCPP_INFO(logger_->get_logger(), "oscillation_distance: %.2f", oscillation_distance_);  
+  RCLCPP_DEBUG(logger_->get_logger(), "oscillation_distance: %.2f", oscillation_distance_);  
 
   parameter_->declare_parameter("oscillation_angle", rclcpp::ParameterValue(0.5));
   rclcpp::Parameter oscillation_angle = parameter_->get_parameter("oscillation_angle");
   oscillation_angle_ = oscillation_angle.as_double();
-  RCLCPP_INFO(logger_->get_logger(), "oscillation_angle: %.2f", oscillation_angle_);  
+  RCLCPP_DEBUG(logger_->get_logger(), "oscillation_angle: %.2f", oscillation_angle_);  
 
   parameter_->declare_parameter("oscillation_patience", rclcpp::ParameterValue(20.0));
   rclcpp::Parameter oscillation_patience = parameter_->get_parameter("oscillation_patience");
   oscillation_patience_ = oscillation_patience.as_double();
-  RCLCPP_INFO(logger_->get_logger(), "oscillation_patience: %.2f", oscillation_patience_);  
+  RCLCPP_DEBUG(logger_->get_logger(), "oscillation_patience: %.2f", oscillation_patience_);  
 
   parameter_->declare_parameter("control_failure_patience", rclcpp::ParameterValue(-1.0));
   rclcpp::Parameter control_failure_patience = parameter_->get_parameter("control_failure_patience");
@@ -76,7 +76,7 @@ FSM::FSM(const rclcpp::node_interfaces::NodeLoggingInterface::SharedPtr& m_logge
     control_failure_patience.as_double() >= 0.0 ?
     control_failure_patience.as_double() :
     controller_patience.as_double();
-  RCLCPP_INFO(logger_->get_logger(), "control_failure_patience: %.2f", controller_patience_);  
+  RCLCPP_DEBUG(logger_->get_logger(), "control_failure_patience: %.2f", controller_patience_);  
 
   parameter_->declare_parameter("max_recovery_attempts", rclcpp::ParameterValue(-1));
   rclcpp::Parameter max_recovery_attempts = parameter_->get_parameter("max_recovery_attempts");
@@ -86,7 +86,7 @@ FSM::FSM(const rclcpp::node_interfaces::NodeLoggingInterface::SharedPtr& m_logge
     max_recovery_attempts.as_int() >= 0 ?
     max_recovery_attempts.as_int() :
     no_plan_retry_num.as_int();
-  RCLCPP_INFO(logger_->get_logger(), "max_recovery_attempts: %d", max_recovery_attempts_);  
+  RCLCPP_DEBUG(logger_->get_logger(), "max_recovery_attempts: %d", max_recovery_attempts_);  
 
   parameter_->declare_parameter("blocked_wait_patience", rclcpp::ParameterValue(-1.0));
   rclcpp::Parameter blocked_wait_patience = parameter_->get_parameter("blocked_wait_patience");
@@ -96,7 +96,7 @@ FSM::FSM(const rclcpp::node_interfaces::NodeLoggingInterface::SharedPtr& m_logge
     blocked_wait_patience.as_double() >= 0.0 ?
     blocked_wait_patience.as_double() :
     waiting_patience.as_double();
-  RCLCPP_INFO(logger_->get_logger(), "blocked_wait_patience: %.2f", blocked_wait_patience_); 
+  RCLCPP_DEBUG(logger_->get_logger(), "blocked_wait_patience: %.2f", blocked_wait_patience_); 
 
   parameter_->declare_parameter("orchestrator_frequency", rclcpp::ParameterValue(-1.0));
   rclcpp::Parameter orchestrator_frequency = parameter_->get_parameter("orchestrator_frequency");
@@ -106,17 +106,17 @@ FSM::FSM(const rclcpp::node_interfaces::NodeLoggingInterface::SharedPtr& m_logge
     orchestrator_frequency.as_double() > 0.0 ?
     orchestrator_frequency.as_double() :
     controller_frequency.as_double();
-  RCLCPP_INFO(logger_->get_logger(), "orchestrator_frequency: %.2f", orchestrator_frequency_); 
+  RCLCPP_DEBUG(logger_->get_logger(), "orchestrator_frequency: %.2f", orchestrator_frequency_); 
 
   parameter_->declare_parameter("use_twist_stamped", rclcpp::ParameterValue(false));
   rclcpp::Parameter use_twist_stamped = parameter_->get_parameter("use_twist_stamped");
   use_twist_stamped_ = use_twist_stamped.as_bool();
-  RCLCPP_INFO(logger_->get_logger(), "use_stamped_twist: %d", use_twist_stamped_); 
+  RCLCPP_DEBUG(logger_->get_logger(), "use_stamped_twist: %d", use_twist_stamped_); 
 
   parameter_->declare_parameter("twist_frame_id", rclcpp::ParameterValue("base_link"));
   rclcpp::Parameter twist_frame_id = parameter_->get_parameter("twist_frame_id");
   twist_frame_id_ = twist_frame_id.as_string();
-  RCLCPP_INFO(logger_->get_logger(), "twist_frame_id: %s", twist_frame_id_.c_str()); 
+  RCLCPP_DEBUG(logger_->get_logger(), "twist_frame_id: %s", twist_frame_id_.c_str()); 
 
 }
 
