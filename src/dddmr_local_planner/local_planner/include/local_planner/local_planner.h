@@ -323,7 +323,10 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       double rpp_wheelbase_;
       double rpp_max_steer_;
       double rpp_max_angular_velocity_;
-      
+      int rpp_avoidance_angular_samples_;
+      double rpp_avoidance_angular_span_ratio_;
+      double rpp_avoidance_prefer_nominal_weight_;
+
 };
 
 } // end of name space

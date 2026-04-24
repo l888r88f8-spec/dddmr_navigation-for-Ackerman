@@ -204,10 +204,11 @@ void Perception3D_ROS::getGlobalPose(geometry_msgs::msg::PoseStamped& gbl_pose){
     transformStamped = tf2Buffer_->lookupTransform(
         global_frame_, robot_base_frame_, tf2::TimePointZero);
     gbl_pose.header.frame_id = global_frame_;
-    gbl_pose.header.stamp = clock_->now();
+    gbl_pose.header.stamp = transformStamped.header.stamp;
     gbl_pose.pose.position.x = transformStamped.transform.translation.x;
     gbl_pose.pose.position.y = transformStamped.transform.translation.y;
     gbl_pose.pose.position.z = transformStamped.transform.translation.z;
+    gbl_pose.pose.orientation = transformStamped.transform.rotation;
   }
   catch (tf2::TransformException& e)
   {

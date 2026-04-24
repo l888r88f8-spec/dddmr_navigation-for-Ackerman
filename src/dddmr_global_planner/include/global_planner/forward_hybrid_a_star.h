@@ -58,6 +58,7 @@ public:
   {
     double wheelbase = 0.549185;
     double max_steer = 0.69;
+    int steer_sample_count = 5;
     int heading_bin_count = 72;
     double primitive_length = 0.6;
     double primitive_step = 0.05;
@@ -69,12 +70,21 @@ public:
     double steering_change_penalty = 0.3;
     double heading_change_penalty = 0.4;
     double obstacle_penalty_weight = 1.0;
+    double edge_weight_penalty_weight = 1.0;
+    double edge_weight_safe_threshold = 1.0;
+    double edge_weight_soft_cap = 8.0;
+    double edge_weight_hard_reject_threshold = 0.0;
     double heuristic_heading_weight = 0.2;
     double turn_side_hysteresis_penalty = 0.8;
     double rearward_check_distance = 1.5;
     double rearward_allowance = 0.05;
     double rearward_excursion_penalty = 4.0;
     double rearward_hard_reject_distance = 0.20;
+    double strict_forward_check_distance = 1.5;
+    double min_initial_forward_projection = 0.05;
+    double max_projected_pitch = 0.55;
+    double max_projected_vertical_jump = 0.25;
+    bool allow_sample_nearest_fallback = false;
   };
 
   explicit ForwardHybridAStar(
@@ -153,6 +163,7 @@ private:
     double path_length = 0.0;
     double heading_change = 0.0;
     double obstacle_penalty = 0.0;
+    double edge_penalty = 0.0;
     double rearward_penalty = 0.0;
   };
 
@@ -171,6 +182,8 @@ private:
     double z_hint,
     std::size_t * ground_index,
     double * projected_z,
+    std::size_t previous_ground_index = std::numeric_limits<std::size_t>::max(),
+    bool allow_nearest_fallback = true,
     ProjectionDiagnostics * diagnostics = nullptr) const;
 
   bool ValidateSample(
@@ -180,7 +193,11 @@ private:
     double z_hint,
     std::size_t * ground_index,
     double * projected_z,
-    double * dgraph_value) const;
+    double * dgraph_value,
+    std::size_t previous_ground_index,
+    bool allow_nearest_fallback) const;
+
+  bool IsGroundIndexInWeightMap(std::size_t ground_index) const;
 
   bool IsProjectedGroundTransitionValid(
     std::size_t from_ground_index,
@@ -244,6 +261,7 @@ private:
   rclcpp::Logger logger_;
   std::string global_frame_;
   Config config_;
+  std::size_t weight_map_size_ = 0;
   std::vector<double> primitive_steers_;
   std::unordered_map<std::size_t, NodeRecord> nodes_;
 };

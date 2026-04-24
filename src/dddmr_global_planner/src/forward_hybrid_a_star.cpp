@@ -61,28 +61,49 @@ void ForwardHybridAStar::SetConfig(const Config & config)
   config_ = config;
   config_.wheelbase = std::max(config_.wheelbase, 1e-3);
   config_.max_steer = std::max(std::abs(config_.max_steer), 1e-3);
+  config_.steer_sample_count = std::clamp(config_.steer_sample_count, 3, 9);
+  if ((config_.steer_sample_count % 2) == 0) {
+    ++config_.steer_sample_count;
+    if (config_.steer_sample_count > 9) {
+      config_.steer_sample_count = 9;
+    }
+  }
   config_.heading_bin_count = std::max(config_.heading_bin_count, 8);
   config_.primitive_length = std::max(config_.primitive_length, 1e-3);
   config_.primitive_step = std::max(config_.primitive_step, 1e-3);
   config_.projection_search_radius = std::max(config_.projection_search_radius, 1e-3);
   config_.goal_position_tolerance = std::max(config_.goal_position_tolerance, 1e-3);
   config_.goal_heading_tolerance = std::max(config_.goal_heading_tolerance, 1e-3);
+  config_.edge_weight_penalty_weight = std::max(config_.edge_weight_penalty_weight, 0.0);
+  config_.edge_weight_safe_threshold = std::max(config_.edge_weight_safe_threshold, 0.0);
+  config_.edge_weight_soft_cap = std::max(config_.edge_weight_soft_cap, 0.0);
+  config_.edge_weight_hard_reject_threshold =
+    std::max(config_.edge_weight_hard_reject_threshold, 0.0);
   config_.turn_side_hysteresis_penalty = std::max(config_.turn_side_hysteresis_penalty, 0.0);
   config_.rearward_check_distance = std::max(config_.rearward_check_distance, 0.0);
   config_.rearward_allowance = std::max(config_.rearward_allowance, 0.0);
   config_.rearward_excursion_penalty = std::max(config_.rearward_excursion_penalty, 0.0);
   config_.rearward_hard_reject_distance = std::max(config_.rearward_hard_reject_distance, 0.0);
+  config_.strict_forward_check_distance = std::max(config_.strict_forward_check_distance, 0.0);
+  config_.min_initial_forward_projection = std::max(config_.min_initial_forward_projection, 0.0);
+  config_.max_projected_pitch = std::clamp(config_.max_projected_pitch, 0.05, 1.4);
+  config_.max_projected_vertical_jump = std::max(config_.max_projected_vertical_jump, 0.02);
   if (config_.rearward_hard_reject_distance < config_.rearward_allowance) {
     config_.rearward_hard_reject_distance = config_.rearward_allowance;
   }
 
   primitive_steers_.clear();
-  primitive_steers_.reserve(5);
-  primitive_steers_.push_back(-config_.max_steer);
-  primitive_steers_.push_back(-0.5 * config_.max_steer);
-  primitive_steers_.push_back(0.0);
-  primitive_steers_.push_back(0.5 * config_.max_steer);
-  primitive_steers_.push_back(config_.max_steer);
+  primitive_steers_.reserve(static_cast<std::size_t>(config_.steer_sample_count));
+  const int midpoint = config_.steer_sample_count / 2;
+  for (int i = 0; i < config_.steer_sample_count; ++i) {
+    if (midpoint == 0) {
+      primitive_steers_.push_back(0.0);
+      continue;
+    }
+    const double normalized =
+      static_cast<double>(i - midpoint) / static_cast<double>(midpoint);
+    primitive_steers_.push_back(normalized * config_.max_steer);
+  }
 }
 
 void ForwardHybridAStar::SetGlobalFrame(const std::string & global_frame)
@@ -205,6 +226,8 @@ bool ForwardHybridAStar::PoseToGroundIndex(
   double z_hint,
   std::size_t * ground_index,
   double * projected_z,
+  std::size_t previous_ground_index,
+  bool allow_nearest_fallback,
   ProjectionDiagnostics * diagnostics) const
 {
   if (ground_index == nullptr || projected_z == nullptr) {
@@ -232,6 +255,76 @@ bool ForwardHybridAStar::PoseToGroundIndex(
     return false;
   }
 
+  const auto select_candidate =
+    [this, x, y, z_hint, previous_ground_index](
+    const std::vector<int> & candidate_indices,
+    const std::vector<float> & candidate_squared_distances,
+    std::size_t * selected_ground_index,
+    float * selected_squared_distance) -> bool {
+      if (selected_ground_index == nullptr || selected_squared_distance == nullptr) {
+        return false;
+      }
+      if (candidate_indices.empty()) {
+        return false;
+      }
+
+      double best_score = std::numeric_limits<double>::infinity();
+      bool found = false;
+      std::size_t best_ground_index = 0;
+      float best_squared_distance = 0.0f;
+
+      for (std::size_t i = 0; i < candidate_indices.size(); ++i) {
+        const int candidate_index_signed = candidate_indices[i];
+        if (candidate_index_signed < 0) {
+          continue;
+        }
+        const std::size_t candidate_index = static_cast<std::size_t>(candidate_index_signed);
+        if (candidate_index >= pcl_ground_->points.size()) {
+          continue;
+        }
+        if (!IsGroundIndexInWeightMap(candidate_index)) {
+          continue;
+        }
+        if (previous_ground_index != kInvalidStateId &&
+          !IsProjectedGroundTransitionValid(previous_ground_index, candidate_index))
+        {
+          continue;
+        }
+
+        const pcl::PointXYZI & candidate_pt = pcl_ground_->points[candidate_index];
+        if (!IsFinite(candidate_pt.x) || !IsFinite(candidate_pt.y) || !IsFinite(candidate_pt.z)) {
+          continue;
+        }
+
+        const double dx = static_cast<double>(candidate_pt.x) - x;
+        const double dy = static_cast<double>(candidate_pt.y) - y;
+        const double dz = static_cast<double>(candidate_pt.z) - z_hint;
+        const double score = dx * dx + dy * dy + 9.0 * dz * dz;
+        if (!std::isfinite(score)) {
+          continue;
+        }
+
+        if (!found || score < best_score) {
+          best_score = score;
+          best_ground_index = candidate_index;
+          if (i < candidate_squared_distances.size()) {
+            best_squared_distance = candidate_squared_distances[i];
+          } else {
+            best_squared_distance = static_cast<float>(dx * dx + dy * dy + dz * dz);
+          }
+          found = true;
+        }
+      }
+
+      if (!found) {
+        return false;
+      }
+
+      *selected_ground_index = best_ground_index;
+      *selected_squared_distance = best_squared_distance;
+      return true;
+    };
+
   pcl::PointXYZI query;
   query.x = static_cast<float>(x);
   query.y = static_cast<float>(y);
@@ -249,47 +342,49 @@ bool ForwardHybridAStar::PoseToGroundIndex(
     point_squared_distances);
 
   if (found_in_radius > 0 && !point_indices.empty() && !point_squared_distances.empty()) {
-    std::size_t closest_idx = 0;
-    for (std::size_t i = 1; i < point_indices.size() && i < point_squared_distances.size(); ++i) {
-      if (point_squared_distances[i] < point_squared_distances[closest_idx]) {
-        closest_idx = i;
-      }
-    }
-
-    const int nearest_index = point_indices[closest_idx];
-    if (nearest_index < 0 || static_cast<std::size_t>(nearest_index) >= pcl_ground_->points.size()) {
-      return false;
-    }
-
-    const pcl::PointXYZI & nearest_pt = pcl_ground_->points[static_cast<std::size_t>(nearest_index)];
-    if (!IsFinite(nearest_pt.z)) {
+    std::size_t selected_ground_index = 0;
+    float selected_squared_distance = 0.0f;
+    if (select_candidate(
+        point_indices,
+        point_squared_distances,
+        &selected_ground_index,
+        &selected_squared_distance))
+    {
+      const pcl::PointXYZI & selected_pt = pcl_ground_->points[selected_ground_index];
+      *ground_index = selected_ground_index;
+      *projected_z = selected_pt.z;
       if (diagnostics != nullptr) {
-        diagnostics->fallback = "invalid_projected_point";
+        diagnostics->success = true;
+        diagnostics->ground_index = *ground_index;
+        diagnostics->ground_x = selected_pt.x;
+        diagnostics->ground_y = selected_pt.y;
+        diagnostics->ground_z = selected_pt.z;
+        diagnostics->projection_distance =
+          Distance3D(x, y, z_hint, selected_pt.x, selected_pt.y, selected_pt.z);
+        diagnostics->fallback = "none";
+        diagnostics->fallback_z_before = z_hint;
+        diagnostics->fallback_z_after = selected_pt.z;
+        diagnostics->fallback_nearest_distance = std::sqrt(selected_squared_distance);
       }
-      return false;
+      return true;
     }
 
-    *ground_index = static_cast<std::size_t>(nearest_index);
-    *projected_z = nearest_pt.z;
     if (diagnostics != nullptr) {
-      diagnostics->success = true;
-      diagnostics->ground_index = *ground_index;
-      diagnostics->ground_x = nearest_pt.x;
-      diagnostics->ground_y = nearest_pt.y;
-      diagnostics->ground_z = nearest_pt.z;
-      diagnostics->projection_distance =
-        Distance3D(x, y, z_hint, nearest_pt.x, nearest_pt.y, nearest_pt.z);
-      diagnostics->fallback = "none";
-      diagnostics->fallback_z_before = z_hint;
-      diagnostics->fallback_z_after = nearest_pt.z;
-      diagnostics->fallback_nearest_distance = std::sqrt(point_squared_distances[closest_idx]);
+      diagnostics->fallback = "radius_candidates_rejected";
     }
-    return true;
+    if (!allow_nearest_fallback) {
+      return false;
+    }
+  } else if (!allow_nearest_fallback) {
+    if (diagnostics != nullptr) {
+      diagnostics->fallback = "radius_not_found";
+    }
+    return false;
   }
 
   point_indices.clear();
   point_squared_distances.clear();
-  if (kdtree_ground_->nearestKSearch(query, 1, point_indices, point_squared_distances) <= 0) {
+  if (kdtree_ground_->nearestKSearch(query, 8, point_indices, point_squared_distances) <= 0) {
     if (diagnostics != nullptr) {
       diagnostics->fallback = "nearest_k_not_found";
     }
@@ -302,15 +397,21 @@ bool ForwardHybridAStar::PoseToGroundIndex(
     return false;
   }
 
-  const int nearest_index = point_indices.front();
-  if (nearest_index < 0 || static_cast<std::size_t>(nearest_index) >= pcl_ground_->points.size()) {
+  std::size_t nearest_index = 0;
+  float nearest_squared_distance = 0.0f;
+  if (!select_candidate(
+      point_indices,
+      point_squared_distances,
+      &nearest_index,
+      &nearest_squared_distance))
+  {
     if (diagnostics != nullptr) {
-      diagnostics->fallback = "nearest_k_invalid_index";
+      diagnostics->fallback = "nearest_k_rejected";
     }
     return false;
   }
 
-  const double nearest_distance = std::sqrt(point_squared_distances.front());
+  const double nearest_distance = std::sqrt(nearest_squared_distance);
   if (!IsFinite(nearest_distance) || nearest_distance > config_.projection_search_radius * 2.0) {
     if (diagnostics != nullptr) {
       diagnostics->fallback = "nearest_k_rejected_too_far";
@@ -319,7 +420,7 @@ bool ForwardHybridAStar::PoseToGroundIndex(
     return false;
   }
 
-  const pcl::PointXYZI & nearest_pt = pcl_ground_->points[static_cast<std::size_t>(nearest_index)];
+  const pcl::PointXYZI & nearest_pt = pcl_ground_->points[nearest_index];
   if (!IsFinite(nearest_pt.z)) {
     if (diagnostics != nullptr) {
       diagnostics->fallback = "nearest_k_invalid_projected_point";
@@ -327,7 +428,7 @@ bool ForwardHybridAStar::PoseToGroundIndex(
     return false;
   }
 
-  *ground_index = static_cast<std::size_t>(nearest_index);
+  *ground_index = nearest_index;
   *projected_z = nearest_pt.z;
   if (diagnostics != nullptr) {
     diagnostics->success = true;
@@ -345,6 +446,11 @@ bool ForwardHybridAStar::PoseToGroundIndex(
   return true;
 }
 
+bool ForwardHybridAStar::IsGroundIndexInWeightMap(std::size_t ground_index) const
+{
+  return weight_map_size_ > 0 && ground_index < weight_map_size_;
+}
+
 bool ForwardHybridAStar::ValidateSample(
   double x,
   double y,
@@ -352,7 +458,9 @@ bool ForwardHybridAStar::ValidateSample(
   double z_hint,
   std::size_t * ground_index,
   double * projected_z,
-  double * dgraph_value) const
+  double * dgraph_value,
+  std::size_t previous_ground_index,
+  bool allow_nearest_fallback) const
 {
   if (ground_index == nullptr || projected_z == nullptr || dgraph_value == nullptr) {
     return false;
@@ -367,11 +475,22 @@ bool ForwardHybridAStar::ValidateSample(
 
   std::size_t projected_ground_index = 0;
   double projected_ground_z = 0.0;
-  if (!PoseToGroundIndex(x, y, z_hint, &projected_ground_index, &projected_ground_z)) {
+  if (!PoseToGroundIndex(
+      x,
+      y,
+      z_hint,
+      &projected_ground_index,
+      &projected_ground_z,
+      previous_ground_index,
+      allow_nearest_fallback))
+  {
     return false;
   }
 
   if (projected_ground_index >= pcl_ground_->points.size()) {
+    return false;
+  }
+  if (!IsGroundIndexInWeightMap(projected_ground_index)) {
     return false;
   }
   const pcl::PointXYZI & projected_pt = pcl_ground_->points[projected_ground_index];
@@ -418,17 +537,37 @@ bool ForwardHybridAStar::IsProjectedGroundTransitionValid(
   if (from_ground_index == to_ground_index) {
     return true;
   }
+  if (!IsGroundIndexInWeightMap(from_ground_index) ||
+    !IsGroundIndexInWeightMap(to_ground_index))
+  {
+    return false;
+  }
 
   const pcl::PointXYZI & from_pt = pcl_ground_->points[from_ground_index];
   const pcl::PointXYZI & to_pt = pcl_ground_->points[to_ground_index];
-  if (!IsFinite(from_pt.x) || !IsFinite(from_pt.y) || !IsFinite(to_pt.x) || !IsFinite(to_pt.y)) {
+  if (!IsFinite(from_pt.x) || !IsFinite(from_pt.y) || !IsFinite(from_pt.z) ||
+    !IsFinite(to_pt.x) || !IsFinite(to_pt.y) || !IsFinite(to_pt.z))
+  {
+    return false;
+  }
+
+  const double dx = static_cast<double>(to_pt.x) - static_cast<double>(from_pt.x);
+  const double dy = static_cast<double>(to_pt.y) - static_cast<double>(from_pt.y);
+  const double dz = std::abs(static_cast<double>(to_pt.z) - static_cast<double>(from_pt.z));
+  const double planar_distance = std::hypot(dx, dy);
+  if (planar_distance < 1e-6) {
+    return dz <= config_.max_projected_vertical_jump;
+  }
+
+  const double max_transition_pitch_tan = std::tan(config_.max_projected_pitch);
+  if (dz > config_.max_projected_vertical_jump + max_transition_pitch_tan * planar_distance) {
     return false;
   }
 
   const double max_projection_jump =
     std::max(config_.projection_search_radius, config_.primitive_step * 3.0);
   return SquaredDistance2D(from_pt.x, from_pt.y, to_pt.x, to_pt.y) <=
-         max_projection_jump * max_projection_jump;
+    max_projection_jump * max_projection_jump;
 }
 
 double ForwardHybridAStar::ComputeHeuristic(
@@ -524,6 +663,7 @@ double ForwardHybridAStar::ComputeTransitionCost(
     (std::abs(steer - parent_steer) / steer_norm);
   cost += config_.heading_change_penalty * primitive_result.heading_change;
   cost += config_.obstacle_penalty_weight * primitive_result.obstacle_penalty;
+  cost += config_.edge_weight_penalty_weight * primitive_result.edge_penalty;
   cost += primitive_result.rearward_penalty;
 
   // Hysteresis for turn-side stability: penalize selecting the opposite side
@@ -576,9 +716,14 @@ bool ForwardHybridAStar::RolloutPrimitive(
   const double inscribed_radius = perception_3d_->getGlobalUtils()->getInscribedRadius();
   const double inflation_descending_rate =
     perception_3d_->getGlobalUtils()->getInflationDescendingRate();
+  const auto shared_data = perception_3d_->getSharedDataPtr();
+  if (shared_data == nullptr || shared_data->sGraph_ptr_ == nullptr) {
+    return false;
+  }
 
   double heading_change = 0.0;
   double obstacle_penalty_sum = 0.0;
+  double edge_penalty_sum = 0.0;
   double rearward_penalty_sum = 0.0;
   std::size_t sample_count = 0;
   std::size_t end_ground_index = parent.ground_index;
@@ -604,12 +749,30 @@ bool ForwardHybridAStar::RolloutPrimitive(
     double sample_dgraph = 0.0;
     if (!ValidateSample(
         x, y, yaw, z,
-        &sample_ground_index, &sample_z, &sample_dgraph))
+        &sample_ground_index, &sample_z, &sample_dgraph,
+        previous_ground_index,
+        config_.allow_sample_nearest_fallback))
     {
       return false;
     }
-    if (!IsProjectedGroundTransitionValid(previous_ground_index, sample_ground_index)) {
+    const double sample_edge_weight = std::max(
+      0.0,
+      static_cast<double>(shared_data->sGraph_ptr_->getNodeWeight(
+          static_cast<unsigned int>(sample_ground_index))));
+    if (!IsFinite(sample_edge_weight)) {
       return false;
+    }
+    if (config_.edge_weight_hard_reject_threshold > 0.0 &&
+      sample_edge_weight >= config_.edge_weight_hard_reject_threshold)
+    {
+      return false;
+    }
+    double edge_over = sample_edge_weight - config_.edge_weight_safe_threshold;
+    if (edge_over > 0.0) {
+      if (config_.edge_weight_soft_cap > 0.0) {
+        edge_over = std::min(edge_over, config_.edge_weight_soft_cap);
+      }
+      edge_penalty_sum += edge_over;
     }
 
     // Rearward excursion is evaluated in the current planning-start frame.
@@ -620,6 +783,11 @@ bool ForwardHybridAStar::RolloutPrimitive(
     if (distance_from_start <= config_.rearward_check_distance) {
       const double x_local =
         std::cos(planning_start_yaw) * dx_start + std::sin(planning_start_yaw) * dy_start;
+      if (distance_from_start <= config_.strict_forward_check_distance &&
+        x_local < config_.min_initial_forward_projection)
+      {
+        return false;
+      }
       if (x_local < -config_.rearward_hard_reject_distance) {
         return false;
       }
@@ -656,6 +824,8 @@ bool ForwardHybridAStar::RolloutPrimitive(
   primitive_result->heading_change = heading_change;
   primitive_result->obstacle_penalty =
     sample_count > 0 ? obstacle_penalty_sum / static_cast<double>(sample_count) : 0.0;
+  primitive_result->edge_penalty =
+    sample_count > 0 ? edge_penalty_sum / static_cast<double>(sample_count) : 0.0;
   primitive_result->rearward_penalty =
     sample_count > 0 ? rearward_penalty_sum / static_cast<double>(sample_count) : 0.0;
 
@@ -952,6 +1122,16 @@ bool ForwardHybridAStar::MakePlan(
     RCLCPP_WARN(logger_, "Hybrid A*: ground point cloud is empty.");
     return false;
   }
+  weight_map_size_ = 0;
+  const auto shared_data = perception_3d_->getSharedDataPtr();
+  if (shared_data != nullptr && shared_data->sGraph_ptr_ != nullptr) {
+    weight_map_size_ =
+      static_cast<std::size_t>(shared_data->sGraph_ptr_->getNodeWeightSize());
+  }
+  if (weight_map_size_ == 0) {
+    RCLCPP_WARN(logger_, "Hybrid A*: ground weight map is empty, reject planning request.");
+    return false;
+  }
 
   if (!IsFinite(start.pose.position.x) || !IsFinite(start.pose.position.y) ||
     !IsFinite(start.pose.position.z) || !IsFinite(goal.pose.position.x) ||
@@ -963,9 +1143,8 @@ bool ForwardHybridAStar::MakePlan(
 
   double start_yaw = 0.0;
   if (!ExtractYaw(start, &start_yaw)) {
-    start_yaw = std::atan2(
-      goal.pose.position.y - start.pose.position.y,
-      goal.pose.position.x - start.pose.position.x);
+    RCLCPP_WARN(logger_, "Hybrid A*: start yaw is invalid.");
+    return false;
   }
   start_yaw = NormalizeAngle(start_yaw);
 
@@ -993,6 +1172,8 @@ bool ForwardHybridAStar::MakePlan(
       start.pose.position.z,
       &start_ground_index,
       &start_projected_z,
+      kInvalidStateId,
+      true,
       start_projection))
   {
     if (!debug_label.empty()) {
@@ -1012,6 +1193,8 @@ bool ForwardHybridAStar::MakePlan(
       goal.pose.position.z,
       &goal_ground_index,
       &goal_projected_z,
+      kInvalidStateId,
+      true,
       goal_projection))
   {
     if (!debug_label.empty()) {

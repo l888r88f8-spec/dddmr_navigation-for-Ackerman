@@ -1,7 +1,7 @@
 p2p_move_base:
   ros__parameters:
     orchestrator_frequency: 15.0                             # goal 调度循环频率，越高状态切换和控制接口消费越及时
-    route_request_patience: 10.0                             # route 层允许阻塞的最长时间
+    route_request_patience: 45.0                             # route 层允许阻塞的最长时间
     oscillation_distance: 5.0                                # 超过该位移则认为已经脱离原地振荡
     oscillation_angle: 1.0                                   # 超过该转角则认为已经脱离原地振荡
     oscillation_patience: 15.0                               # 振荡状态容忍时间，过长会触发恢复/重规划
@@ -20,33 +20,34 @@ global_plan_manager:
 
 global_planner:
   ros__parameters:
-    turning_weight: 0.1                                     # 全局路径转折惩罚，越大越偏向平滑路径
+    turning_weight: 0.1                                      # 全局路径转折惩罚，越大越偏向平滑路径
     enable_detail_log: false
     a_star_expanding_radius: 0.5
-    raw_route_backend: "graph_a_star"                       # raw_route 默认使用图搜索 A*；跨桥/上下层长距离优先走这条成熟链路
-    use_forward_hybrid_astar: false                          # 仅控制 raw_route 是否可显式切到 ForwardHybridAStar
+    raw_route_backend: "forward_hybrid_astar"                # raw_route default: graph_a_star (forward_hybrid_astar)
+    use_forward_hybrid_astar: true                           # 仅控制 raw_route 是否可显式切到 ForwardHybridAStar
     enable_direct_path_shortcut: false
     graph_path_smoothing:
-      enable: true                                           # graph A* 输出后做受限平滑，提升 Ackermann 可跟踪性
-      iterations: 8                                          # 迭代次数，越大越平滑
+      enable: false                                          # graph A* 输出后做受限平滑，提升 Ackermann 可跟踪性
+      iterations: 16                                         # 迭代次数，越大越平滑
       weight: 0.35                                           # 单次平滑强度，建议保持 0.2~0.5
       max_shift: 0.25                                        # 每个点相对原始图路径最大横向偏移，避免跨越桥边/坡边
       lock_start_distance: 1.2                               # 起点附近锁定，不改首段起步几何
       lock_goal_distance: 1.2                                # 终点附近锁定，不改末段接近几何
       ground_search_radius: 0.8                              # 候选点需在地面点附近，抑制“漂离可行域”
     entry_connector:
-      enable: true
-      backend: "forward_hybrid_astar"                       # raw_route 走 graph_a_star 时，起步接入仍默认使用 ForwardHybridAStar
-      min_anchor_distance: 2.5
-      max_anchor_distance: 4.0
-      force_goal_heading: true
+      enable: false
+      backend: "forward_hybrid_astar"                        # raw_route default: graph_a_star (ForwardHybridAStar)
+      min_anchor_distance: 3.0
+      max_anchor_distance: 5.0
+      force_goal_heading: false
     hybrid_astar:
-      wheelbase: 0.549185
-      max_steer: 0.69
-      heading_bin_count: 72
-      primitive_length: 0.6
-      primitive_step: 0.05
-      projection_search_radius: 0.6
+      wheelbase: 0.46
+      max_steer: 0.31
+      steer_sample_count: 3
+      heading_bin_count: 32
+      primitive_length: 0.8
+      primitive_step: 0.1
+      projection_search_radius: 0.4
       goal_position_tolerance: 0.4
       goal_heading_tolerance: 0.35
       use_goal_heading: false
@@ -54,12 +55,21 @@ global_planner:
       steering_change_penalty: 0.3
       heading_change_penalty: 0.4
       obstacle_penalty_weight: 1.0
-      heuristic_heading_weight: 0.2
+      edge_weight_penalty_weight: 6.0
+      edge_weight_safe_threshold: 1.2
+      edge_weight_soft_cap: 12.0
+      edge_weight_hard_reject_threshold: 0.0
+      heuristic_heading_weight: 0.35
       turn_side_hysteresis_penalty: 0.8
-      rearward_check_distance: 2.0
+      rearward_check_distance: 4.0
       rearward_allowance: 0.0
       rearward_excursion_penalty: 8.0
-      rearward_hard_reject_distance: 0.08
+      rearward_hard_reject_distance: 0.0
+      strict_forward_check_distance: 0.0
+      min_initial_forward_projection: 0.0
+      max_projected_pitch: 0.55
+      max_projected_vertical_jump: 0.25
+      allow_sample_nearest_fallback: false
 
 # get_dwa_plan now acts as reconnect service (Connector layer), not default route source.
 dynamic_window_aware_global_planner:
@@ -179,15 +189,18 @@ local_planner:
       max_lateral_accel: 1.5                                 # 曲率调速的横向加速度上限
       prediction_horizon_sec: 1.5                            # RPP 单一候选轨迹的前向预测时长
       prediction_step_sec: 0.1                               # RPP 候选轨迹离散步长
-      wheelbase: 0.549185                                    # Ackermann 轴距，用于曲率上限
-      max_steer: 0.69                                        # 最大转角，用于曲率上限
+      wheelbase: 0.46                                        # Ackermann 轴距，用于曲率上限（数据手册 46cm）
+      max_steer: 0.31                                        # 等效自行车模型最大转角（由内轮 22deg + 轮距 0.55m 折算，留有执行裕量）
       max_angular_velocity: 1.2                              # 输出角速度上限
+      avoidance_angular_samples: 5                           # RPP 避障候选曲率采样数（奇数），越大越容易绕障但更耗时
+      avoidance_angular_span_ratio: 1.0                      # 候选曲率搜索范围占最大曲率的比例
+      avoidance_prefer_nominal_weight: 0.2                   # 偏离名义跟踪曲率的惩罚，越大越保守贴线
     debug_publish:
-      robot_cuboid: false                                    # 调试车体包络，可视化时再打开
-      aggregated_pc: false                                   # 聚合障碍点云很重，默认关闭
+      robot_cuboid: true                                    # 调试车体包络，可视化时再打开
+      aggregated_pc: true                                    # 聚合障碍点云很重，默认关闭
       prune_plan: false                                      # 裁剪后的局部路径，默认关闭
       accepted_trajectory: false                             # 所有通过筛选的轨迹，默认关闭
-      best_trajectory: true                                 # 最优轨迹，默认关闭
+      best_trajectory: true                                  # 最优轨迹，默认关闭
       all_trajectories: false                                # 全部采样轨迹最重，默认关闭
     # 碰撞约束
     cuboid:
@@ -208,7 +221,7 @@ perception_3d_local:
     max_obstacle_distance: 9999.0
     inscribed_radius: 0.5                                    # 车体内切安全半径，越大越保守
     inflation_descending_rate: 2.0
-    inflation_radius: 0.5                                    # 障碍物在感知层的膨胀范围，越大越早避障
+    inflation_radius: 0.8                                    # 障碍物在感知层的膨胀范围，越大越早避障
     sensors_collected_frequency: 10.0                        # 局部感知融合频率
     plugins: ["map", "lidar"]
     map:
@@ -230,7 +243,7 @@ perception_3d_local:
       scan_effective_negative_end: 30.0
       xy_resolution: 0.05
       height_resolution: 0.05
-      min_obstacle_height: -0.30
+      min_obstacle_height: -0.12
       marking_height: 2.0
       perception_window_size: 8.0 # keep the sensed local obstacle window aligned with the longer Ackermann rollout horizon # 局部避障感知窗口，越大越早看到远处障碍
       segmentation_ignore_ratio: 0.5 #f a segmentation match static pc with this ratio, we ignore it. ex: a wall
@@ -279,7 +292,7 @@ trajectory_generators:
     
     ackermann_simple:
       plugin: "trajectory_generators::AckermannSimpleTrajectoryGeneratorTheory"
-      max_vel_x: 1.0                                         # 允许的最大前进速度
+      max_vel_x: 1.0                                         # 允许的最大前进速度（数据手册上限）
       min_vel_x: 0.05                                        # 最小采样前进速度，越小越容易低速贴近目标
       max_vel_theta: 5.0                                     # 角速度上限，实际还会被阿克曼转角几何进一步限制
       min_vel_theta: 0.0
@@ -290,8 +303,8 @@ trajectory_generators:
       wheel_diameter: 0.16
       gear_ratio: 1.0
       robot_radius: 0.25
-      wheelbase: 0.549185                                    # 轴距，决定最小转弯半径
-      max_steer: 0.69                                        # 最大前轮转角，决定几何可实现的最大曲率
+      wheelbase: 0.46                                        # 轴距，决定最小转弯半径（数据手册 46cm）
+      max_steer: 0.31                                        # 等效自行车模型最大转角（由内轮 22deg + 轮距 0.55m 折算，留有执行裕量）
       
       controller_frequency: 15.0                             # 轨迹生成采样频率
       sim_time: 1.5                                          # 单条轨迹向前仿真的时长，越长越早开始考虑绕障/转向
@@ -319,7 +332,7 @@ mpc_critics:
       trajectory_generator: ackermann_simple
       weight: 1.0                                            # 碰撞代价总权重
       search_radius: 3.0                                     # 检查每个轨迹点附近障碍物的搜索半径
-      clearance_penalty_distance: 0.5                        # 与障碍距离小于该值就开始惩罚，越大越早避障
+      clearance_penalty_distance: 1.0                        # 与障碍距离小于该值就开始惩罚，越大越早避障
       clearance_weight: 1.5                                  # 近障碍惩罚强度，越大越保守
     prefer_forward_speed:
       plugin: "mpc_critics::PreferForwardSpeedModel"

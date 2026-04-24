@@ -256,6 +256,10 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   this->get_parameter("hybrid_astar.wheelbase", forward_hybrid_astar_config_.wheelbase);
   declare_parameter("hybrid_astar.max_steer", rclcpp::ParameterValue(0.69));
   this->get_parameter("hybrid_astar.max_steer", forward_hybrid_astar_config_.max_steer);
+  declare_parameter("hybrid_astar.steer_sample_count", rclcpp::ParameterValue(5));
+  this->get_parameter(
+    "hybrid_astar.steer_sample_count",
+    forward_hybrid_astar_config_.steer_sample_count);
   declare_parameter("hybrid_astar.heading_bin_count", rclcpp::ParameterValue(72));
   this->get_parameter("hybrid_astar.heading_bin_count", forward_hybrid_astar_config_.heading_bin_count);
   declare_parameter("hybrid_astar.primitive_length", rclcpp::ParameterValue(0.6));
@@ -278,6 +282,24 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   this->get_parameter("hybrid_astar.heading_change_penalty", forward_hybrid_astar_config_.heading_change_penalty);
   declare_parameter("hybrid_astar.obstacle_penalty_weight", rclcpp::ParameterValue(1.0));
   this->get_parameter("hybrid_astar.obstacle_penalty_weight", forward_hybrid_astar_config_.obstacle_penalty_weight);
+  declare_parameter("hybrid_astar.edge_weight_penalty_weight", rclcpp::ParameterValue(1.0));
+  this->get_parameter(
+    "hybrid_astar.edge_weight_penalty_weight",
+    forward_hybrid_astar_config_.edge_weight_penalty_weight);
+  declare_parameter("hybrid_astar.edge_weight_safe_threshold", rclcpp::ParameterValue(1.0));
+  this->get_parameter(
+    "hybrid_astar.edge_weight_safe_threshold",
+    forward_hybrid_astar_config_.edge_weight_safe_threshold);
+  declare_parameter("hybrid_astar.edge_weight_soft_cap", rclcpp::ParameterValue(8.0));
+  this->get_parameter(
+    "hybrid_astar.edge_weight_soft_cap",
+    forward_hybrid_astar_config_.edge_weight_soft_cap);
+  declare_parameter(
+    "hybrid_astar.edge_weight_hard_reject_threshold",
+    rclcpp::ParameterValue(0.0));
+  this->get_parameter(
+    "hybrid_astar.edge_weight_hard_reject_threshold",
+    forward_hybrid_astar_config_.edge_weight_hard_reject_threshold);
   declare_parameter("hybrid_astar.heuristic_heading_weight", rclcpp::ParameterValue(0.2));
   this->get_parameter("hybrid_astar.heuristic_heading_weight", forward_hybrid_astar_config_.heuristic_heading_weight);
   declare_parameter("hybrid_astar.turn_side_hysteresis_penalty", rclcpp::ParameterValue(0.8));
@@ -292,12 +314,35 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   this->get_parameter(
     "hybrid_astar.rearward_hard_reject_distance",
     forward_hybrid_astar_config_.rearward_hard_reject_distance);
+  declare_parameter("hybrid_astar.strict_forward_check_distance", rclcpp::ParameterValue(1.5));
+  this->get_parameter(
+    "hybrid_astar.strict_forward_check_distance",
+    forward_hybrid_astar_config_.strict_forward_check_distance);
+  declare_parameter("hybrid_astar.min_initial_forward_projection", rclcpp::ParameterValue(0.05));
+  this->get_parameter(
+    "hybrid_astar.min_initial_forward_projection",
+    forward_hybrid_astar_config_.min_initial_forward_projection);
+  declare_parameter("hybrid_astar.max_projected_pitch", rclcpp::ParameterValue(0.55));
+  this->get_parameter(
+    "hybrid_astar.max_projected_pitch",
+    forward_hybrid_astar_config_.max_projected_pitch);
+  declare_parameter("hybrid_astar.max_projected_vertical_jump", rclcpp::ParameterValue(0.25));
+  this->get_parameter(
+    "hybrid_astar.max_projected_vertical_jump",
+    forward_hybrid_astar_config_.max_projected_vertical_jump);
+  declare_parameter(
+    "hybrid_astar.allow_sample_nearest_fallback",
+    rclcpp::ParameterValue(false));
+  this->get_parameter(
+    "hybrid_astar.allow_sample_nearest_fallback",
+    forward_hybrid_astar_config_.allow_sample_nearest_fallback);
 
   RCLCPP_DEBUG(
     this->get_logger(),
-    "hybrid_astar: wheelbase=%.6f max_steer=%.3f heading_bins=%d primitive_len=%.2f primitive_step=%.2f",
+    "hybrid_astar: wheelbase=%.6f max_steer=%.3f steer_samples=%d heading_bins=%d primitive_len=%.2f primitive_step=%.2f",
     forward_hybrid_astar_config_.wheelbase,
     forward_hybrid_astar_config_.max_steer,
+    forward_hybrid_astar_config_.steer_sample_count,
     forward_hybrid_astar_config_.heading_bin_count,
     forward_hybrid_astar_config_.primitive_length,
     forward_hybrid_astar_config_.primitive_step);
@@ -308,6 +353,18 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
     forward_hybrid_astar_config_.goal_heading_tolerance,
     forward_hybrid_astar_config_.use_goal_heading,
     forward_hybrid_astar_config_.projection_search_radius);
+  RCLCPP_DEBUG(
+    this->get_logger(),
+    "hybrid_astar: strict_forward_check_distance=%.2f min_initial_forward_projection=%.2f max_projected_pitch=%.2f max_projected_vertical_jump=%.2f allow_sample_nearest_fallback=%d edge_weight_penalty_weight=%.2f edge_weight_safe_threshold=%.2f edge_weight_soft_cap=%.2f edge_weight_hard_reject_threshold=%.2f",
+    forward_hybrid_astar_config_.strict_forward_check_distance,
+    forward_hybrid_astar_config_.min_initial_forward_projection,
+    forward_hybrid_astar_config_.max_projected_pitch,
+    forward_hybrid_astar_config_.max_projected_vertical_jump,
+    forward_hybrid_astar_config_.allow_sample_nearest_fallback ? 1 : 0,
+    forward_hybrid_astar_config_.edge_weight_penalty_weight,
+    forward_hybrid_astar_config_.edge_weight_safe_threshold,
+    forward_hybrid_astar_config_.edge_weight_soft_cap,
+    forward_hybrid_astar_config_.edge_weight_hard_reject_threshold);
 
   declare_parameter("use_pre_graph", rclcpp::ParameterValue(false));
   this->get_parameter("use_pre_graph", use_pre_graph_);
