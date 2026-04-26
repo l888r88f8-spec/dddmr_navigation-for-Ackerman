@@ -225,6 +225,8 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       std::size_t max_heading_reference_stale_cycles_;
       std::size_t max_prune_failure_cycles_;
       double cached_pruned_path_timeout_sec_;
+      bool enable_prune_deviation_hard_fail_;
+      bool allow_offroute_anchor_recovery_;
 
       /*Timer for robust system design*/
       double prune_plane_timeout_;

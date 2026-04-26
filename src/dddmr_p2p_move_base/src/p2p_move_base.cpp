@@ -40,7 +40,6 @@ P2PMoveBase::P2PMoveBase(std::string name): Node(name)
   is_recoverying_ = false;
   is_recoverying_succeed_ = false;
   terminal_goal_reason_ = "goal failed";
-  current_route_has_entry_connector_ = true;
   current_route_result_class_ = "unknown";
 }
 
@@ -262,14 +261,12 @@ bool P2PMoveBase::syncRouteReferenceFromManager(const std::string & consumer_lab
   std::size_t route_version = 0;
   std::size_t goal_seq = 0;
   std::string source_label;
-  bool has_entry_connector = true;
   std::string route_result_class = "unknown";
   route_manager_->copyRoute(
     route,
     &route_version,
     &goal_seq,
     &source_label,
-    &has_entry_connector,
     &route_result_class);
   if(route.empty()){
     RCLCPP_WARN(
@@ -279,18 +276,16 @@ bool P2PMoveBase::syncRouteReferenceFromManager(const std::string & consumer_lab
     return false;
   }
 
-  current_route_has_entry_connector_ = has_entry_connector;
   current_route_result_class_ = route_result_class;
   route_controller_->setRoute(route, route_version, goal_seq, source_label);
   RCLCPP_DEBUG_THROTTLE(
     this->get_logger(), *clock_, 2000,
-    "route reference synced (%s), route_version=%zu, goal_seq=%zu, source=%s, result_class=%s, has_entry_connector=%d, poses=%zu",
+    "route reference synced (%s), route_version=%zu, goal_seq=%zu, source=%s, result_class=%s, poses=%zu",
     consumer_label.c_str(),
     route_version,
     goal_seq,
     source_label.c_str(),
     route_result_class.c_str(),
-    has_entry_connector ? 1 : 0,
     route.size());
   return true;
 }
@@ -316,7 +311,6 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
   route_manager_->setGoal(FSM_->current_goal_);
   route_manager_->resume();
   terminal_goal_reason_ = "goal failed";
-  current_route_has_entry_connector_ = true;
   current_route_result_class_ = "unknown";
 
   while(rclcpp::ok()){
@@ -501,12 +495,8 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
         (clock_->now() - FSM_->last_valid_control_).seconds() > FSM_->controller_patience_;
       if(planner_state == dddmr_sys_core::PlannerState::PRUNE_PLAN_FAIL){
         if(patience_exceeded){
-          const std::string failure_type =
-            current_route_has_entry_connector_ ?
-            "startup_front_unreachable" :
-            "startup_connector_missing";
           return start_recovery_or_abort(
-            failure_type + ": local reference prune failed during startup");
+            "startup_front_unreachable: local reference prune failed during startup");
         }
         publishZeroVelocity();
         return false;
@@ -611,13 +601,9 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
     }
 
     if(startup_status == dddmr_sys_core::RouteStartupStatus::kFrontUnreachable){
-      const std::string startup_failure_class =
-        current_route_has_entry_connector_ ?
-        "startup_front_unreachable" :
-        "startup_connector_missing";
       const std::string reason = startup_detail.empty() ?
-        startup_failure_class :
-        startup_failure_class + ": " + startup_detail;
+        "startup_front_unreachable" :
+        "startup_front_unreachable: " + startup_detail;
       return start_recovery_or_abort(reason);
     }
 

@@ -85,6 +85,8 @@ Local_Planner::Local_Planner(const std::string& name): Node(name)
   rpp_max_angular_velocity_ = 1.2;
   route_start_front_reach_distance_ = 1.2;
   route_start_front_projection_threshold_ = 0.05;
+  enable_prune_deviation_hard_fail_ = true;
+  allow_offroute_anchor_recovery_ = false;
 }
 
 void Local_Planner::initial(
@@ -226,6 +228,20 @@ void Local_Planner::initial(
   this->get_parameter("max_prune_failure_cycles", max_prune_failure_cycles_);
   RCLCPP_DEBUG(this->get_logger(), "max_prune_failure_cycles: %zu", max_prune_failure_cycles_);
 
+  declare_parameter("enable_prune_deviation_hard_fail", rclcpp::ParameterValue(true));
+  this->get_parameter("enable_prune_deviation_hard_fail", enable_prune_deviation_hard_fail_);
+  RCLCPP_DEBUG(
+    this->get_logger(),
+    "enable_prune_deviation_hard_fail: %d",
+    enable_prune_deviation_hard_fail_ ? 1 : 0);
+
+  declare_parameter("allow_offroute_anchor_recovery", rclcpp::ParameterValue(false));
+  this->get_parameter("allow_offroute_anchor_recovery", allow_offroute_anchor_recovery_);
+  RCLCPP_DEBUG(
+    this->get_logger(),
+    "allow_offroute_anchor_recovery: %d",
+    allow_offroute_anchor_recovery_ ? 1 : 0);
+
   declare_parameter("cached_pruned_path_timeout_sec", rclcpp::ParameterValue(0.8));
   this->get_parameter("cached_pruned_path_timeout_sec", cached_pruned_path_timeout_sec_);
   RCLCPP_DEBUG(this->get_logger(), "cached_pruned_path_timeout_sec: %.2f", cached_pruned_path_timeout_sec_);
@@ -279,42 +295,114 @@ void Local_Planner::initial(
   }
   RCLCPP_DEBUG(this->get_logger(), "controller_backend: %s", controller_backend_.c_str());
 
-  declare_parameter("rpp.critic_trajectory_generator_name", rclcpp::ParameterValue("ackermann_simple"));
-  this->get_parameter("rpp.critic_trajectory_generator_name", rpp_critic_trajectory_generator_name_);
-  declare_parameter("rpp.nominal_linear_speed", rclcpp::ParameterValue(1.0));
-  this->get_parameter("rpp.nominal_linear_speed", rpp_nominal_linear_speed_);
-  declare_parameter("rpp.min_linear_speed", rclcpp::ParameterValue(0.15));
-  this->get_parameter("rpp.min_linear_speed", rpp_min_linear_speed_);
-  declare_parameter("rpp.alignment_linear_speed", rclcpp::ParameterValue(0.25));
-  this->get_parameter("rpp.alignment_linear_speed", rpp_alignment_linear_speed_);
-  declare_parameter("rpp.goal_slowdown_distance", rclcpp::ParameterValue(1.5));
-  this->get_parameter("rpp.goal_slowdown_distance", rpp_goal_slowdown_distance_);
-  declare_parameter("rpp.min_lookahead_distance", rclcpp::ParameterValue(1.0));
-  this->get_parameter("rpp.min_lookahead_distance", rpp_min_lookahead_distance_);
-  declare_parameter("rpp.max_lookahead_distance", rclcpp::ParameterValue(3.0));
-  this->get_parameter("rpp.max_lookahead_distance", rpp_max_lookahead_distance_);
-  declare_parameter("rpp.lookahead_time", rclcpp::ParameterValue(1.5));
-  this->get_parameter("rpp.lookahead_time", rpp_lookahead_time_);
-  declare_parameter("rpp.alignment_lookahead_distance", rclcpp::ParameterValue(1.0));
-  this->get_parameter("rpp.alignment_lookahead_distance", rpp_alignment_lookahead_distance_);
-  declare_parameter("rpp.max_lateral_accel", rclcpp::ParameterValue(1.5));
-  this->get_parameter("rpp.max_lateral_accel", rpp_max_lateral_accel_);
-  declare_parameter("rpp.prediction_horizon_sec", rclcpp::ParameterValue(1.5));
-  this->get_parameter("rpp.prediction_horizon_sec", rpp_prediction_horizon_sec_);
-  declare_parameter("rpp.prediction_step_sec", rclcpp::ParameterValue(0.1));
-  this->get_parameter("rpp.prediction_step_sec", rpp_prediction_step_sec_);
-  declare_parameter("rpp.wheelbase", rclcpp::ParameterValue(0.55));
-  this->get_parameter("rpp.wheelbase", rpp_wheelbase_);
-  declare_parameter("rpp.max_steer", rclcpp::ParameterValue(0.69));
-  this->get_parameter("rpp.max_steer", rpp_max_steer_);
-  declare_parameter("rpp.max_angular_velocity", rclcpp::ParameterValue(1.2));
-  this->get_parameter("rpp.max_angular_velocity", rpp_max_angular_velocity_);
-  declare_parameter("rpp.avoidance_angular_samples", rclcpp::ParameterValue(7));
-  this->get_parameter("rpp.avoidance_angular_samples", rpp_avoidance_angular_samples_);
-  declare_parameter("rpp.avoidance_angular_span_ratio", rclcpp::ParameterValue(1.0));
-  this->get_parameter("rpp.avoidance_angular_span_ratio", rpp_avoidance_angular_span_ratio_);
-  declare_parameter("rpp.avoidance_prefer_nominal_weight", rclcpp::ParameterValue(0.2));
-  this->get_parameter("rpp.avoidance_prefer_nominal_weight", rpp_avoidance_prefer_nominal_weight_);
+  declare_parameter(
+    "regulated_pure_pursuit.critic_trajectory_generator_name",
+    rclcpp::ParameterValue("ackermann_simple"));
+  this->get_parameter(
+    "regulated_pure_pursuit.critic_trajectory_generator_name",
+    rpp_critic_trajectory_generator_name_);
+  declare_parameter(
+    "regulated_pure_pursuit.nominal_linear_speed",
+    rclcpp::ParameterValue(1.0));
+  this->get_parameter(
+    "regulated_pure_pursuit.nominal_linear_speed",
+    rpp_nominal_linear_speed_);
+  declare_parameter(
+    "regulated_pure_pursuit.min_linear_speed",
+    rclcpp::ParameterValue(0.15));
+  this->get_parameter(
+    "regulated_pure_pursuit.min_linear_speed",
+    rpp_min_linear_speed_);
+  declare_parameter(
+    "regulated_pure_pursuit.alignment_linear_speed",
+    rclcpp::ParameterValue(0.25));
+  this->get_parameter(
+    "regulated_pure_pursuit.alignment_linear_speed",
+    rpp_alignment_linear_speed_);
+  declare_parameter(
+    "regulated_pure_pursuit.goal_slowdown_distance",
+    rclcpp::ParameterValue(1.5));
+  this->get_parameter(
+    "regulated_pure_pursuit.goal_slowdown_distance",
+    rpp_goal_slowdown_distance_);
+  declare_parameter(
+    "regulated_pure_pursuit.min_lookahead_distance",
+    rclcpp::ParameterValue(1.0));
+  this->get_parameter(
+    "regulated_pure_pursuit.min_lookahead_distance",
+    rpp_min_lookahead_distance_);
+  declare_parameter(
+    "regulated_pure_pursuit.max_lookahead_distance",
+    rclcpp::ParameterValue(3.0));
+  this->get_parameter(
+    "regulated_pure_pursuit.max_lookahead_distance",
+    rpp_max_lookahead_distance_);
+  declare_parameter(
+    "regulated_pure_pursuit.lookahead_time",
+    rclcpp::ParameterValue(1.5));
+  this->get_parameter(
+    "regulated_pure_pursuit.lookahead_time",
+    rpp_lookahead_time_);
+  declare_parameter(
+    "regulated_pure_pursuit.alignment_lookahead_distance",
+    rclcpp::ParameterValue(1.0));
+  this->get_parameter(
+    "regulated_pure_pursuit.alignment_lookahead_distance",
+    rpp_alignment_lookahead_distance_);
+  declare_parameter(
+    "regulated_pure_pursuit.max_lateral_accel",
+    rclcpp::ParameterValue(1.5));
+  this->get_parameter(
+    "regulated_pure_pursuit.max_lateral_accel",
+    rpp_max_lateral_accel_);
+  declare_parameter(
+    "regulated_pure_pursuit.prediction_horizon_sec",
+    rclcpp::ParameterValue(1.5));
+  this->get_parameter(
+    "regulated_pure_pursuit.prediction_horizon_sec",
+    rpp_prediction_horizon_sec_);
+  declare_parameter(
+    "regulated_pure_pursuit.prediction_step_sec",
+    rclcpp::ParameterValue(0.1));
+  this->get_parameter(
+    "regulated_pure_pursuit.prediction_step_sec",
+    rpp_prediction_step_sec_);
+  declare_parameter(
+    "regulated_pure_pursuit.wheelbase",
+    rclcpp::ParameterValue(0.55));
+  this->get_parameter(
+    "regulated_pure_pursuit.wheelbase",
+    rpp_wheelbase_);
+  declare_parameter(
+    "regulated_pure_pursuit.max_steer",
+    rclcpp::ParameterValue(0.69));
+  this->get_parameter(
+    "regulated_pure_pursuit.max_steer",
+    rpp_max_steer_);
+  declare_parameter(
+    "regulated_pure_pursuit.max_angular_velocity",
+    rclcpp::ParameterValue(1.2));
+  this->get_parameter(
+    "regulated_pure_pursuit.max_angular_velocity",
+    rpp_max_angular_velocity_);
+  declare_parameter(
+    "regulated_pure_pursuit.avoidance_angular_samples",
+    rclcpp::ParameterValue(7));
+  this->get_parameter(
+    "regulated_pure_pursuit.avoidance_angular_samples",
+    rpp_avoidance_angular_samples_);
+  declare_parameter(
+    "regulated_pure_pursuit.avoidance_angular_span_ratio",
+    rclcpp::ParameterValue(1.0));
+  this->get_parameter(
+    "regulated_pure_pursuit.avoidance_angular_span_ratio",
+    rpp_avoidance_angular_span_ratio_);
+  declare_parameter(
+    "regulated_pure_pursuit.avoidance_prefer_nominal_weight",
+    rclcpp::ParameterValue(0.2));
+  this->get_parameter(
+    "regulated_pure_pursuit.avoidance_prefer_nominal_weight",
+    rpp_avoidance_prefer_nominal_weight_);
   rpp_avoidance_angular_samples_ = std::max(1, rpp_avoidance_angular_samples_);
   if((rpp_avoidance_angular_samples_ % 2) == 0){
     ++rpp_avoidance_angular_samples_;
@@ -322,24 +410,78 @@ void Local_Planner::initial(
   rpp_avoidance_angular_span_ratio_ = std::clamp(rpp_avoidance_angular_span_ratio_, 0.0, 1.0);
   rpp_avoidance_prefer_nominal_weight_ = std::max(0.0, rpp_avoidance_prefer_nominal_weight_);
   if(controller_backend_ == "regulated_pure_pursuit"){
-    RCLCPP_DEBUG(this->get_logger(), "rpp.critic_trajectory_generator_name: %s", rpp_critic_trajectory_generator_name_.c_str());
-    RCLCPP_DEBUG(this->get_logger(), "rpp.nominal_linear_speed: %.2f", rpp_nominal_linear_speed_);
-    RCLCPP_DEBUG(this->get_logger(), "rpp.min_linear_speed: %.2f", rpp_min_linear_speed_);
-    RCLCPP_DEBUG(this->get_logger(), "rpp.alignment_linear_speed: %.2f", rpp_alignment_linear_speed_);
-    RCLCPP_DEBUG(this->get_logger(), "rpp.goal_slowdown_distance: %.2f", rpp_goal_slowdown_distance_);
-    RCLCPP_DEBUG(this->get_logger(), "rpp.min_lookahead_distance: %.2f", rpp_min_lookahead_distance_);
-    RCLCPP_DEBUG(this->get_logger(), "rpp.max_lookahead_distance: %.2f", rpp_max_lookahead_distance_);
-    RCLCPP_DEBUG(this->get_logger(), "rpp.lookahead_time: %.2f", rpp_lookahead_time_);
-    RCLCPP_DEBUG(this->get_logger(), "rpp.alignment_lookahead_distance: %.2f", rpp_alignment_lookahead_distance_);
-    RCLCPP_DEBUG(this->get_logger(), "rpp.max_lateral_accel: %.2f", rpp_max_lateral_accel_);
-    RCLCPP_DEBUG(this->get_logger(), "rpp.prediction_horizon_sec: %.2f", rpp_prediction_horizon_sec_);
-    RCLCPP_DEBUG(this->get_logger(), "rpp.prediction_step_sec: %.2f", rpp_prediction_step_sec_);
-    RCLCPP_DEBUG(this->get_logger(), "rpp.wheelbase: %.2f", rpp_wheelbase_);
-    RCLCPP_DEBUG(this->get_logger(), "rpp.max_steer: %.2f", rpp_max_steer_);
-    RCLCPP_DEBUG(this->get_logger(), "rpp.max_angular_velocity: %.2f", rpp_max_angular_velocity_);
-    RCLCPP_DEBUG(this->get_logger(), "rpp.avoidance_angular_samples: %d", rpp_avoidance_angular_samples_);
-    RCLCPP_DEBUG(this->get_logger(), "rpp.avoidance_angular_span_ratio: %.2f", rpp_avoidance_angular_span_ratio_);
-    RCLCPP_DEBUG(this->get_logger(), "rpp.avoidance_prefer_nominal_weight: %.2f", rpp_avoidance_prefer_nominal_weight_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.critic_trajectory_generator_name: %s",
+      rpp_critic_trajectory_generator_name_.c_str());
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.nominal_linear_speed: %.2f",
+      rpp_nominal_linear_speed_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.min_linear_speed: %.2f",
+      rpp_min_linear_speed_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.alignment_linear_speed: %.2f",
+      rpp_alignment_linear_speed_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.goal_slowdown_distance: %.2f",
+      rpp_goal_slowdown_distance_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.min_lookahead_distance: %.2f",
+      rpp_min_lookahead_distance_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.max_lookahead_distance: %.2f",
+      rpp_max_lookahead_distance_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.lookahead_time: %.2f",
+      rpp_lookahead_time_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.alignment_lookahead_distance: %.2f",
+      rpp_alignment_lookahead_distance_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.max_lateral_accel: %.2f",
+      rpp_max_lateral_accel_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.prediction_horizon_sec: %.2f",
+      rpp_prediction_horizon_sec_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.prediction_step_sec: %.2f",
+      rpp_prediction_step_sec_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.wheelbase: %.2f",
+      rpp_wheelbase_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.max_steer: %.2f",
+      rpp_max_steer_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.max_angular_velocity: %.2f",
+      rpp_max_angular_velocity_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.avoidance_angular_samples: %d",
+      rpp_avoidance_angular_samples_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.avoidance_angular_span_ratio: %.2f",
+      rpp_avoidance_angular_span_ratio_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.avoidance_prefer_nominal_weight: %.2f",
+      rpp_avoidance_prefer_nominal_weight_);
   }
 
   declare_parameter("debug_publish.robot_cuboid", rclcpp::ParameterValue(false));
@@ -572,19 +714,30 @@ dddmr_sys_core::PlannerState Local_Planner::prepareControllerContext(
       deviation_distance;
 
     if(deviation_confirmed){
-      RCLCPP_FATAL(
-        this->get_logger().get_child(name_),
-        "deviation confirmed after consecutive prune failures, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f",
+      if(enable_prune_deviation_hard_fail_){
+        RCLCPP_FATAL(
+          this->get_logger().get_child(name_),
+          "deviation confirmed after consecutive prune failures, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f",
+          route_version_,
+          goal_seq_,
+          route_source_label_.c_str(),
+          local_route_progress_index_,
+          consecutive_prune_failure_cycles_,
+          last_robot_to_route_distance_);
+        RCLCPP_FATAL(
+          this->get_logger().get_child(name_),
+          "deviation from route reference exceeded tolerance, controller returns PRUNE_PLAN_FAIL.");
+        return dddmr_sys_core::PRUNE_PLAN_FAIL;
+      }
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger().get_child(name_), *clock_, 2000,
+        "deviation confirmed but hard fail disabled; keep trying local pull-back, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f",
         route_version_,
         goal_seq_,
         route_source_label_.c_str(),
         local_route_progress_index_,
         consecutive_prune_failure_cycles_,
         last_robot_to_route_distance_);
-      RCLCPP_FATAL(
-        this->get_logger().get_child(name_),
-        "deviation from route reference exceeded tolerance, controller returns PRUNE_PLAN_FAIL.");
-      return dddmr_sys_core::PRUNE_PLAN_FAIL;
     }
 
     RCLCPP_WARN_THROTTLE(
@@ -1044,6 +1197,43 @@ bool Local_Planner::selectCausalPruneAnchor(
     }
   }
 
+  if(allow_offroute_anchor_recovery_){
+    bool have_relaxed_anchor = false;
+    std::size_t relaxed_anchor_index = current_index;
+    double relaxed_anchor_distance = std::numeric_limits<double>::infinity();
+    for(std::size_t idx = current_index; idx <= search_end; ++idx){
+      const std::size_t index_jump = idx - current_index;
+      const double arc_jump = getGlobalPlanArcDistance(current_index, idx);
+      if(index_jump > causal_prune_max_index_jump_ || arc_jump > causal_prune_max_arc_jump_){
+        continue;
+      }
+      const double lateral_distance = getRouteSegmentLateralDistance(idx);
+      if(!std::isfinite(lateral_distance)){
+        continue;
+      }
+      if(!have_relaxed_anchor || lateral_distance < relaxed_anchor_distance){
+        relaxed_anchor_distance = lateral_distance;
+        relaxed_anchor_index = idx;
+        have_relaxed_anchor = true;
+      }
+    }
+
+    if(have_relaxed_anchor){
+      *anchor_index = relaxed_anchor_index;
+      *robot_to_route_distance = relaxed_anchor_distance;
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger().get_child(name_), *clock_, 2000,
+        "off-route anchor recovery engaged, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, anchor_index=%zu, robot_to_route_distance=%.2f",
+        route_version_,
+        goal_seq_,
+        route_source_label_.c_str(),
+        local_route_progress_index_,
+        relaxed_anchor_index,
+        relaxed_anchor_distance);
+      return true;
+    }
+  }
+
   *robot_to_route_distance = fallback_distance;
   return false;
 }
@@ -1122,7 +1312,9 @@ bool Local_Planner::tryReuseCachedPrunedPath()
     return false;
   }
 
-  if(consecutive_prune_failure_cycles_ > max_prune_failure_cycles_){
+  if(enable_prune_deviation_hard_fail_ &&
+     consecutive_prune_failure_cycles_ > max_prune_failure_cycles_)
+  {
     return false;
   }
 
@@ -1465,45 +1657,12 @@ bool Local_Planner::isRouteStartFrontReachableOnCurrentPrunePlan(std::string * d
     return false;
   }
 
-  const double robot_x = trans_gbl2b_.transform.translation.x;
-  const double robot_y = trans_gbl2b_.transform.translation.y;
-  const double robot_yaw = getRobotYaw();
-
-  const auto project_to_robot_x =
-    [robot_x, robot_y, robot_yaw](const geometry_msgs::msg::PoseStamped & pose) {
-      const double dx = pose.pose.position.x - robot_x;
-      const double dy = pose.pose.position.y - robot_y;
-      return std::cos(robot_yaw) * dx + std::sin(robot_yaw) * dy;
-    };
-
-  const double lookahead_x_local = project_to_robot_x(lookahead_pose);
-  if(!std::isfinite(lookahead_x_local) ||
-     lookahead_x_local < route_start_front_projection_threshold_)
+  if(!std::isfinite(lookahead_pose.pose.position.x) ||
+     !std::isfinite(lookahead_pose.pose.position.y) ||
+     !std::isfinite(lookahead_pose.pose.position.z))
   {
     if(detail != nullptr){
-      *detail = "route_start_front_check_failed: lookahead_not_in_front";
-    }
-    return false;
-  }
-
-  const double reach_window_sq = lookahead_distance * lookahead_distance;
-  bool has_front_reachable_pose = false;
-  for(const auto & pose : prune_plan_.poses){
-    const double dx = pose.pose.position.x - robot_x;
-    const double dy = pose.pose.position.y - robot_y;
-    const double distance_sq = dx * dx + dy * dy;
-    if(distance_sq > reach_window_sq){
-      continue;
-    }
-    if(project_to_robot_x(pose) >= route_start_front_projection_threshold_){
-      has_front_reachable_pose = true;
-      break;
-    }
-  }
-
-  if(!has_front_reachable_pose){
-    if(detail != nullptr){
-      *detail = "route_start_front_check_failed: no_front_reachable_pose_in_start_window";
+      *detail = "route_start_front_check_failed: lookahead_pose_invalid";
     }
     return false;
   }
@@ -1531,14 +1690,6 @@ dddmr_sys_core::RouteStartupStatus Local_Planner::evaluateRouteStartupStatus(std
       *detail = "route_start_alignment_failed: local_reference_unavailable";
     }
     return dddmr_sys_core::RouteStartupStatus::kRouteUnavailable;
-  }
-
-  std::string front_detail;
-  if(!isRouteStartFrontReachableOnCurrentPrunePlan(&front_detail)){
-    if(detail != nullptr){
-      *detail = front_detail;
-    }
-    return dddmr_sys_core::RouteStartupStatus::kFrontUnreachable;
   }
 
   if(!isInitialHeadingAlignedOnCurrentPrunePlan()){
@@ -2092,10 +2243,10 @@ dddmr_sys_core::PlannerState Local_Planner::computeRppControlCommand(
     const double y_local = -std::sin(robot_yaw) * dx + std::cos(robot_yaw) * dy;
     const double distance_sq = x_local * x_local + y_local * y_local;
 
-    if(distance_sq < 1e-6 || x_local <= 0.05){
+    if(distance_sq < 1e-6){
       RCLCPP_WARN_THROTTLE(
         this->get_logger().get_child(name_), *clock_, 2000,
-        "RPP lookahead target is not reachable in front of the robot, controller=%s, route_version=%zu, goal_seq=%zu, source=%s",
+        "RPP lookahead target is invalid (distance too small), controller=%s, route_version=%zu, goal_seq=%zu, source=%s",
         controller_name.c_str(),
         route_version_,
         goal_seq_,

@@ -20,7 +20,7 @@ class Nav2dGoalSub():
 
 
     def goalCB(self, msg):
-        self.node_.get_logger().info("Got goal at: %.2f, %.2f, %.2f"  % (msg.pose.position.x, msg.pose.position.y, msg.pose.position.z))
+        self.node_.get_logger().info("Got goal at: %.2f, %.2f, %.2f, %.2f"  % (msg.pose.position.x, msg.pose.position.y, msg.pose.position.z, msg.pose.orientation.w))
         self.nav2d_goal = PToPMoveBase.Goal()
         self.nav2d_goal.target_pose = msg
 

@@ -110,22 +110,21 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   pcl_ground_.reset(new pcl::PointCloud<pcl::PointXYZI>);
   kdtree_map_.reset(new pcl::KdTreeFLANN<pcl::PointXYZI>);
   kdtree_ground_.reset(new pcl::KdTreeFLANN<pcl::PointXYZI>);
-  
-  declare_parameter("turning_weight", rclcpp::ParameterValue(0.1));
-  this->get_parameter("turning_weight", turning_weight_);
-  RCLCPP_DEBUG(this->get_logger(), "turning_weight: %.2f", turning_weight_);    
+
+  declare_parameter("graph_a_star.turning_weight", rclcpp::ParameterValue(0.1));
+  this->get_parameter("graph_a_star.turning_weight", turning_weight_);
+  RCLCPP_DEBUG(this->get_logger(), "graph_a_star.turning_weight: %.2f", turning_weight_);
 
   declare_parameter("enable_detail_log", rclcpp::ParameterValue(false));
   this->get_parameter("enable_detail_log", enable_detail_log_);
   RCLCPP_DEBUG(this->get_logger(), "enable_detail_log: %d", enable_detail_log_);    
 
-  declare_parameter("a_star_expanding_radius", rclcpp::ParameterValue(0.5));
-  this->get_parameter("a_star_expanding_radius", a_star_expanding_radius_);
-  RCLCPP_DEBUG(this->get_logger(), "a_star_expanding_radius: %.2f", a_star_expanding_radius_);    
-
-  declare_parameter("direct_path_distance_threshold", rclcpp::ParameterValue(3.0));
-  this->get_parameter("direct_path_distance_threshold", direct_path_distance_threshold_);
-  RCLCPP_DEBUG(this->get_logger(), "direct_path_distance_threshold: %.2f", direct_path_distance_threshold_);
+  declare_parameter("graph_a_star.a_star_expanding_radius", rclcpp::ParameterValue(0.5));
+  this->get_parameter("graph_a_star.a_star_expanding_radius", a_star_expanding_radius_);
+  RCLCPP_DEBUG(
+    this->get_logger(),
+    "graph_a_star.a_star_expanding_radius: %.2f",
+    a_star_expanding_radius_);
 
   declare_parameter("raw_route_backend", rclcpp::ParameterValue(std::string("graph_a_star")));
   this->get_parameter("raw_route_backend", raw_route_backend_);
@@ -134,7 +133,7 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
     raw_route_backend_.end(),
     raw_route_backend_.begin(),
     [](unsigned char ch) {return static_cast<char>(std::tolower(ch));});
-  if(raw_route_backend_ != "graph_a_star" && raw_route_backend_ != "forward_hybrid_astar"){
+  if(raw_route_backend_ != "graph_a_star" && raw_route_backend_ != "hybrid_a_star"){
     RCLCPP_WARN(
       this->get_logger(),
       "Invalid raw_route_backend '%s', fallback to 'graph_a_star'.",
@@ -143,50 +142,48 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   }
   RCLCPP_DEBUG(this->get_logger(), "raw_route_backend: %s", raw_route_backend_.c_str());
 
-  declare_parameter("use_forward_hybrid_astar", rclcpp::ParameterValue(true));
-  this->get_parameter("use_forward_hybrid_astar", use_forward_hybrid_astar_);
-  RCLCPP_DEBUG(
-    this->get_logger(),
-    "raw_route forward_hybrid_astar backend enabled: %d",
-    use_forward_hybrid_astar_);
-  if(raw_route_backend_ == "forward_hybrid_astar" && !use_forward_hybrid_astar_){
-    RCLCPP_WARN(
-      this->get_logger(),
-      "raw_route_backend requests forward_hybrid_astar but the backend is disabled; raw_route will fall back to graph_a_star.");
-  }
-
-  declare_parameter("enable_direct_path_shortcut", rclcpp::ParameterValue(false));
-  this->get_parameter("enable_direct_path_shortcut", enable_direct_path_shortcut_);
-  RCLCPP_DEBUG(this->get_logger(), "enable_direct_path_shortcut: %d", enable_direct_path_shortcut_);
-
   // Keep graph A* as topology backbone (bridge/ramp traversability) and only
   // smooth the sampled raw route with bounded lateral displacement.
-  declare_parameter("graph_path_smoothing.enable", rclcpp::ParameterValue(true));
-  this->get_parameter("graph_path_smoothing.enable", graph_path_smoothing_enable_);
-  declare_parameter("graph_path_smoothing.iterations", rclcpp::ParameterValue(6));
-  this->get_parameter("graph_path_smoothing.iterations", graph_path_smoothing_iterations_);
-  graph_path_smoothing_iterations_ = std::max(graph_path_smoothing_iterations_, 0);
-  declare_parameter("graph_path_smoothing.weight", rclcpp::ParameterValue(0.35));
-  this->get_parameter("graph_path_smoothing.weight", graph_path_smoothing_weight_);
-  graph_path_smoothing_weight_ = std::clamp(graph_path_smoothing_weight_, 0.0, 1.0);
-  declare_parameter("graph_path_smoothing.max_shift", rclcpp::ParameterValue(0.30));
-  this->get_parameter("graph_path_smoothing.max_shift", graph_path_smoothing_max_shift_);
-  graph_path_smoothing_max_shift_ = std::max(graph_path_smoothing_max_shift_, 0.0);
-  declare_parameter("graph_path_smoothing.lock_start_distance", rclcpp::ParameterValue(1.2));
+  declare_parameter("graph_a_star.graph_path_smoothing.enable", rclcpp::ParameterValue(true));
   this->get_parameter(
-    "graph_path_smoothing.lock_start_distance",
+    "graph_a_star.graph_path_smoothing.enable",
+    graph_path_smoothing_enable_);
+  declare_parameter("graph_a_star.graph_path_smoothing.iterations", rclcpp::ParameterValue(6));
+  this->get_parameter(
+    "graph_a_star.graph_path_smoothing.iterations",
+    graph_path_smoothing_iterations_);
+  graph_path_smoothing_iterations_ = std::max(graph_path_smoothing_iterations_, 0);
+  declare_parameter("graph_a_star.graph_path_smoothing.weight", rclcpp::ParameterValue(0.35));
+  this->get_parameter(
+    "graph_a_star.graph_path_smoothing.weight",
+    graph_path_smoothing_weight_);
+  graph_path_smoothing_weight_ = std::clamp(graph_path_smoothing_weight_, 0.0, 1.0);
+  declare_parameter("graph_a_star.graph_path_smoothing.max_shift", rclcpp::ParameterValue(0.30));
+  this->get_parameter(
+    "graph_a_star.graph_path_smoothing.max_shift",
+    graph_path_smoothing_max_shift_);
+  graph_path_smoothing_max_shift_ = std::max(graph_path_smoothing_max_shift_, 0.0);
+  declare_parameter(
+    "graph_a_star.graph_path_smoothing.lock_start_distance",
+    rclcpp::ParameterValue(1.2));
+  this->get_parameter(
+    "graph_a_star.graph_path_smoothing.lock_start_distance",
     graph_path_smoothing_lock_start_distance_);
   graph_path_smoothing_lock_start_distance_ =
     std::max(graph_path_smoothing_lock_start_distance_, 0.0);
-  declare_parameter("graph_path_smoothing.lock_goal_distance", rclcpp::ParameterValue(1.2));
+  declare_parameter(
+    "graph_a_star.graph_path_smoothing.lock_goal_distance",
+    rclcpp::ParameterValue(1.2));
   this->get_parameter(
-    "graph_path_smoothing.lock_goal_distance",
+    "graph_a_star.graph_path_smoothing.lock_goal_distance",
     graph_path_smoothing_lock_goal_distance_);
   graph_path_smoothing_lock_goal_distance_ =
     std::max(graph_path_smoothing_lock_goal_distance_, 0.0);
-  declare_parameter("graph_path_smoothing.ground_search_radius", rclcpp::ParameterValue(0.8));
+  declare_parameter(
+    "graph_a_star.graph_path_smoothing.ground_search_radius",
+    rclcpp::ParameterValue(0.8));
   this->get_parameter(
-    "graph_path_smoothing.ground_search_radius",
+    "graph_a_star.graph_path_smoothing.ground_search_radius",
     graph_path_smoothing_ground_search_radius_);
   graph_path_smoothing_ground_search_radius_ =
     std::max(graph_path_smoothing_ground_search_radius_, 0.1);
@@ -200,57 +197,6 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
     graph_path_smoothing_lock_start_distance_,
     graph_path_smoothing_lock_goal_distance_,
     graph_path_smoothing_ground_search_radius_);
-
-  declare_parameter("entry_connector.enable", rclcpp::ParameterValue(true));
-  this->get_parameter("entry_connector.enable", enable_entry_connector_);
-  RCLCPP_DEBUG(this->get_logger(), "entry_connector.enable: %d", enable_entry_connector_);
-
-  declare_parameter(
-    "entry_connector.backend",
-    rclcpp::ParameterValue(std::string("forward_hybrid_astar")));
-  this->get_parameter("entry_connector.backend", entry_connector_backend_);
-  std::transform(
-    entry_connector_backend_.begin(),
-    entry_connector_backend_.end(),
-    entry_connector_backend_.begin(),
-    [](unsigned char ch) {return static_cast<char>(std::tolower(ch));});
-  if(entry_connector_backend_ != "forward_hybrid_astar"){
-    RCLCPP_WARN(
-      this->get_logger(),
-      "Invalid entry_connector.backend '%s', fallback to 'forward_hybrid_astar'.",
-      entry_connector_backend_.c_str());
-    entry_connector_backend_ = "forward_hybrid_astar";
-  }
-  RCLCPP_DEBUG(
-    this->get_logger(),
-    "entry_connector.backend: %s",
-    entry_connector_backend_.c_str());
-
-  declare_parameter("entry_connector.min_anchor_distance", rclcpp::ParameterValue(2.5));
-  this->get_parameter(
-    "entry_connector.min_anchor_distance",
-    entry_connector_min_anchor_distance_);
-  declare_parameter("entry_connector.max_anchor_distance", rclcpp::ParameterValue(4.0));
-  this->get_parameter(
-    "entry_connector.max_anchor_distance",
-    entry_connector_max_anchor_distance_);
-  if(entry_connector_max_anchor_distance_ < entry_connector_min_anchor_distance_){
-    std::swap(entry_connector_max_anchor_distance_, entry_connector_min_anchor_distance_);
-  }
-  RCLCPP_DEBUG(
-    this->get_logger(),
-    "entry_connector anchor distance window: [%.2f, %.2f]",
-    entry_connector_min_anchor_distance_,
-    entry_connector_max_anchor_distance_);
-
-  declare_parameter("entry_connector.force_goal_heading", rclcpp::ParameterValue(true));
-  this->get_parameter(
-    "entry_connector.force_goal_heading",
-    entry_connector_force_goal_heading_);
-  RCLCPP_DEBUG(
-    this->get_logger(),
-    "entry_connector.force_goal_heading: %d",
-    entry_connector_force_goal_heading_);
 
   declare_parameter("hybrid_astar.wheelbase", rclcpp::ParameterValue(0.549185));
   this->get_parameter("hybrid_astar.wheelbase", forward_hybrid_astar_config_.wheelbase);
@@ -492,21 +438,13 @@ void GlobalPlanner::cbClickedPoint(const geometry_msgs::msg::PointStamped::Share
   const std::size_t goal_seq = ++debug_goal_seq_;
   nav_msgs::msg::Path raw_route;
   nav_msgs::msg::Path frozen_route;
-  std::size_t anchor_index = 0;
-  double anchor_distance = 0.0;
-  std::size_t connector_pose_count = 0;
-  bool connector_used_fallback = false;
   {
     std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
-    if(!buildFrozenRouteWithEntryConnectorLocked(
+    if(!buildFrozenRouteLocked(
          start,
          goal,
          &raw_route,
-         &frozen_route,
-         &anchor_index,
-         &anchor_distance,
-         &connector_pose_count,
-         &connector_used_fallback))
+         &frozen_route))
     {
       frozen_route = raw_route;
     }
@@ -519,30 +457,11 @@ void GlobalPlanner::cbClickedPoint(const geometry_msgs::msg::PointStamped::Share
 
   const std::size_t route_version = ++debug_route_version_;
   publishRawRouteDebugPath(raw_route, goal_seq, route_version, "clicked_goal_raw_route");
-  if(!connector_used_fallback && connector_pose_count > 0){
-    RCLCPP_DEBUG(
-      this->get_logger(),
-      "entry connector generated successfully, anchor_index=%zu, anchor_distance=%.2f, connector_poses=%zu, route_tail_poses=%zu, frozen_route_poses=%zu",
-      anchor_index,
-      anchor_distance,
-      connector_pose_count,
-      raw_route.poses.size() > anchor_index ? raw_route.poses.size() - anchor_index : 0,
-      frozen_route.poses.size());
-  }
-  else if(enable_entry_connector_){
-    RCLCPP_WARN(
-      this->get_logger(),
-      "entry connector fallback used, anchor_index=%zu, anchor_distance=%.2f, raw_route_poses=%zu, frozen_route_poses=%zu",
-      anchor_index,
-      anchor_distance,
-      raw_route.poses.size(),
-      frozen_route.poses.size());
-  }
   publishFrozenRouteDebugPath(
     frozen_route,
     goal_seq,
     route_version,
-    connector_used_fallback ? "clicked_goal_frozen_route_fallback" : "clicked_goal_frozen_route");
+    "clicked_goal_frozen_route");
   pub_path_->publish(frozen_route);
   RCLCPP_DEBUG(this->get_logger(), "Frozen route found for clicked goal.");
 
@@ -918,125 +837,6 @@ unsigned int GlobalPlanner::getClosestIndexFromRadiusSearch(
   return static_cast<unsigned int>(point_indices[closest_idx]);
 }
 
-bool GlobalPlanner::buildStraightLinePlan(
-  const geometry_msgs::msg::PoseStamped& start,
-  const geometry_msgs::msg::PoseStamped& goal,
-  nav_msgs::msg::Path& ros_path)
-{
-  const double dx = goal.pose.position.x - start.pose.position.x;
-  const double dy = goal.pose.position.y - start.pose.position.y;
-  const double dz = goal.pose.position.z - start.pose.position.z;
-  const double distance = sqrt(dx * dx + dy * dy + dz * dz);
-
-  if(distance > direct_path_distance_threshold_){
-    return false;
-  }
-
-  if(distance < 1e-3){
-    geometry_msgs::msg::PoseStamped pose = goal;
-    pose.header = ros_path.header;
-    ros_path.poses.push_back(pose);
-    return true;
-  }
-
-  const double inscribed_radius = perception_3d_ros_->getGlobalUtils()->getInscribedRadius();
-  const double sample_step = 0.05;
-  const double ground_search_radius = 0.5;
-
-  for(double travelled = 0.0; travelled <= distance + sample_step; travelled += sample_step){
-    const double ratio = std::min(1.0, travelled / distance);
-    pcl::PointXYZI sample_pt;
-    sample_pt.x = start.pose.position.x + dx * ratio;
-    sample_pt.y = start.pose.position.y + dy * ratio;
-    sample_pt.z = start.pose.position.z + dz * ratio;
-
-    std::vector<int> ground_indices;
-    std::vector<float> ground_squared_distances;
-    if(kdtree_ground_->radiusSearch(sample_pt, ground_search_radius, ground_indices, ground_squared_distances) < 1){
-      return false;
-    }
-
-    const unsigned int nearest_ground_index =
-      getClosestIndexFromRadiusSearch(ground_indices, ground_squared_distances);
-    if(perception_3d_ros_->get_min_dGraphValue(nearest_ground_index) < inscribed_radius){
-      return false;
-    }
-
-    std::vector<int> map_indices;
-    std::vector<float> map_squared_distances;
-    if(kdtree_map_->radiusSearch(sample_pt, inscribed_radius, map_indices, map_squared_distances) > 1){
-      return false;
-    }
-  }
-
-  ros_path.poses.clear();
-
-  geometry_msgs::msg::PoseStamped pose_start = start;
-  pose_start.header = ros_path.header;
-  ros_path.poses.push_back(pose_start);
-
-  geometry_msgs::msg::PoseStamped last_pose = pose_start;
-  for(double travelled = sample_step; travelled < distance; travelled += sample_step){
-    const double ratio = travelled / distance;
-    geometry_msgs::msg::PoseStamped pose = goal;
-    pose.header = ros_path.header;
-    pose.pose.position.x = start.pose.position.x + dx * ratio;
-    pose.pose.position.y = start.pose.position.y + dy * ratio;
-    pose.pose.position.z = start.pose.position.z + dz * ratio;
-
-    const double ddx = pose.pose.position.x - last_pose.pose.position.x;
-    const double ddy = pose.pose.position.y - last_pose.pose.position.y;
-    const double ddz = pose.pose.position.z - last_pose.pose.position.z;
-    if(sqrt(ddx * ddx + ddy * ddy + ddz * ddz) > 0.1){
-      ros_path.poses.push_back(pose);
-      last_pose = pose;
-    }
-  }
-
-  geometry_msgs::msg::PoseStamped pose_goal = goal;
-  pose_goal.header = ros_path.header;
-  ros_path.poses.push_back(pose_goal);
-
-  for(std::size_t i = 0; i < ros_path.poses.size(); ++i){
-    const std::size_t next_idx = (i + 1 < ros_path.poses.size()) ? i + 1 : i;
-    const double vx = ros_path.poses[next_idx].pose.position.x - ros_path.poses[i].pose.position.x;
-    const double vy = ros_path.poses[next_idx].pose.position.y - ros_path.poses[i].pose.position.y;
-    const double vz = ros_path.poses[next_idx].pose.position.z - ros_path.poses[i].pose.position.z;
-
-    if(fabs(vz) > 1e-6){
-      const double unit = sqrt(vx * vx + vy * vy + vz * vz);
-      if(unit > 1e-6){
-        tf2::Vector3 axis_vector(vx / unit, vy / unit, vz / unit);
-        tf2::Vector3 up_vector(1.0, 0.0, 0.0);
-        tf2::Vector3 right_vector = axis_vector.cross(up_vector);
-        right_vector.normalized();
-        tf2::Quaternion q(right_vector, -1.0 * acos(axis_vector.dot(up_vector)));
-        q.normalize();
-        ros_path.poses[i].pose.orientation.x = q.getX();
-        ros_path.poses[i].pose.orientation.y = q.getY();
-        ros_path.poses[i].pose.orientation.z = q.getZ();
-        ros_path.poses[i].pose.orientation.w = q.getW();
-      }
-    }
-    else{
-      tf2::Quaternion q;
-      q.setRPY(0.0, 0.0, atan2(vy, vx));
-      ros_path.poses[i].pose.orientation.x = q.getX();
-      ros_path.poses[i].pose.orientation.y = q.getY();
-      ros_path.poses[i].pose.orientation.z = q.getZ();
-      ros_path.poses[i].pose.orientation.w = q.getW();
-    }
-  }
-
-  if(enable_detail_log_){
-    RCLCPP_DEBUG(this->get_logger(),
-      "Use straight-line plan for nearby goal, distance: %.2f m, poses: %zu",
-      distance, ros_path.poses.size());
-  }
-
-  return true;
-}
-
 bool GlobalPlanner::getStartGoalID(
   const geometry_msgs::msg::PoseStamped& start,
   const geometry_msgs::msg::PoseStamped& goal,
@@ -1313,406 +1113,11 @@ void GlobalPlanner::publishRouteRequestStageDebug(
   pub_route_request_stage_->publish(message);
 }
 
-std::vector<double> GlobalPlanner::computePathArcLengths(const nav_msgs::msg::Path & path) const
-{
-  std::vector<double> arc_lengths;
-  arc_lengths.reserve(path.poses.size());
-  double accumulated_distance = 0.0;
-  for(std::size_t i = 0; i < path.poses.size(); ++i){
-    if(i > 0){
-      const double dx =
-        path.poses[i].pose.position.x - path.poses[i - 1].pose.position.x;
-      const double dy =
-        path.poses[i].pose.position.y - path.poses[i - 1].pose.position.y;
-      const double dz =
-        path.poses[i].pose.position.z - path.poses[i - 1].pose.position.z;
-      accumulated_distance += std::sqrt(dx * dx + dy * dy + dz * dz);
-    }
-    arc_lengths.push_back(accumulated_distance);
-  }
-  return arc_lengths;
-}
-
-std::vector<GlobalPlanner::EntryAnchorCandidate> GlobalPlanner::selectEntryAnchorCandidates(
-  const nav_msgs::msg::Path & raw_route,
-  const std::vector<double> & arc_lengths,
-  const geometry_msgs::msg::PoseStamped & start) const
-{
-  std::vector<EntryAnchorCandidate> preferred_candidates;
-  std::vector<EntryAnchorCandidate> secondary_candidates;
-  std::vector<EntryAnchorCandidate> fallback_candidates;
-  if(raw_route.poses.size() < 2 || arc_lengths.size() != raw_route.poses.size()){
-    return fallback_candidates;
-  }
-
-  double start_yaw = 0.0;
-  bool has_start_yaw = false;
-  const auto & q_msg = start.pose.orientation;
-  const double start_quaternion_norm =
-    q_msg.x * q_msg.x + q_msg.y * q_msg.y + q_msg.z * q_msg.z + q_msg.w * q_msg.w;
-  if(std::isfinite(start_quaternion_norm) && start_quaternion_norm > 1e-9){
-    tf2::Quaternion q(q_msg.x, q_msg.y, q_msg.z, q_msg.w);
-    q.normalize();
-    double roll = 0.0;
-    double pitch = 0.0;
-    tf2::Matrix3x3(q).getRPY(roll, pitch, start_yaw);
-    has_start_yaw = std::isfinite(start_yaw);
-  }
-
-  constexpr double kRouteDirectionLookahead = 0.8;
-  bool has_route_direction = false;
-  double route_dir_x = 0.0;
-  double route_dir_y = 0.0;
-  for(std::size_t i = 1; i < raw_route.poses.size(); ++i){
-    const double lookahead_distance =
-      (i < arc_lengths.size()) ? arc_lengths[i] : 0.0;
-    if(!std::isfinite(lookahead_distance) || lookahead_distance < kRouteDirectionLookahead){
-      continue;
-    }
-    const double dx = raw_route.poses[i].pose.position.x - start.pose.position.x;
-    const double dy = raw_route.poses[i].pose.position.y - start.pose.position.y;
-    const double norm = std::hypot(dx, dy);
-    if(norm < 1e-6){
-      continue;
-    }
-    route_dir_x = dx / norm;
-    route_dir_y = dy / norm;
-    has_route_direction = true;
-    break;
-  }
-
-  bool has_goal_direction = false;
-  double goal_dir_x = 0.0;
-  double goal_dir_y = 0.0;
-  const double goal_dx =
-    raw_route.poses.back().pose.position.x - start.pose.position.x;
-  const double goal_dy =
-    raw_route.poses.back().pose.position.y - start.pose.position.y;
-  const double goal_norm = std::hypot(goal_dx, goal_dy);
-  if(goal_norm >= 1e-6){
-    goal_dir_x = goal_dx / goal_norm;
-    goal_dir_y = goal_dy / goal_norm;
-    has_goal_direction = true;
-  }
-
-  const double preferred_anchor_distance = std::clamp(
-    entry_connector_min_anchor_distance_ + 0.5,
-    entry_connector_min_anchor_distance_,
-    entry_connector_max_anchor_distance_);
-  const auto candidate_score =
-    [preferred_anchor_distance](const EntryAnchorCandidate & candidate) {
-      double score = 0.0;
-      if(candidate.has_valid_anchor_pose){
-        score += 1000.0;
-      }
-      if(candidate.in_route_forward_half_plane){
-        score += 320.0;
-      }
-      else{
-        score -= 320.0;
-      }
-      if(candidate.in_goal_forward_half_plane){
-        score += 220.0;
-      }
-      else{
-        score -= 220.0;
-      }
-      score += 120.0 * std::clamp(candidate.approach_alignment, -1.0, 1.0);
-      score += 35.0 * std::clamp(candidate.vehicle_forward_projection, -1.0, 1.0);
-      score -= 10.0 * std::abs(candidate.arc_distance - preferred_anchor_distance);
-      return score;
-    };
-
-  for(std::size_t i = 1; i < raw_route.poses.size(); ++i){
-    EntryAnchorCandidate candidate;
-    candidate.index = i;
-    candidate.arc_distance = arc_lengths[i];
-    if(!std::isfinite(candidate.arc_distance) || candidate.arc_distance < 0.3){
-      continue;
-    }
-
-    const double dx = raw_route.poses[i].pose.position.x - start.pose.position.x;
-    const double dy = raw_route.poses[i].pose.position.y - start.pose.position.y;
-    const double planar_distance = std::hypot(dx, dy);
-    if(planar_distance < 1e-6){
-      continue;
-    }
-
-    candidate.in_preferred_window =
-      candidate.arc_distance >= entry_connector_min_anchor_distance_ &&
-      candidate.arc_distance <= entry_connector_max_anchor_distance_;
-    const double x_local =
-      has_start_yaw ? (std::cos(start_yaw) * dx + std::sin(start_yaw) * dy) : dx;
-    candidate.vehicle_forward_projection =
-      has_start_yaw ? (x_local / planar_distance) : 0.0;
-    // Ordinary forward startup mode accepts both left-front and right-front
-    // anchors, but rejects anchors behind the vehicle.
-    constexpr double kVehicleRearAllowance = 0.02;
-    candidate.in_vehicle_forward_half_plane =
-      !has_start_yaw || x_local >= -kVehicleRearAllowance;
-    if(!candidate.in_vehicle_forward_half_plane){
-      // Entry connector must remain a forward startup connection. Do not
-      // select anchors behind the vehicle just to satisfy a nicer end yaw.
-      continue;
-    }
-
-    candidate.route_forward_projection =
-      has_route_direction ? ((route_dir_x * dx + route_dir_y * dy) / planar_distance) : 0.0;
-    candidate.in_route_forward_half_plane =
-      !has_route_direction || candidate.route_forward_projection >= -0.10;
-
-    candidate.goal_forward_projection =
-      has_goal_direction ? ((goal_dir_x * dx + goal_dir_y * dy) / planar_distance) : 0.0;
-    candidate.in_goal_forward_half_plane =
-      !has_goal_direction || candidate.goal_forward_projection >= -0.15;
-
-    geometry_msgs::msg::PoseStamped anchor_pose;
-    double anchor_yaw = 0.0;
-    candidate.has_valid_anchor_pose =
-      buildAnchorPoseFromRoute(raw_route, i, &anchor_pose, &anchor_yaw);
-    candidate.anchor_yaw = anchor_yaw;
-    if(candidate.has_valid_anchor_pose){
-      const double anchor_offset_yaw = std::atan2(dy, dx);
-      candidate.approach_alignment =
-        std::cos(anchor_yaw - anchor_offset_yaw);
-    }
-    else{
-      candidate.approach_alignment = -1.0;
-    }
-
-    candidate.force_goal_heading =
-      entry_connector_force_goal_heading_ &&
-      candidate.has_valid_anchor_pose &&
-      candidate.in_route_forward_half_plane &&
-      candidate.in_goal_forward_half_plane &&
-      candidate.approach_alignment >= -0.10;
-
-    if(candidate.in_preferred_window &&
-       candidate.has_valid_anchor_pose &&
-       candidate.approach_alignment >= -0.10)
-    {
-      candidate.ranking_bucket = "preferred";
-      if(candidate.in_route_forward_half_plane && candidate.in_goal_forward_half_plane){
-        candidate.ranking_reason = "route_goal_forward";
-      }
-      else if(candidate.in_route_forward_half_plane){
-        candidate.ranking_reason = "route_forward_left_or_right";
-      }
-      else if(candidate.in_goal_forward_half_plane){
-        candidate.ranking_reason = "goal_forward_left_or_right";
-      }
-      else{
-        candidate.ranking_reason = "front_left_or_right";
-      }
-      preferred_candidates.push_back(candidate);
-      continue;
-    }
-
-    if(candidate.in_preferred_window && candidate.has_valid_anchor_pose){
-      candidate.ranking_bucket = "secondary";
-      if(candidate.in_route_forward_half_plane && !candidate.in_goal_forward_half_plane){
-        candidate.ranking_reason = "route_forward_goal_side_penalty";
-      }
-      else if(!candidate.in_route_forward_half_plane && candidate.in_goal_forward_half_plane){
-        candidate.ranking_reason = "goal_forward_route_side_penalty";
-      }
-      else if(candidate.approach_alignment < -0.10){
-        candidate.ranking_reason = "approach_alignment_penalty";
-      }
-      else if(!candidate.in_vehicle_forward_half_plane){
-        candidate.ranking_reason = "vehicle_rear_penalty";
-      }
-      else{
-        candidate.ranking_reason = "window_secondary";
-      }
-      secondary_candidates.push_back(candidate);
-      continue;
-    }
-
-    if(candidate.arc_distance > 0.5){
-      candidate.ranking_bucket = "fallback";
-      if(!candidate.in_preferred_window){
-        candidate.ranking_reason = "out_of_window";
-      }
-      else if(!candidate.has_valid_anchor_pose){
-        candidate.ranking_reason = "anchor_invalid";
-      }
-      else{
-        candidate.ranking_reason = "fallback";
-      }
-      fallback_candidates.push_back(candidate);
-    }
-  }
-
-  auto sort_candidates =
-    [&candidate_score](std::vector<EntryAnchorCandidate> * candidates) {
-      std::sort(
-        candidates->begin(),
-        candidates->end(),
-        [&candidate_score](const EntryAnchorCandidate & lhs, const EntryAnchorCandidate & rhs) {
-          const double lhs_score = candidate_score(lhs);
-          const double rhs_score = candidate_score(rhs);
-          if(std::abs(lhs_score - rhs_score) > 1e-6){
-            return lhs_score > rhs_score;
-          }
-          if(std::abs(lhs.arc_distance - rhs.arc_distance) > 1e-6){
-            return lhs.arc_distance < rhs.arc_distance;
-          }
-          return lhs.index < rhs.index;
-        });
-    };
-
-  sort_candidates(&preferred_candidates);
-  sort_candidates(&secondary_candidates);
-  sort_candidates(&fallback_candidates);
-
-  std::vector<EntryAnchorCandidate> candidate_indices;
-  auto append_unique =
-    [&candidate_indices](const std::vector<EntryAnchorCandidate> & source) {
-      for(const auto & candidate : source){
-        const auto existing = std::find_if(
-          candidate_indices.begin(),
-          candidate_indices.end(),
-          [&candidate](const EntryAnchorCandidate & current) {
-            return current.index == candidate.index;
-          });
-        if(existing ==
-           candidate_indices.end())
-        {
-          candidate_indices.push_back(candidate);
-        }
-      }
-    };
-
-  append_unique(preferred_candidates);
-  append_unique(secondary_candidates);
-  if(candidate_indices.empty()){
-    append_unique(fallback_candidates);
-  }
-
-  return candidate_indices;
-}
-
-bool GlobalPlanner::buildAnchorPoseFromRoute(
-  const nav_msgs::msg::Path & raw_route,
-  std::size_t anchor_index,
-  geometry_msgs::msg::PoseStamped * anchor_pose,
-  double * anchor_yaw) const
-{
-  if(anchor_pose == nullptr || anchor_yaw == nullptr || raw_route.poses.empty()){
-    return false;
-  }
-
-  anchor_index = std::min(anchor_index, raw_route.poses.size() - 1);
-  std::size_t tangent_start_index = anchor_index;
-  std::size_t tangent_end_index = anchor_index;
-  constexpr double kMinTangentDistance = 0.15;
-
-  for(std::size_t i = anchor_index; i > 0; --i){
-    const double dx =
-      raw_route.poses[anchor_index].pose.position.x - raw_route.poses[i - 1].pose.position.x;
-    const double dy =
-      raw_route.poses[anchor_index].pose.position.y - raw_route.poses[i - 1].pose.position.y;
-    const double dz =
-      raw_route.poses[anchor_index].pose.position.z - raw_route.poses[i - 1].pose.position.z;
-    if(std::sqrt(dx * dx + dy * dy + dz * dz) >= kMinTangentDistance){
-      tangent_start_index = i - 1;
-      break;
-    }
-  }
-
-  for(std::size_t i = anchor_index + 1; i < raw_route.poses.size(); ++i){
-    const double dx =
-      raw_route.poses[i].pose.position.x - raw_route.poses[anchor_index].pose.position.x;
-    const double dy =
-      raw_route.poses[i].pose.position.y - raw_route.poses[anchor_index].pose.position.y;
-    const double dz =
-      raw_route.poses[i].pose.position.z - raw_route.poses[anchor_index].pose.position.z;
-    if(std::sqrt(dx * dx + dy * dy + dz * dz) >= kMinTangentDistance){
-      tangent_end_index = i;
-      break;
-    }
-  }
-
-  if(tangent_start_index == tangent_end_index){
-    return false;
-  }
-
-  const double dx =
-    raw_route.poses[tangent_end_index].pose.position.x -
-    raw_route.poses[tangent_start_index].pose.position.x;
-  const double dy =
-    raw_route.poses[tangent_end_index].pose.position.y -
-    raw_route.poses[tangent_start_index].pose.position.y;
-  if(std::hypot(dx, dy) < 1e-6){
-    return false;
-  }
-
-  *anchor_yaw = std::atan2(dy, dx);
-  tf2::Quaternion q;
-  q.setRPY(0.0, 0.0, *anchor_yaw);
-
-  *anchor_pose = raw_route.poses[anchor_index];
-  anchor_pose->header.frame_id = global_frame_;
-  anchor_pose->header.stamp = clock_->now();
-  anchor_pose->pose.orientation.x = q.getX();
-  anchor_pose->pose.orientation.y = q.getY();
-  anchor_pose->pose.orientation.z = q.getZ();
-  anchor_pose->pose.orientation.w = q.getW();
-  return true;
-}
-
-nav_msgs::msg::Path GlobalPlanner::composeEntryConnectorWithRouteTail(
-  const nav_msgs::msg::Path & entry_connector,
-  const nav_msgs::msg::Path & raw_route,
-  std::size_t anchor_index) const
-{
-  nav_msgs::msg::Path composed_path;
-  composed_path.header.frame_id = global_frame_;
-  composed_path.header.stamp = clock_->now();
-
-  auto append_pose =
-    [&composed_path](geometry_msgs::msg::PoseStamped pose) {
-      pose.header = composed_path.header;
-      composed_path.poses.push_back(pose);
-    };
-
-  for(const auto & pose : entry_connector.poses){
-    append_pose(pose);
-  }
-
-  if(raw_route.poses.empty()){
-    return composed_path;
-  }
-
-  anchor_index = std::min(anchor_index, raw_route.poses.size() - 1);
-  constexpr double kDedupDistance = 0.05;
-  for(std::size_t i = anchor_index; i < raw_route.poses.size(); ++i){
-    if(!composed_path.poses.empty()){
-      const auto & last_pose = composed_path.poses.back().pose.position;
-      const auto & next_pose = raw_route.poses[i].pose.position;
-      const double dx = last_pose.x - next_pose.x;
-      const double dy = last_pose.y - next_pose.y;
-      const double dz = last_pose.z - next_pose.z;
-      if(std::sqrt(dx * dx + dy * dy + dz * dz) <= kDedupDistance){
-        continue;
-      }
-    }
-    append_pose(raw_route.poses[i]);
-  }
-
-  return composed_path;
-}
-
-bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
+bool GlobalPlanner::buildFrozenRouteLocked(
   const geometry_msgs::msg::PoseStamped & start,
   const geometry_msgs::msg::PoseStamped & goal,
   nav_msgs::msg::Path * raw_route,
   nav_msgs::msg::Path * frozen_route,
-  std::size_t * anchor_index,
-  double * anchor_distance,
-  std::size_t * connector_pose_count,
-  bool * connector_used_fallback,
   const CancelRequestedCallback & cancel_requested,
   bool * was_canceled,
   std::size_t request_id,
@@ -1798,7 +1203,11 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
   if(!raw_route_stage_started && start_projection.success && goal_projection.success){
     raw_route_stage_started = true;
     raw_route_stage_started_at = std::chrono::steady_clock::now();
-    publish_stage("raw_route", raw_route_stage_started_at, raw_route_search_diagnostics.expansions, "in_progress");
+    publish_stage(
+      "raw_route",
+      raw_route_stage_started_at,
+      raw_route_search_diagnostics.expansions,
+      "in_progress");
   }
 
   if(was_canceled != nullptr && *was_canceled){
@@ -1808,6 +1217,7 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
     frozen_route->poses.clear();
     return false;
   }
+
   const bool projection_failed = !start_projection.success || !goal_projection.success;
   if(raw_route->poses.empty()){
     const std::string raw_route_result_class =
@@ -1833,8 +1243,7 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
       goal_projection.ground_z,
       goal_projection.projection_distance,
       goal_projection.fallback.c_str());
-  }
-  else{
+  } else {
     RCLCPP_DEBUG(
       this->get_logger(),
       "raw route stage finished, goal_seq=%zu, request_id=%zu, stage=raw_route, backend=%s, success=1, result_class=succeeded, expansions=%zu, planning_time=%.3f, path_poses=%zu, start_ground_idx=%zu, start_ground_z=%.2f, start_projection_distance=%.3f, start_fallback=%s, goal_ground_idx=%zu, goal_ground_z=%.2f, goal_projection_distance=%.3f, goal_fallback=%s",
@@ -1853,20 +1262,8 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
       goal_projection.projection_distance,
       goal_projection.fallback.c_str());
   }
-  *frozen_route = *raw_route;
-  if(anchor_index != nullptr){
-    *anchor_index = 0;
-  }
-  if(anchor_distance != nullptr){
-    *anchor_distance = 0.0;
-  }
-  if(connector_pose_count != nullptr){
-    *connector_pose_count = 0;
-  }
-  if(connector_used_fallback != nullptr){
-    *connector_used_fallback = false;
-  }
 
+  *frozen_route = *raw_route;
   if(raw_route->poses.empty()){
     return false;
   }
@@ -1882,370 +1279,12 @@ bool GlobalPlanner::buildFrozenRouteWithEntryConnectorLocked(
     return false;
   }
 
-  if(!enable_entry_connector_){
-    const auto composing_started_at = std::chrono::steady_clock::now();
-    publish_stage("composing_frozen_route", composing_started_at, 0, "in_progress");
-    if(request_result_class != nullptr){
-      *request_result_class = "succeeded_without_entry_connector";
-    }
-    return true;
-  }
-
-  const bool entry_connector_uses_forward_hybrid_astar =
-    entry_connector_backend_ == "forward_hybrid_astar";
-  if(!entry_connector_uses_forward_hybrid_astar || forward_hybrid_astar_planner_ == nullptr){
-    const auto composing_started_at = std::chrono::steady_clock::now();
-    publish_stage("composing_frozen_route", composing_started_at, 0, "in_progress");
-    if(connector_used_fallback != nullptr){
-      *connector_used_fallback = true;
-    }
-    RCLCPP_WARN(
-      this->get_logger(),
-      "entry connector fallback used, goal_seq=%zu, request_id=%zu, stage=entry_connector, entry_connector_backend=%s, fallback_reason=entry_connector_backend_unavailable, raw_route_poses=%zu",
-      goal_seq,
-      request_id,
-      entry_connector_backend_.c_str(),
-      raw_route->poses.size());
-    if(request_result_class != nullptr){
-      *request_result_class = "succeeded_without_entry_connector";
-    }
-    return true;
-  }
-
-  const std::vector<double> arc_lengths = computePathArcLengths(*raw_route);
-  const std::vector<EntryAnchorCandidate> candidate_indices =
-    selectEntryAnchorCandidates(*raw_route, arc_lengths, start);
-  if(candidate_indices.empty()){
-    const auto composing_started_at = std::chrono::steady_clock::now();
-    publish_stage("composing_frozen_route", composing_started_at, 0, "in_progress");
-    if(connector_used_fallback != nullptr){
-      *connector_used_fallback = true;
-    }
-    RCLCPP_WARN(
-      this->get_logger(),
-      "entry connector fallback used, goal_seq=%zu, request_id=%zu, stage=entry_connector, fallback_reason=anchor_invalid, raw_route_poses=%zu",
-      goal_seq,
-      request_id,
-      raw_route->poses.size());
-    if(request_result_class != nullptr){
-      *request_result_class = "startup_connector_missing";
-    }
-    return true;
-  }
-
-  {
-    std::ostringstream candidate_summary;
-    const std::size_t max_logged_candidates = std::min<std::size_t>(candidate_indices.size(), 6);
-    for(std::size_t i = 0; i < max_logged_candidates; ++i){
-      const auto & candidate = candidate_indices[i];
-      if(i > 0){
-        candidate_summary << " | ";
-      }
-      candidate_summary
-        << "#" << i
-        << " idx=" << candidate.index
-        << " arc=" << candidate.arc_distance
-        << " bucket=" << candidate.ranking_bucket
-        << " reason=" << candidate.ranking_reason
-        << " vehicle_side=" << (candidate.in_vehicle_forward_half_plane ? "front" : "rear")
-        << " route_side=" << (candidate.in_route_forward_half_plane ? "forward" : "rear")
-        << " goal_side=" << (candidate.in_goal_forward_half_plane ? "forward" : "rear")
-        << " approach_alignment=" << candidate.approach_alignment
-        << " force_goal_heading=" << (candidate.force_goal_heading ? 1 : 0);
-    }
-    RCLCPP_DEBUG(
-      this->get_logger(),
-      "entry connector candidate ranking, goal_seq=%zu, request_id=%zu, stage=entry_connector, candidate_count=%zu, logged_candidates=%zu, summary=%s",
-      goal_seq,
-      request_id,
-      candidate_indices.size(),
-      max_logged_candidates,
-      candidate_summary.str().c_str());
-  }
-
-  bool success_on_primary_candidate = true;
-  for(std::size_t candidate_order = 0; candidate_order < candidate_indices.size(); ++candidate_order){
-    if(cancel_requested && cancel_requested()){
-      if(was_canceled != nullptr){
-        *was_canceled = true;
-      }
-      if(request_result_class != nullptr){
-        *request_result_class = "planner_canceled";
-      }
-      frozen_route->poses.clear();
-      return false;
-    }
-
-    const auto & candidate = candidate_indices[candidate_order];
-    const std::size_t candidate_index = candidate.index;
-    const double candidate_distance = candidate.arc_distance;
-    const bool candidate_in_window = candidate.in_preferred_window;
-    const auto entry_connector_stage_started_at = std::chrono::steady_clock::now();
-    publish_stage("entry_connector", entry_connector_stage_started_at, 0, "in_progress");
-    geometry_msgs::msg::PoseStamped anchor_pose;
-    double anchor_yaw = 0.0;
-    if(!buildAnchorPoseFromRoute(*raw_route, candidate_index, &anchor_pose, &anchor_yaw)){
-      RCLCPP_WARN(
-        this->get_logger(),
-        "entry connector candidate failed, goal_seq=%zu, request_id=%zu, stage=entry_connector, candidate_order=%zu, anchor_index=%zu, anchor_arc_distance=%.2f, preferred_window=%d, ranking_bucket=%s, ranking_reason=%s, vehicle_side=%s, route_side=%s, goal_side=%s, approach_alignment=%.3f, force_goal_heading=%d, fallback_reason=anchor_invalid",
-        goal_seq,
-        request_id,
-        candidate_order,
-        candidate_index,
-        candidate_distance,
-        candidate_in_window ? 1 : 0,
-        candidate.ranking_bucket.c_str(),
-        candidate.ranking_reason.c_str(),
-        candidate.in_vehicle_forward_half_plane ? "front" : "rear",
-        candidate.in_route_forward_half_plane ? "forward" : "rear",
-        candidate.in_goal_forward_half_plane ? "forward" : "rear",
-        candidate.approach_alignment,
-        candidate.force_goal_heading ? 1 : 0);
-      success_on_primary_candidate = false;
-      continue;
-    }
-
-    RCLCPP_DEBUG(
-      this->get_logger(),
-      "entry connector candidate start, goal_seq=%zu, request_id=%zu, stage=entry_connector, entry_connector_enabled=%d, entry_connector_backend=%s, candidate_order=%zu, anchor_index=%zu, anchor_arc_distance=%.2f, preferred_window=%d, ranking_bucket=%s, ranking_reason=%s, vehicle_side=%s, route_side=%s, goal_side=%s, vehicle_forward_projection=%.3f, route_forward_projection=%.3f, goal_forward_projection=%.3f, approach_alignment=%.3f, force_goal_heading=%d, anchor_pose=(%.2f, %.2f, %.2f), anchor_yaw=%.2f",
-      goal_seq,
-      request_id,
-      enable_entry_connector_ ? 1 : 0,
-      entry_connector_backend_.c_str(),
-      candidate_order,
-      candidate_index,
-      candidate_distance,
-      candidate_in_window ? 1 : 0,
-      candidate.ranking_bucket.c_str(),
-      candidate.ranking_reason.c_str(),
-      candidate.in_vehicle_forward_half_plane ? "front" : "rear",
-      candidate.in_route_forward_half_plane ? "forward" : "rear",
-      candidate.in_goal_forward_half_plane ? "forward" : "rear",
-      candidate.vehicle_forward_projection,
-      candidate.route_forward_projection,
-      candidate.goal_forward_projection,
-      candidate.approach_alignment,
-      candidate.force_goal_heading ? 1 : 0,
-      anchor_pose.pose.position.x,
-      anchor_pose.pose.position.y,
-      anchor_pose.pose.position.z,
-      anchor_yaw);
-
-    nav_msgs::msg::Path entry_connector;
-    bool entry_connector_canceled = false;
-    ForwardHybridAStar::SearchDiagnostics entry_connector_search_diagnostics;
-    ForwardHybridAStar::ProjectionDiagnostics entry_connector_start_projection;
-    ForwardHybridAStar::ProjectionDiagnostics entry_anchor_projection;
-    bool entry_connector_search_started = false;
-    auto entry_connector_search_started_at = std::chrono::steady_clock::now();
-    const auto entry_connector_progress_callback =
-      [&publish_stage, &entry_connector_search_started, &entry_connector_search_started_at](
-        const ForwardHybridAStar::SearchDiagnostics & diagnostics)
-      {
-        if(!entry_connector_search_started){
-          entry_connector_search_started = true;
-          entry_connector_search_started_at = std::chrono::steady_clock::now();
-        }
-        publish_stage(
-          "entry_connector",
-          entry_connector_search_started_at,
-          diagnostics.expansions,
-          "in_progress");
-      };
-    std::ostringstream entry_connector_debug_label;
-    entry_connector_debug_label
-      << "entry_connector goal_seq=" << goal_seq
-      << ", request_id=" << request_id
-      << ", stage=entry_connector"
-      << ", candidate_order=" << candidate_order
-      << ", anchor_index=" << candidate_index
-      << ", ranking_bucket=" << candidate.ranking_bucket
-      << ", ranking_reason=" << candidate.ranking_reason
-      << ", force_goal_heading=" << (candidate.force_goal_heading ? 1 : 0);
-    if(!forward_hybrid_astar_planner_->MakePlan(
-         start,
-         anchor_pose,
-         &entry_connector,
-         false,
-         candidate.force_goal_heading,
-         0,
-         cancel_requested,
-         &entry_connector_canceled,
-         entry_connector_debug_label.str(),
-         &entry_connector_search_diagnostics,
-         &entry_connector_start_projection,
-         &entry_anchor_projection,
-         entry_connector_progress_callback))
-    {
-      if(entry_connector_canceled){
-        RCLCPP_WARN(
-          this->get_logger(),
-          "entry_connector planning canceled, goal_seq=%zu, request_id=%zu, stage=entry_connector, candidate_order=%zu, anchor_index=%zu, ranking_bucket=%s, ranking_reason=%s, vehicle_side=%s, route_side=%s, goal_side=%s, approach_alignment=%.3f, force_goal_heading=%d, expansions=%zu, planning_time=%.3f, fallback_reason=connector_canceled",
-          goal_seq,
-          request_id,
-          candidate_order,
-          candidate_index,
-          candidate.ranking_bucket.c_str(),
-          candidate.ranking_reason.c_str(),
-          candidate.in_vehicle_forward_half_plane ? "front" : "rear",
-          candidate.in_route_forward_half_plane ? "forward" : "rear",
-          candidate.in_goal_forward_half_plane ? "forward" : "rear",
-          candidate.approach_alignment,
-          candidate.force_goal_heading ? 1 : 0,
-          entry_connector_search_diagnostics.expansions,
-          entry_connector_search_diagnostics.planning_time_sec);
-        if(was_canceled != nullptr){
-          *was_canceled = true;
-        }
-        if(request_result_class != nullptr){
-          *request_result_class = "planner_canceled";
-        }
-        frozen_route->poses.clear();
-        return false;
-      }
-      RCLCPP_WARN(
-        this->get_logger(),
-        "entry connector candidate result, goal_seq=%zu, request_id=%zu, stage=entry_connector, candidate_order=%zu, anchor_index=%zu, preferred_window=%d, ranking_bucket=%s, ranking_reason=%s, vehicle_side=%s, route_side=%s, goal_side=%s, approach_alignment=%.3f, force_goal_heading=%d, success=0, expansions=%zu, planning_time=%.3f, connector_poses=%zu, anchor_ground_idx=%zu, anchor_ground_z=%.2f, anchor_projection_distance=%.3f, anchor_fallback=%s, fallback_reason=connector_search_failed",
-        goal_seq,
-        request_id,
-        candidate_order,
-        candidate_index,
-        candidate_in_window ? 1 : 0,
-        candidate.ranking_bucket.c_str(),
-        candidate.ranking_reason.c_str(),
-        candidate.in_vehicle_forward_half_plane ? "front" : "rear",
-        candidate.in_route_forward_half_plane ? "forward" : "rear",
-        candidate.in_goal_forward_half_plane ? "forward" : "rear",
-        candidate.approach_alignment,
-        candidate.force_goal_heading ? 1 : 0,
-        entry_connector_search_diagnostics.expansions,
-        entry_connector_search_diagnostics.planning_time_sec,
-        entry_connector_search_diagnostics.path_pose_count,
-        entry_anchor_projection.ground_index,
-        entry_anchor_projection.ground_z,
-        entry_anchor_projection.projection_distance,
-        entry_anchor_projection.fallback.c_str());
-      success_on_primary_candidate = false;
-      continue;
-    }
-
-    if(cancel_requested && cancel_requested()){
-      if(was_canceled != nullptr){
-        *was_canceled = true;
-      }
-      if(request_result_class != nullptr){
-        *request_result_class = "planner_canceled";
-      }
-      frozen_route->poses.clear();
-      return false;
-    }
-
-    RCLCPP_DEBUG(
-      this->get_logger(),
-      "entry connector candidate result, goal_seq=%zu, request_id=%zu, stage=entry_connector, candidate_order=%zu, anchor_index=%zu, preferred_window=%d, ranking_bucket=%s, ranking_reason=%s, vehicle_side=%s, route_side=%s, goal_side=%s, approach_alignment=%.3f, force_goal_heading=%d, success=1, expansions=%zu, planning_time=%.3f, connector_poses=%zu, anchor_ground_idx=%zu, anchor_ground_z=%.2f, anchor_projection_distance=%.3f, anchor_fallback=%s",
-      goal_seq,
-      request_id,
-      candidate_order,
-      candidate_index,
-      candidate_in_window ? 1 : 0,
-      candidate.ranking_bucket.c_str(),
-      candidate.ranking_reason.c_str(),
-      candidate.in_vehicle_forward_half_plane ? "front" : "rear",
-      candidate.in_route_forward_half_plane ? "forward" : "rear",
-      candidate.in_goal_forward_half_plane ? "forward" : "rear",
-      candidate.approach_alignment,
-      candidate.force_goal_heading ? 1 : 0,
-      entry_connector_search_diagnostics.expansions,
-      entry_connector_search_diagnostics.planning_time_sec,
-      entry_connector.poses.size(),
-      entry_anchor_projection.ground_index,
-      entry_anchor_projection.ground_z,
-      entry_anchor_projection.projection_distance,
-      entry_anchor_projection.fallback.c_str());
-    const auto composing_started_at = std::chrono::steady_clock::now();
-    publish_stage("composing_frozen_route", composing_started_at, 0, "in_progress");
-    nav_msgs::msg::Path composed_route =
-      composeEntryConnectorWithRouteTail(entry_connector, *raw_route, candidate_index);
-    if(composed_route.poses.empty()){
-      RCLCPP_WARN(
-        this->get_logger(),
-        "entry connector candidate failed, goal_seq=%zu, request_id=%zu, stage=composing_frozen_route, candidate_order=%zu, anchor_index=%zu, anchor_arc_distance=%.2f, ranking_bucket=%s, ranking_reason=%s, vehicle_side=%s, route_side=%s, goal_side=%s, approach_alignment=%.3f, force_goal_heading=%d, fallback_reason=composition_empty",
-        goal_seq,
-        request_id,
-        candidate_order,
-        candidate_index,
-        candidate_distance,
-        candidate.ranking_bucket.c_str(),
-        candidate.ranking_reason.c_str(),
-        candidate.in_vehicle_forward_half_plane ? "front" : "rear",
-        candidate.in_route_forward_half_plane ? "forward" : "rear",
-        candidate.in_goal_forward_half_plane ? "forward" : "rear",
-        candidate.approach_alignment,
-        candidate.force_goal_heading ? 1 : 0);
-      success_on_primary_candidate = false;
-      continue;
-    }
-
-    *frozen_route = composed_route;
-    if(anchor_index != nullptr){
-      *anchor_index = candidate_index;
-    }
-    if(anchor_distance != nullptr){
-      *anchor_distance = candidate_distance;
-    }
-    if(connector_pose_count != nullptr){
-      *connector_pose_count = entry_connector.poses.size();
-    }
-    if(connector_used_fallback != nullptr){
-      *connector_used_fallback =
-        !candidate_in_window || !success_on_primary_candidate || candidate_order > 0;
-    }
-    if(request_result_class != nullptr){
-      *request_result_class = "succeeded_with_entry_connector";
-    }
-    return true;
-  }
-
   const auto composing_started_at = std::chrono::steady_clock::now();
   publish_stage("composing_frozen_route", composing_started_at, 0, "in_progress");
-  if(connector_used_fallback != nullptr){
-    *connector_used_fallback = true;
-  }
-  RCLCPP_WARN(
-    this->get_logger(),
-    "entry connector fallback used, goal_seq=%zu, request_id=%zu, stage=entry_connector, fallback_reason=connector_search_failed, raw_route_poses=%zu",
-    goal_seq,
-    request_id,
-    raw_route->poses.size());
   if(request_result_class != nullptr){
-    *request_result_class = "startup_connector_missing";
+    *request_result_class = "succeeded";
   }
   return true;
-}
-
-bool GlobalPlanner::BuildFrozenRouteWithEntryConnector(
-  const geometry_msgs::msg::PoseStamped & start,
-  const geometry_msgs::msg::PoseStamped & goal,
-  nav_msgs::msg::Path * frozen_route,
-  const CancelRequestedCallback & cancel_requested,
-  bool * was_canceled)
-{
-  nav_msgs::msg::Path raw_route;
-  std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
-  return buildFrozenRouteWithEntryConnectorLocked(
-    start,
-    goal,
-    &raw_route,
-    frozen_route,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
-    cancel_requested,
-    was_canceled,
-    0,
-    0,
-    nullptr);
 }
 
 void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle){
@@ -2286,10 +1325,6 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
 
   nav_msgs::msg::Path raw_route;
   nav_msgs::msg::Path frozen_route;
-  std::size_t anchor_index = 0;
-  double anchor_distance = 0.0;
-  std::size_t connector_pose_count = 0;
-  bool connector_used_fallback = false;
   bool planner_canceled = false;
   std::string request_result_class = "failed_raw_route";
 
@@ -2299,15 +1334,11 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
   }
   {
     std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
-    if(!buildFrozenRouteWithEntryConnectorLocked(
+    if(!buildFrozenRouteLocked(
          start,
          goal->goal,
          &raw_route,
          &frozen_route,
-         &anchor_index,
-         &anchor_distance,
-         &connector_pose_count,
-         &connector_used_fallback,
          cancel_requested,
          &planner_canceled,
          request_id,
@@ -2353,44 +1384,17 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
       goal_seq,
       route_version,
       raw_route.poses.size());
-    if(!connector_used_fallback && connector_pose_count > 0){
-      RCLCPP_INFO(
-        this->get_logger(),
-        "entry connector generated successfully, goal_seq=%zu, route_version=%zu, anchor_index=%zu, anchor_distance=%.2f, connector_poses=%zu, route_tail_poses=%zu, frozen_route_poses=%zu",
-        goal_seq,
-        route_version,
-        anchor_index,
-        anchor_distance,
-        connector_pose_count,
-        raw_route.poses.size() > anchor_index ? raw_route.poses.size() - anchor_index : 0,
-        frozen_route.poses.size());
-    }
-    else if(enable_entry_connector_){
-      RCLCPP_WARN(
-        this->get_logger(),
-        "entry connector fallback used, goal_seq=%zu, route_version=%zu, anchor_index=%zu, anchor_distance=%.2f, raw_route_poses=%zu, frozen_route_poses=%zu",
-        goal_seq,
-        route_version,
-        anchor_index,
-        anchor_distance,
-        raw_route.poses.size(),
-        frozen_route.poses.size());
-    }
     publishFrozenRouteDebugPath(
       frozen_route,
       goal_seq,
       route_version,
-      connector_used_fallback ? "get_plan_frozen_route_fallback" : "get_plan_frozen_route");
+      "get_plan_frozen_route");
     RCLCPP_DEBUG(
       this->get_logger(),
-      "frozen route composed, goal_seq=%zu, route_version=%zu, route_tail_poses=%zu, connector_poses=%zu, frozen_route_poses=%zu, anchor_index=%zu, anchor_distance=%.2f",
+      "frozen route composed, goal_seq=%zu, route_version=%zu, frozen_route_poses=%zu",
       goal_seq,
       route_version,
-      raw_route.poses.size() > anchor_index ? raw_route.poses.size() - anchor_index : 0,
-      connector_pose_count,
-      frozen_route.poses.size(),
-      anchor_index,
-      anchor_distance);
+      frozen_route.poses.size());
     pub_path_->publish(frozen_route);
     RCLCPP_DEBUG(
       this->get_logger(),
@@ -2480,26 +1484,14 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
   }
 
   const bool raw_route_uses_forward_hybrid_astar =
-    raw_route_backend_ == "forward_hybrid_astar";
+    raw_route_backend_ == "hybrid_a_star";
   const auto elapsed_seconds =
     [](const std::chrono::steady_clock::time_point & started_at) {
       return std::chrono::duration<double>(
         std::chrono::steady_clock::now() - started_at).count();
     };
-  const bool allow_direct_shortcut =
-    enable_direct_path_shortcut_ && !raw_route_uses_forward_hybrid_astar;
-  if(allow_direct_shortcut && buildStraightLinePlan(start, goal, ros_path)){
-    if(search_diagnostics != nullptr){
-      search_diagnostics->success = true;
-      search_diagnostics->canceled = false;
-      search_diagnostics->expansions = 0;
-      search_diagnostics->planning_time_sec = 0.0;
-      search_diagnostics->path_pose_count = ros_path.poses.size();
-    }
-    return ros_path;
-  }
 
-  if(raw_route_uses_forward_hybrid_astar && use_forward_hybrid_astar_ && forward_hybrid_astar_planner_){
+  if(raw_route_uses_forward_hybrid_astar && forward_hybrid_astar_planner_){
     nav_msgs::msg::Path hybrid_path;
     bool hybrid_planning_canceled = false;
     if(forward_hybrid_astar_planner_->MakePlan(
@@ -2527,12 +1519,23 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
     }
     RCLCPP_WARN_THROTTLE(
       this->get_logger(), *clock_, 2000,
-      "ForwardHybridAStar raw_route failed, fallback to graph_a_star.");
+      "hybrid_a_star raw_route failed; fallback to graph_a_star is disabled.");
+    ros_path.poses.clear();
+    return ros_path;
   }
   else if(raw_route_uses_forward_hybrid_astar){
     RCLCPP_WARN_THROTTLE(
       this->get_logger(), *clock_, 2000,
-      "raw_route_backend=forward_hybrid_astar requested but backend is unavailable, fallback to graph_a_star.");
+      "raw_route_backend=hybrid_a_star requested but backend is unavailable; fallback to graph_a_star is disabled.");
+    if(search_diagnostics != nullptr){
+      search_diagnostics->success = false;
+      search_diagnostics->canceled = false;
+      search_diagnostics->expansions = 0;
+      search_diagnostics->planning_time_sec = 0.0;
+      search_diagnostics->path_pose_count = 0;
+    }
+    ros_path.poses.clear();
+    return ros_path;
   }
 
   if(cancel_requested && cancel_requested()){

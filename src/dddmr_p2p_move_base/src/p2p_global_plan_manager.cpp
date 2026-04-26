@@ -50,17 +50,8 @@ bool is_client_side_timeout_reason(const std::string & reason)
 
 std::string timeout_result_class_from_stage(const std::string & stage)
 {
-  if(stage == "entry_connector"){
-    return "timed_out_during_entry_connector";
-  }
+  (void)stage;
   return "timed_out_during_raw_route";
-}
-
-bool result_class_indicates_missing_entry_connector(const std::string & result_class)
-{
-  return
-    result_class == "succeeded_without_entry_connector" ||
-    result_class == "startup_connector_missing";
 }
 
 std::string classify_aborted_planner_result(
@@ -72,9 +63,6 @@ std::string classify_aborted_planner_result(
     }
     if(diagnostics->stage == "projecting"){
       return "failed_projection";
-    }
-    if(diagnostics->stage == "entry_connector"){
-      return "failed_entry_connector";
     }
   }
   return "failed_raw_route";
@@ -142,8 +130,7 @@ P2PGlobalPlanManager::P2PGlobalPlanManager(std::string name)
   goal_seq_(0),
   route_version_(0),
   next_route_request_id_(0),
-  active_route_request_id_(0),
-  route_has_entry_connector_(false)
+  active_route_request_id_(0)
 {
   clock_ = this->get_clock();
   route_result_class_.clear();
@@ -350,7 +337,6 @@ void P2PGlobalPlanManager::stop(const std::string & reason){
     route_request_failed_ = false;
     route_source_label_.clear();
     route_result_class_.clear();
-    route_has_entry_connector_ = false;
     active_route_request_handle_.reset();
     active_route_request_id_ = 0;
     route_request_cancel_reasons_.clear();
@@ -610,8 +596,6 @@ void P2PGlobalPlanManager::global_planner_client_result_callback(
           stored_result_class = "succeeded";
         }
         route_result_class_ = stored_result_class;
-        route_has_entry_connector_ =
-          !result_class_indicates_missing_entry_connector(route_result_class_);
         if(freeze_route_per_goal_){
           frozen_route_ = active_route_;
         }
@@ -623,7 +607,6 @@ void P2PGlobalPlanManager::global_planner_client_result_callback(
         frozen_route_.poses.clear();
         route_source_label_.clear();
         route_result_class_.clear();
-        route_has_entry_connector_ = false;
         route_requested_for_goal_ = false;
         route_request_failed_ = result.code == rclcpp_action::ResultCode::ABORTED;
       }
@@ -793,7 +776,6 @@ void P2PGlobalPlanManager::setGoal(const geometry_msgs::msg::PoseStamped& goal){
   frozen_route_.poses.clear();
   route_source_label_.clear();
   route_result_class_.clear();
-  route_has_entry_connector_ = false;
   active_route_request_handle_.reset();
   active_route_request_id_ = 0;
   route_request_cancel_reasons_.clear();
@@ -820,7 +802,6 @@ void P2PGlobalPlanManager::copyRoute(
   std::size_t * route_version,
   std::size_t * goal_seq,
   std::string * source_label,
-  bool * has_entry_connector,
   std::string * result_class)
 {
   std::unique_lock<std::mutex> lock(access_);
@@ -846,15 +827,6 @@ void P2PGlobalPlanManager::copyRoute(
     }
     else{
       *source_label = "planner_result";
-    }
-  }
-  if(has_entry_connector != nullptr){
-    if(route_result_class_.empty()){
-      *has_entry_connector = true;
-    }
-    else{
-      *has_entry_connector =
-        !result_class_indicates_missing_entry_connector(route_result_class_);
     }
   }
   if(result_class != nullptr){

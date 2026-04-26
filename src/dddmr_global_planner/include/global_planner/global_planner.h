@@ -109,12 +109,6 @@ class GlobalPlanner : public rclcpp::Node {
         ForwardHybridAStar::ProjectionDiagnostics * goal_projection = nullptr,
         const ForwardHybridAStar::ProgressCallback & progress_callback =
           ForwardHybridAStar::ProgressCallback());
-      bool BuildFrozenRouteWithEntryConnector(
-        const geometry_msgs::msg::PoseStamped & start,
-        const geometry_msgs::msg::PoseStamped & goal,
-        nav_msgs::msg::Path * frozen_route,
-        const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
-        bool * was_canceled = nullptr);
       std::shared_ptr<dddmr_sys_core::action::GetPlan::Result> global_plan_result_;
 
     private:
@@ -156,15 +150,7 @@ class GlobalPlanner : public rclcpp::Node {
       double turning_weight_;
       bool enable_detail_log_;
       double a_star_expanding_radius_;
-      double direct_path_distance_threshold_;
       std::string raw_route_backend_;
-      bool use_forward_hybrid_astar_;
-      bool enable_direct_path_shortcut_;
-      bool enable_entry_connector_;
-      std::string entry_connector_backend_;
-      double entry_connector_min_anchor_distance_;
-      double entry_connector_max_anchor_distance_;
-      bool entry_connector_force_goal_heading_;
       bool graph_path_smoothing_enable_;
       int graph_path_smoothing_iterations_;
       double graph_path_smoothing_weight_;
@@ -227,10 +213,6 @@ class GlobalPlanner : public rclcpp::Node {
         const std::vector<int>& point_indices,
         const std::vector<float>& point_squared_distances) const;
 
-      bool buildStraightLinePlan(
-        const geometry_msgs::msg::PoseStamped& start,
-        const geometry_msgs::msg::PoseStamped& goal,
-        nav_msgs::msg::Path& ros_path);
       bool clearCurrentHandleIfMatches(
         const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle);
       void publishRawRouteDebugPath(
@@ -264,52 +246,16 @@ class GlobalPlanner : public rclcpp::Node {
         ForwardHybridAStar::ProjectionDiagnostics * goal_projection = nullptr,
         const ForwardHybridAStar::ProgressCallback & progress_callback =
           ForwardHybridAStar::ProgressCallback());
-      bool buildFrozenRouteWithEntryConnectorLocked(
+      bool buildFrozenRouteLocked(
         const geometry_msgs::msg::PoseStamped & start,
         const geometry_msgs::msg::PoseStamped & goal,
         nav_msgs::msg::Path * raw_route,
         nav_msgs::msg::Path * frozen_route,
-        std::size_t * anchor_index,
-        double * anchor_distance,
-        std::size_t * connector_pose_count,
-        bool * connector_used_fallback,
         const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
         bool * was_canceled = nullptr,
         std::size_t request_id = 0,
         std::size_t goal_seq = 0,
         std::string * request_result_class = nullptr);
-      struct EntryAnchorCandidate
-      {
-        std::size_t index = 0;
-        double arc_distance = 0.0;
-        bool in_preferred_window = false;
-        bool has_valid_anchor_pose = false;
-        bool in_vehicle_forward_half_plane = true;
-        bool in_route_forward_half_plane = true;
-        bool in_goal_forward_half_plane = true;
-        double vehicle_forward_projection = 0.0;
-        double route_forward_projection = 0.0;
-        double goal_forward_projection = 0.0;
-        double approach_alignment = 0.0;
-        double anchor_yaw = 0.0;
-        bool force_goal_heading = false;
-        std::string ranking_bucket;
-        std::string ranking_reason;
-      };
-      std::vector<double> computePathArcLengths(const nav_msgs::msg::Path & path) const;
-      std::vector<EntryAnchorCandidate> selectEntryAnchorCandidates(
-        const nav_msgs::msg::Path & raw_route,
-        const std::vector<double> & arc_lengths,
-        const geometry_msgs::msg::PoseStamped & start) const;
-      bool buildAnchorPoseFromRoute(
-        const nav_msgs::msg::Path & raw_route,
-        std::size_t anchor_index,
-        geometry_msgs::msg::PoseStamped * anchor_pose,
-        double * anchor_yaw) const;
-      nav_msgs::msg::Path composeEntryConnectorWithRouteTail(
-        const nav_msgs::msg::Path & entry_connector,
-        const nav_msgs::msg::Path & raw_route,
-        std::size_t anchor_index) const;
 
       void pubStaticGraph();
       void getROSPath(std::vector<unsigned int>& path_id, nav_msgs::msg::Path& ros_path);

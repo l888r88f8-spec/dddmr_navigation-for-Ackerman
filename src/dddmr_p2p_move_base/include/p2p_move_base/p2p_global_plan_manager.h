@@ -100,7 +100,6 @@ private:
   nav_msgs::msg::Path frozen_route_;
   std::string route_source_label_;
   std::string route_result_class_;
-  bool route_has_entry_connector_;
   GetPlanClientGoalHandle::SharedPtr active_route_request_handle_;
   std::unordered_map<std::size_t, std::string> route_request_cancel_reasons_;
   std::unordered_map<std::size_t, PlannerRouteRequestDiagnostics> planner_route_request_diagnostics_;
@@ -145,14 +144,12 @@ public:
     std::size_t * route_version = nullptr,
     std::size_t * goal_seq = nullptr,
     std::string * source_label = nullptr,
-    bool * has_entry_connector = nullptr,
     std::string * result_class = nullptr);
   void copyPlan(
     std::vector<geometry_msgs::msg::PoseStamped>& plan,
     std::size_t * route_version = nullptr,
     std::size_t * goal_seq = nullptr,
     std::string * source_label = nullptr,
-    bool * has_entry_connector = nullptr,
     std::string * result_class = nullptr)
   {
     copyRoute(
@@ -160,7 +157,6 @@ public:
       route_version,
       goal_seq,
       source_label,
-      has_entry_connector,
       result_class);
   }
 
