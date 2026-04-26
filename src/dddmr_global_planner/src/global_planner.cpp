@@ -1682,18 +1682,22 @@ void GlobalPlanner::getStaticGraphFromPerception3D(){
   RCLCPP_DEBUG(this->get_logger(), "Static graph is generated with size: %lu", static_graph_.getSize());
   */
 
+  const bool raw_route_uses_graph_astar = raw_route_backend_ == "graph_a_star";
+
   if(!has_initialized_){
     has_initialized_ = true;
-    if(a_star_expanding_radius_ >= perception_3d_ros_->getGlobalUtils()->getInscribedRadius()*2){
-      RCLCPP_WARN(this->get_logger(), "Expanding radius is much larger than InscribedRadius, the planning time will be increased.");
-    }
-    if(!use_pre_graph_){
-      a_star_planner_ = std::make_shared<A_Star_on_Graph>(pcl_ground_, perception_3d_ros_, a_star_expanding_radius_);
-      a_star_planner_->setupTurningWeight(turning_weight_);
-    }
-    else{
-      a_star_planner_pre_graph_ = std::make_shared<A_Star_on_PreGraph>(pcl_ground_, static_graph_, perception_3d_ros_, a_star_expanding_radius_);
-      a_star_planner_pre_graph_->setupTurningWeight(turning_weight_);
+    if(raw_route_uses_graph_astar){
+      if(a_star_expanding_radius_ >= perception_3d_ros_->getGlobalUtils()->getInscribedRadius()*2){
+        RCLCPP_WARN(this->get_logger(), "Expanding radius is much larger than InscribedRadius, the planning time will be increased.");
+      }
+      if(!use_pre_graph_){
+        a_star_planner_ = std::make_shared<A_Star_on_Graph>(pcl_ground_, perception_3d_ros_, a_star_expanding_radius_);
+        a_star_planner_->setupTurningWeight(turning_weight_);
+      }
+      else{
+        a_star_planner_pre_graph_ = std::make_shared<A_Star_on_PreGraph>(pcl_ground_, static_graph_, perception_3d_ros_, a_star_expanding_radius_);
+        a_star_planner_pre_graph_->setupTurningWeight(turning_weight_);
+      }
     }
 
     forward_hybrid_astar_planner_ = std::make_shared<ForwardHybridAStar>(
@@ -1702,11 +1706,13 @@ void GlobalPlanner::getStaticGraphFromPerception3D(){
     forward_hybrid_astar_planner_->SetGlobalFrame(global_frame_);
   }
   else{
-    if(!use_pre_graph_){
-      a_star_planner_->updateGraph(pcl_ground_);
-    }
-    else{
-      a_star_planner_pre_graph_->updateGraph(pcl_ground_, static_graph_);
+    if(raw_route_uses_graph_astar){
+      if(!use_pre_graph_ && a_star_planner_){
+        a_star_planner_->updateGraph(pcl_ground_);
+      }
+      else if(use_pre_graph_ && a_star_planner_pre_graph_){
+        a_star_planner_pre_graph_->updateGraph(pcl_ground_, static_graph_);
+      }
     }
     if(forward_hybrid_astar_planner_){
       forward_hybrid_astar_planner_->SetConfig(forward_hybrid_astar_config_);
