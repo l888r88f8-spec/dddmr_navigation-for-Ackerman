@@ -1,12 +1,8 @@
 # dddmr_navigation-for-Ackerman
 
-本仓库是基于[dddmr_navigation](https://github.com/dfl-rlab/dddmr_navigation)改造的 Ackermann 车型三维导航包，当前主入口为：
+本仓库是基于[dddmr_navigation](https://github.com/dfl-rlab/dddmr_navigation)改造的 Ackermann 车型三维导航包，适配了hybrid_a_star+RPP。
 
-```bash
-ros2 launch p2p_move_base p2p_move_base_localization.launch.py
-```
-
-该启动文件面向已经有定位/SLAM 输出的车辆：外部系统提供机器人在 `map` 下的位姿、里程计和去地点云，本导航栈读取静态 3D 地图，完成全局规划、局部避障和速度指令输出。
+该项目面向已经有定位/SLAM 输出的车辆：外部系统提供机器人在 `map` 下的位姿、里程计和去地点云，本导航栈读取静态 3D 地图，完成全局规划、局部避障和速度指令输出。
 
 ## 功能组成
 
