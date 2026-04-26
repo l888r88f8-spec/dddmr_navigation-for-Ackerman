@@ -172,7 +172,7 @@ local_planner:
     causal_prune_max_heading_error: 1.75                        # 候选切线与车头最大夹角（rad）
     min_heading_reference_length: 0.3                           # 朝向参考最小长度（m）
     max_heading_reference_stale_cycles: 10                      # 朝向参考最大复用周期
-    max_prune_failure_cycles: 10                                # 连续 prune 失败确认阈值
+    max_prune_failure_cycles: 3                                 # 连续 prune 失败确认阈值
     enable_prune_deviation_hard_fail: false                     # 关闭偏离过大直接失败，优先尝试回拉
     allow_offroute_anchor_recovery: true                        # 偏离后允许在前向窗口恢复锚点
     cached_pruned_path_timeout_sec: 0.8                         # 复用缓存局部路径的最长时长（s）
