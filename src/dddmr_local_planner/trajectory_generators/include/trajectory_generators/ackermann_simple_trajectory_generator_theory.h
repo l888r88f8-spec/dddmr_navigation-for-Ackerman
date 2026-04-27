@@ -40,6 +40,7 @@ class AckermannSimpleTrajectoryGeneratorTheory: public TrajectoryGeneratorTheory
 
     double wheelbase_;
     double max_steer_;
+    double min_sim_distance_;
 };
 
 }//end of name space

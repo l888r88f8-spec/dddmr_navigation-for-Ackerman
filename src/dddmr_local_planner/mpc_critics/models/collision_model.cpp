@@ -72,7 +72,7 @@ double CollisionModel::scoreTrajectory(base_trajectory::Trajectory &traj){
   
 
 
-  double minimum_clearance = std::numeric_limits<double>::infinity();
+  double closest_clearance = std::numeric_limits<double>::infinity();
 
   for(unsigned int i=0;i<traj.getPointsSize();i++){
 
@@ -161,17 +161,17 @@ double CollisionModel::scoreTrajectory(base_trajectory::Trajectory &traj){
         double clearance = std::sqrt(clearance_x * clearance_x +
                                      clearance_y * clearance_y +
                                      clearance_z * clearance_z);
-        minimum_clearance = std::min(minimum_clearance, clearance);
+        closest_clearance = std::min(closest_clearance, clearance);
       }
     }
   }
 
   if(clearance_weight_ > 0.0 &&
      clearance_penalty_distance_ > 0.0 &&
-     std::isfinite(minimum_clearance) &&
-     minimum_clearance < clearance_penalty_distance_)
+     std::isfinite(closest_clearance) &&
+     closest_clearance < clearance_penalty_distance_)
   {
-    return (clearance_penalty_distance_ - minimum_clearance) * clearance_weight_;
+    return (clearance_penalty_distance_ - closest_clearance) * clearance_weight_;
   }
 
   return 0.0;

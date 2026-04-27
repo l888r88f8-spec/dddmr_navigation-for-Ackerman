@@ -38,6 +38,7 @@ namespace trajectory_generators
 {
 
 AckermannSimpleTrajectoryGeneratorTheory::AckermannSimpleTrajectoryGeneratorTheory(){
+  min_sim_distance_ = 0.0;
   return;
 }
 
@@ -122,6 +123,11 @@ void AckermannSimpleTrajectoryGeneratorTheory::onInitialize(){
   node_->declare_parameter(name_ + ".sim_time", rclcpp::ParameterValue(2.0));
   node_->get_parameter(name_ + ".sim_time", params_->sim_time);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "sim_time: %.2f", params_->sim_time);
+
+  node_->declare_parameter(name_ + ".min_sim_distance", rclcpp::ParameterValue(0.0));
+  node_->get_parameter(name_ + ".min_sim_distance", min_sim_distance_);
+  min_sim_distance_ = std::max(0.0, min_sim_distance_);
+  RCLCPP_INFO(node_->get_logger().get_child(name_), "min_sim_distance: %.2f", min_sim_distance_);
 
   node_->declare_parameter(name_ + ".linear_x_sample", rclcpp::ParameterValue(10.0));
   node_->get_parameter(name_ + ".linear_x_sample", params_->linear_x_sample);
@@ -326,8 +332,13 @@ bool AckermannSimpleTrajectoryGeneratorTheory::generateTrajectory(
   }
 
   int num_steps;
-  double sim_time_distance = vmag * params_->sim_time;
-  double sim_time_angle = fabs(sample_target_vel[2]) * params_->sim_time;
+  double effective_sim_time = params_->sim_time;
+  double sim_time_distance = vmag * effective_sim_time;
+  if(vmag > eps && min_sim_distance_ > sim_time_distance){
+    effective_sim_time = min_sim_distance_ / vmag;
+    sim_time_distance = min_sim_distance_;
+  }
+  double sim_time_angle = fabs(sample_target_vel[2]) * effective_sim_time;
   num_steps =
       ceil(std::max(sim_time_distance / params_->sim_granularity,
           sim_time_angle / params_->angular_sim_granularity));
@@ -336,7 +347,7 @@ bool AckermannSimpleTrajectoryGeneratorTheory::generateTrajectory(
     return false;
   }
 
-  double dt = params_->sim_time / num_steps;
+  double dt = effective_sim_time / num_steps;
   traj.time_delta_ = dt;
 
   Eigen::Vector3f loop_vel;

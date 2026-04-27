@@ -83,6 +83,14 @@ Local_Planner::Local_Planner(const std::string& name): Node(name)
   rpp_wheelbase_ = 0.55;
   rpp_max_steer_ = 0.69;
   rpp_max_angular_velocity_ = 1.2;
+  rpp_avoidance_angular_samples_ = 7;
+  rpp_avoidance_angular_span_ratio_ = 1.0;
+  rpp_avoidance_prefer_nominal_weight_ = 0.2;
+  rpp_avoidance_curvature_switch_weight_ = 0.35;
+  rpp_avoidance_turn_switch_penalty_ = 0.25;
+  rpp_avoidance_turn_deadband_ = 0.02;
+  rpp_have_last_selected_curvature_ = false;
+  rpp_last_selected_curvature_ = 0.0;
   route_start_front_reach_distance_ = 1.2;
   route_start_front_projection_threshold_ = 0.05;
   enable_prune_deviation_hard_fail_ = true;
@@ -403,12 +411,34 @@ void Local_Planner::initial(
   this->get_parameter(
     "regulated_pure_pursuit.avoidance_prefer_nominal_weight",
     rpp_avoidance_prefer_nominal_weight_);
+  declare_parameter(
+    "regulated_pure_pursuit.avoidance_curvature_switch_weight",
+    rclcpp::ParameterValue(0.35));
+  this->get_parameter(
+    "regulated_pure_pursuit.avoidance_curvature_switch_weight",
+    rpp_avoidance_curvature_switch_weight_);
+  declare_parameter(
+    "regulated_pure_pursuit.avoidance_turn_switch_penalty",
+    rclcpp::ParameterValue(0.25));
+  this->get_parameter(
+    "regulated_pure_pursuit.avoidance_turn_switch_penalty",
+    rpp_avoidance_turn_switch_penalty_);
+  declare_parameter(
+    "regulated_pure_pursuit.avoidance_turn_deadband",
+    rclcpp::ParameterValue(0.02));
+  this->get_parameter(
+    "regulated_pure_pursuit.avoidance_turn_deadband",
+    rpp_avoidance_turn_deadband_);
   rpp_avoidance_angular_samples_ = std::max(1, rpp_avoidance_angular_samples_);
   if((rpp_avoidance_angular_samples_ % 2) == 0){
     ++rpp_avoidance_angular_samples_;
   }
   rpp_avoidance_angular_span_ratio_ = std::clamp(rpp_avoidance_angular_span_ratio_, 0.0, 1.0);
   rpp_avoidance_prefer_nominal_weight_ = std::max(0.0, rpp_avoidance_prefer_nominal_weight_);
+  rpp_avoidance_curvature_switch_weight_ =
+    std::max(0.0, rpp_avoidance_curvature_switch_weight_);
+  rpp_avoidance_turn_switch_penalty_ = std::max(0.0, rpp_avoidance_turn_switch_penalty_);
+  rpp_avoidance_turn_deadband_ = std::max(0.0, rpp_avoidance_turn_deadband_);
   if(controller_backend_ == "regulated_pure_pursuit"){
     RCLCPP_DEBUG(
       this->get_logger(),
@@ -482,6 +512,18 @@ void Local_Planner::initial(
       this->get_logger(),
       "regulated_pure_pursuit.avoidance_prefer_nominal_weight: %.2f",
       rpp_avoidance_prefer_nominal_weight_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.avoidance_curvature_switch_weight: %.2f",
+      rpp_avoidance_curvature_switch_weight_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.avoidance_turn_switch_penalty: %.2f",
+      rpp_avoidance_turn_switch_penalty_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.avoidance_turn_deadband: %.2f",
+      rpp_avoidance_turn_deadband_);
   }
 
   declare_parameter("debug_publish.robot_cuboid", rclcpp::ParameterValue(false));
@@ -994,6 +1036,8 @@ void Local_Planner::resetLocalRouteTrackingState()
   last_heading_reference_valid_ = false;
   heading_reference_stale_cycles_ = 0;
   consecutive_heading_reference_failure_cycles_ = 0;
+  rpp_have_last_selected_curvature_ = false;
+  rpp_last_selected_curvature_ = 0.0;
   last_valid_prune_plan_ = clock_->now();
 }
 
@@ -2353,6 +2397,16 @@ dddmr_sys_core::PlannerState Local_Planner::computeRppControlCommand(
         candidate.objective = candidate.trajectory.cost_ +
           rpp_avoidance_prefer_nominal_weight_ *
           std::fabs(candidate_curvature - nominal_curvature);
+        if(!goal_alignment_mode && rpp_have_last_selected_curvature_){
+          candidate.objective += rpp_avoidance_curvature_switch_weight_ *
+            std::fabs(candidate_curvature - rpp_last_selected_curvature_);
+          if(std::fabs(candidate_curvature) > rpp_avoidance_turn_deadband_ &&
+            std::fabs(rpp_last_selected_curvature_) > rpp_avoidance_turn_deadband_ &&
+            candidate_curvature * rpp_last_selected_curvature_ < 0.0)
+          {
+            candidate.objective += rpp_avoidance_turn_switch_penalty_;
+          }
+        }
         if(!have_valid_candidate || candidate.objective < best_valid_candidate.objective){
           best_valid_candidate = candidate;
           have_valid_candidate = true;
@@ -2384,6 +2438,10 @@ dddmr_sys_core::PlannerState Local_Planner::computeRppControlCommand(
   const double linear_velocity = selected_candidate.linear_velocity;
   const double angular_velocity = selected_candidate.angular_velocity;
   auto predicted_traj = selected_candidate.trajectory;
+  if(have_valid_candidate && !goal_alignment_mode){
+    rpp_last_selected_curvature_ = selected_candidate.curvature;
+    rpp_have_last_selected_curvature_ = true;
+  }
 
   if(have_valid_candidate &&
     std::fabs(selected_candidate.curvature - nominal_curvature) > 1e-3)

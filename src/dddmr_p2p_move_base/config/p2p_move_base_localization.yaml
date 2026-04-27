@@ -121,8 +121,8 @@ perception_3d_global:
         enable_edge_detection: true                              # 是否启用边缘检测
         generate_static_graph: false                             # 是否生成静态图缓存
         merge_ground_layers: true                                # 是否合并多层地面点
-        merge_ground_xy_resolution: 0.20                         # 合并地面 XY 分辨率（m）
-        merge_ground_z_tolerance: 0.12                           # 合并地面 Z 容差（m）
+        merge_ground_xy_resolution: 0.1                         # 合并地面 XY 分辨率（m）
+        merge_ground_z_tolerance: 0.15                           # 合并地面 Z 容差（m）
 
     lidar:
       plugin: "perception_3d::MultiLayerSpinningLidar"           # 多线雷达插件
@@ -184,24 +184,27 @@ local_planner:
 
     # Regulated Pure Pursuit 参数
     regulated_pure_pursuit:
-      critic_trajectory_generator_name: "ackermann_simple"      # RPP 候选轨迹送入哪套 critics 评估
-      nominal_linear_speed: 1.0                                 # 常规巡航速度（m/s）
+      critic_trajectory_generator_name: "ackermann_mpc"         # RPP 候选轨迹送入哪套 critics 评估
+      nominal_linear_speed: 0.8                                 # 常规巡航速度（m/s）
       min_linear_speed: 0.05                                    # 最小跟踪速度（m/s）
       alignment_linear_speed: 0.1                               # 对齐阶段速度（m/s）
-      goal_slowdown_distance: 1.5                               # 终点减速起始距离（m）
-      min_lookahead_distance: 1.2                               # 最小前视距离（m）
-      max_lookahead_distance: 3.0                               # 最大前视距离（m）
+      goal_slowdown_distance: 2.5                               # 终点减速起始距离（m）
+      min_lookahead_distance: 1.0                               # 最小前视距离（m）
+      max_lookahead_distance: 2.5                               # 最大前视距离（m）
       lookahead_time: 1.5                                       # 速度到前视距离换算时间尺度（s）
       alignment_lookahead_distance: 1.0                         # 对齐模式前视距离（m）
       max_lateral_accel: 1.5                                    # 曲率调速横向加速度上限（m/s^2）
-      prediction_horizon_sec: 1.5                               # 单候选轨迹预测时长（s）
+      prediction_horizon_sec: 2.0                               # 单候选轨迹预测时长（s）
       prediction_step_sec: 0.1                                  # 预测离散步长（s）
       wheelbase: 0.46                                           # Ackermann 轴距（m）
       max_steer: 0.238                                          # 最大转角（rad）等效自行车模型前轮转角，atan(wheelbase / min_turning_radius)
       max_angular_velocity: 0.526                               # 输出角速度上限（rad/s），linear_speed / min_turning_radius
-      avoidance_angular_samples: 5                              # 避障曲率采样数（奇数）
+      avoidance_angular_samples: 7                              # 避障曲率采样数（奇数）
       avoidance_angular_span_ratio: 1.0                         # 采样跨度占最大曲率比例
       avoidance_prefer_nominal_weight: 0.2                      # 偏离名义曲率惩罚权重
+      avoidance_curvature_switch_weight: 2.5                    # 曲率切换惩罚，抑制候选轨迹左右抖动
+      avoidance_turn_switch_penalty: 1.25                       # 转向换边额外惩罚
+      avoidance_turn_deadband: 0.02                             # 小曲率视为直行，不触发换边惩罚
 
     # 车体包络（碰撞检测）
     cuboid:
@@ -261,7 +264,7 @@ trajectory_generators:
       max_vel_x: 1.0                                             # 最大前进速度（m/s）
       min_vel_x: 0.05                                            # 最小前进采样速度（m/s）
       max_vel_theta: 0.526                                       # 角速度上限（rad/s）
-      min_vel_theta: 0.0                                         # 角速度下限（rad/s）
+      min_vel_theta: -0.526                                      # 角速度下限（rad/s）
       acc_lim_x: 6.0                                             # 线速度加速度限制（m/s^2）
       acc_lim_theta: 20.0                                        # 角速度加速度限制（rad/s^2）
       deceleration_ratio: 2.0                                    # 减速窗口比例
@@ -273,6 +276,7 @@ trajectory_generators:
       max_steer: 0.238                                           # 最大转角（rad）
       controller_frequency: 15.0                                 # 采样控制频率（Hz）
       sim_time: 1.5                                              # 单轨迹前向仿真时长（s）
+      min_sim_distance: 2.0                                      # 低速候选也至少检查该前向距离，避免只减速不绕障
       linear_x_sample: 5.0                                       # 线速度采样数
       angular_z_sample: 10.0                                     # 角速度采样数
       sim_granularity: 0.05                                      # 位移离散步长（m）
@@ -295,7 +299,7 @@ perception_3d_local:
     max_obstacle_distance: 9999.0                                # 障碍最大采样距离（m）
     inscribed_radius: 0.5                                        # 车体内切安全半径（m）
     inflation_descending_rate: 2.0                               # 膨胀衰减率
-    inflation_radius: 0.5                                        # 局部障碍膨胀半径（m）
+    inflation_radius: 0.8                                        # 局部障碍膨胀半径（m）
     sensors_collected_frequency: 10.0                            # 局部感知融合频率（Hz）
     plugins: ["map", "lidar"]                                    # 局部层插件列表
 
@@ -342,35 +346,35 @@ mpc_critics:
 
     collision:
       plugin: "mpc_critics::CollisionModel"                      # 碰撞模型
-      trajectory_generator: ackermann_simple                     # 作用轨迹生成器
+      trajectory_generator: ackermann_mpc                        # 作用轨迹生成器
       weight: 1.0                                                # 碰撞代价总权重
       search_radius: 3.0                                         # 每个轨迹点的障碍搜索半径（m）
-      clearance_penalty_distance: 1.0                            # 开始绕障距离（m）
+      clearance_penalty_distance: 1.5                            # 开始绕障距离（m）
       clearance_weight: 1.5                                      # 近障碍惩罚强度
 
     prefer_forward_speed:
       plugin: "mpc_critics::PreferForwardSpeedModel"             # 前向速度偏好模型
-      trajectory_generator: ackermann_simple                     # 作用轨迹生成器
+      trajectory_generator: ackermann_mpc                     # 作用轨迹生成器
       weight: 1.0                                                # 速度偏好权重
-      target_speed: 2.2                                          # 巡航偏好目标速度（m/s）
+      target_speed: 0.8                                          # 巡航偏好目标速度（m/s）
       goal_slowdown_distance: 2.0                                # 靠近终点减速起始距离（m）
       goal_slowdown_min_speed: 0.0                               # 终点附近最低目标速度（m/s）
 
     stick_path:
       plugin: "mpc_critics::StickPathModel"                      # 贴线模型
-      trajectory_generator: ackermann_simple                     # 作用轨迹生成器
+      trajectory_generator: ackermann_mpc                     # 作用轨迹生成器
       weight: 0.05                                               # 贴线权重
 
     pure_pursuit:
       plugin: "mpc_critics::PurePursuitModel"                    # 追踪终点误差模型
-      trajectory_generator: ackermann_simple                     # 作用轨迹生成器
+      trajectory_generator: ackermann_mpc                     # 作用轨迹生成器
       weight: 0.35                                               # 总权重
       translation_weight: 1.0                                    # 位置误差权重
       orientation_weight: 0.0                                    # 朝向误差权重
 
     toward_global_plan:
       plugin: "mpc_critics::TowardGlobalPlanModel"               # 贴近全局路径模型
-      trajectory_generator: ackermann_simple                     # 作用轨迹生成器
+      trajectory_generator: ackermann_mpc                     # 作用轨迹生成器
       weight: 0.5                                                # 贴近全局路径权重
 
     collision_rotate:
