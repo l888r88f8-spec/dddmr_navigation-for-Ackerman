@@ -444,7 +444,15 @@ void DepthCameraLayer::updateLethalPointCloud(){
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
   
   current_lethal_.reset(new pcl::PointCloud<pcl::PointXYZI>);
+  if(!shared_data_->pcl_ground_){
+    return;
+  }
   for(auto it=pct_marking_->lethal_map_.begin(); it!=pct_marking_->lethal_map_.end(); it++){
+    if((*it).first < 0 ||
+      static_cast<size_t>((*it).first) >= shared_data_->pcl_ground_->points.size())
+    {
+      continue;
+    }
     pcl::PointXYZI ipt;
     ipt.x = shared_data_->pcl_ground_->points[(*it).first].x;
     ipt.y = shared_data_->pcl_ground_->points[(*it).first].y;
@@ -511,6 +519,10 @@ void DepthCameraLayer::selfMark(){
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZI>);
     pcl::PointXYZI centroid;
+    centroid.x = 0.0;
+    centroid.y = 0.0;
+    centroid.z = 0.0;
+    centroid.intensity = 0.0;
     for (std::vector<int>::const_iterator pit = it->indices.begin (); pit != it->indices.end (); ++pit){
       
       //@For visualization purpose

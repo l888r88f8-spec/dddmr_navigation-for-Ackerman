@@ -83,14 +83,6 @@ Local_Planner::Local_Planner(const std::string& name): Node(name)
   rpp_wheelbase_ = 0.55;
   rpp_max_steer_ = 0.69;
   rpp_max_angular_velocity_ = 1.2;
-  rpp_avoidance_angular_samples_ = 7;
-  rpp_avoidance_angular_span_ratio_ = 1.0;
-  rpp_avoidance_prefer_nominal_weight_ = 0.2;
-  rpp_avoidance_curvature_switch_weight_ = 0.35;
-  rpp_avoidance_turn_switch_penalty_ = 0.25;
-  rpp_avoidance_turn_deadband_ = 0.02;
-  rpp_have_last_selected_curvature_ = false;
-  rpp_last_selected_curvature_ = 0.0;
   route_start_front_reach_distance_ = 1.2;
   route_start_front_projection_threshold_ = 0.05;
   enable_prune_deviation_hard_fail_ = true;
@@ -393,52 +385,6 @@ void Local_Planner::initial(
   this->get_parameter(
     "regulated_pure_pursuit.max_angular_velocity",
     rpp_max_angular_velocity_);
-  declare_parameter(
-    "regulated_pure_pursuit.avoidance_angular_samples",
-    rclcpp::ParameterValue(7));
-  this->get_parameter(
-    "regulated_pure_pursuit.avoidance_angular_samples",
-    rpp_avoidance_angular_samples_);
-  declare_parameter(
-    "regulated_pure_pursuit.avoidance_angular_span_ratio",
-    rclcpp::ParameterValue(1.0));
-  this->get_parameter(
-    "regulated_pure_pursuit.avoidance_angular_span_ratio",
-    rpp_avoidance_angular_span_ratio_);
-  declare_parameter(
-    "regulated_pure_pursuit.avoidance_prefer_nominal_weight",
-    rclcpp::ParameterValue(0.2));
-  this->get_parameter(
-    "regulated_pure_pursuit.avoidance_prefer_nominal_weight",
-    rpp_avoidance_prefer_nominal_weight_);
-  declare_parameter(
-    "regulated_pure_pursuit.avoidance_curvature_switch_weight",
-    rclcpp::ParameterValue(0.35));
-  this->get_parameter(
-    "regulated_pure_pursuit.avoidance_curvature_switch_weight",
-    rpp_avoidance_curvature_switch_weight_);
-  declare_parameter(
-    "regulated_pure_pursuit.avoidance_turn_switch_penalty",
-    rclcpp::ParameterValue(0.25));
-  this->get_parameter(
-    "regulated_pure_pursuit.avoidance_turn_switch_penalty",
-    rpp_avoidance_turn_switch_penalty_);
-  declare_parameter(
-    "regulated_pure_pursuit.avoidance_turn_deadband",
-    rclcpp::ParameterValue(0.02));
-  this->get_parameter(
-    "regulated_pure_pursuit.avoidance_turn_deadband",
-    rpp_avoidance_turn_deadband_);
-  rpp_avoidance_angular_samples_ = std::max(1, rpp_avoidance_angular_samples_);
-  if((rpp_avoidance_angular_samples_ % 2) == 0){
-    ++rpp_avoidance_angular_samples_;
-  }
-  rpp_avoidance_angular_span_ratio_ = std::clamp(rpp_avoidance_angular_span_ratio_, 0.0, 1.0);
-  rpp_avoidance_prefer_nominal_weight_ = std::max(0.0, rpp_avoidance_prefer_nominal_weight_);
-  rpp_avoidance_curvature_switch_weight_ =
-    std::max(0.0, rpp_avoidance_curvature_switch_weight_);
-  rpp_avoidance_turn_switch_penalty_ = std::max(0.0, rpp_avoidance_turn_switch_penalty_);
-  rpp_avoidance_turn_deadband_ = std::max(0.0, rpp_avoidance_turn_deadband_);
   if(controller_backend_ == "regulated_pure_pursuit"){
     RCLCPP_DEBUG(
       this->get_logger(),
@@ -500,30 +446,6 @@ void Local_Planner::initial(
       this->get_logger(),
       "regulated_pure_pursuit.max_angular_velocity: %.2f",
       rpp_max_angular_velocity_);
-    RCLCPP_DEBUG(
-      this->get_logger(),
-      "regulated_pure_pursuit.avoidance_angular_samples: %d",
-      rpp_avoidance_angular_samples_);
-    RCLCPP_DEBUG(
-      this->get_logger(),
-      "regulated_pure_pursuit.avoidance_angular_span_ratio: %.2f",
-      rpp_avoidance_angular_span_ratio_);
-    RCLCPP_DEBUG(
-      this->get_logger(),
-      "regulated_pure_pursuit.avoidance_prefer_nominal_weight: %.2f",
-      rpp_avoidance_prefer_nominal_weight_);
-    RCLCPP_DEBUG(
-      this->get_logger(),
-      "regulated_pure_pursuit.avoidance_curvature_switch_weight: %.2f",
-      rpp_avoidance_curvature_switch_weight_);
-    RCLCPP_DEBUG(
-      this->get_logger(),
-      "regulated_pure_pursuit.avoidance_turn_switch_penalty: %.2f",
-      rpp_avoidance_turn_switch_penalty_);
-    RCLCPP_DEBUG(
-      this->get_logger(),
-      "regulated_pure_pursuit.avoidance_turn_deadband: %.2f",
-      rpp_avoidance_turn_deadband_);
   }
 
   declare_parameter("debug_publish.robot_cuboid", rclcpp::ParameterValue(false));
@@ -1036,8 +958,6 @@ void Local_Planner::resetLocalRouteTrackingState()
   last_heading_reference_valid_ = false;
   heading_reference_stale_cycles_ = 0;
   consecutive_heading_reference_failure_cycles_ = 0;
-  rpp_have_last_selected_curvature_ = false;
-  rpp_last_selected_curvature_ = 0.0;
   last_valid_prune_plan_ = clock_->now();
 }
 
@@ -1552,7 +1472,10 @@ void Local_Planner::parseCuboid(){
 void Local_Planner::cbOdom(const nav_msgs::msg::Odometry::SharedPtr msg)
 {
   robot_state_ = *msg;
-  updateGlobalPose();
+  if(!updateGlobalPose()){
+    got_odom_ = false;
+    return;
+  }
   if(compute_best_trajectory_in_odomCb_){
     if(controller_backend_ == "regulated_pure_pursuit"){
       geometry_msgs::msg::Twist cmd_vel;
@@ -1900,7 +1823,7 @@ double Local_Planner::getDistanceBTWPoseStamp(
   return sqrt(dx*dx + dy*dy + dz*dz);
 }
 
-void Local_Planner::updateGlobalPose(){
+bool Local_Planner::updateGlobalPose(){
   try
   {
     trans_gbl2b_ = tf2Buffer_->lookupTransform(
@@ -1908,14 +1831,17 @@ void Local_Planner::updateGlobalPose(){
   }
   catch (tf2::TransformException& e)
   {
-    RCLCPP_DEBUG(this->get_logger().get_child(name_), "%s: %s", name_.c_str(),e.what());
+    RCLCPP_DEBUG(this->get_logger().get_child(name_), "%s: %s", name_.c_str(), e.what());
+    return false;
   }
-  robot_cuboid_.markers.clear();
-  marker_edge_.header.stamp = trans_gbl2b_.header.stamp;
-  robot_cuboid_.markers.push_back(marker_edge_);
+
   if(debug_publish_robot_cuboid_ && pub_robot_cuboid_->get_subscription_count() > 0){
+    robot_cuboid_.markers.clear();
+    marker_edge_.header.stamp = rclcpp::Time(0);
+    robot_cuboid_.markers.push_back(marker_edge_);
     pub_robot_cuboid_->publish(robot_cuboid_);
   }
+  return true;
 }
 
 geometry_msgs::msg::TransformStamped Local_Planner::getGlobalPose(){
@@ -2302,159 +2228,35 @@ dddmr_sys_core::PlannerState Local_Planner::computeRppControlCommand(
   }
 
   curvature = std::max(-max_curvature, std::min(max_curvature, curvature));
-  const double nominal_curvature = curvature;
   const double min_linear_speed =
     std::min(goal_alignment_mode ? rpp_alignment_linear_speed_ : rpp_min_linear_speed_, linear_speed_cap);
 
-  struct RppScoredCandidate
-  {
-    double curvature = 0.0;
-    double linear_velocity = 0.0;
-    double angular_velocity = 0.0;
-    double objective = std::numeric_limits<double>::infinity();
-    bool valid = false;
-    base_trajectory::Trajectory trajectory;
-  };
-
-  const auto build_candidate_curvatures =
-    [this, nominal_curvature, max_curvature]() {
-      std::vector<double> values;
-      const int sample_count = std::max(1, rpp_avoidance_angular_samples_);
-      const double span = max_curvature * rpp_avoidance_angular_span_ratio_;
-      const auto append_unique =
-        [&values](double value) {
-          for(const double existing : values){
-            if(std::fabs(existing - value) < 1e-6){
-              return;
-            }
-          }
-          values.push_back(value);
-        };
-
-      append_unique(std::clamp(nominal_curvature, -max_curvature, max_curvature));
-      if(sample_count <= 1 || span <= 1e-6){
-        return values;
-      }
-
-      const int half = sample_count / 2;
-      for(int i = 1; i <= half; ++i){
-        const double ratio = static_cast<double>(i) / static_cast<double>(half);
-        const double offset = span * ratio;
-        append_unique(std::clamp(nominal_curvature - offset, -max_curvature, max_curvature));
-        append_unique(std::clamp(nominal_curvature + offset, -max_curvature, max_curvature));
-      }
-      return values;
-    };
-
-  auto candidate_curvatures = build_candidate_curvatures();
-  if(candidate_curvatures.empty()){
-    candidate_curvatures.push_back(nominal_curvature);
+  double linear_velocity = linear_speed_cap;
+  if(std::fabs(curvature) > 1e-6 && rpp_max_lateral_accel_ > 0.0){
+    linear_velocity = std::min(
+      linear_velocity,
+      std::sqrt(rpp_max_lateral_accel_ / std::fabs(curvature)));
+  }
+  if(std::fabs(curvature) > 1e-6 && rpp_max_angular_velocity_ > 0.0){
+    linear_velocity = std::min(
+      linear_velocity,
+      rpp_max_angular_velocity_ / std::fabs(curvature));
   }
 
-  RppScoredCandidate best_valid_candidate;
-  RppScoredCandidate nominal_candidate;
-  bool have_valid_candidate = false;
-  bool have_nominal_candidate = false;
+  linear_velocity = std::max(min_linear_speed, std::min(linear_velocity, linear_speed_cap));
+  const double angular_velocity =
+    std::max(-rpp_max_angular_velocity_,
+      std::min(rpp_max_angular_velocity_, linear_velocity * curvature));
+  auto predicted_traj = buildPredictedTrajectory(linear_velocity, angular_velocity);
   {
     std::unique_lock<mpc_critics::StackedScoringModel::model_mutex_t> critics_lock(
       *(mpc_critics_ros_->getStackedScoringModelPtr()->getMutex()));
     updateCriticSharedData(
       context.aggregate_observation,
       context.aggregate_observation_kdtree);
-
-    for(const double candidate_curvature_raw : candidate_curvatures){
-      const double candidate_curvature =
-        std::clamp(candidate_curvature_raw, -max_curvature, max_curvature);
-      double candidate_linear_velocity = linear_speed_cap;
-      if(std::fabs(candidate_curvature) > 1e-6 && rpp_max_lateral_accel_ > 0.0){
-        candidate_linear_velocity = std::min(
-          candidate_linear_velocity,
-          std::sqrt(rpp_max_lateral_accel_ / std::fabs(candidate_curvature)));
-      }
-      if(std::fabs(candidate_curvature) > 1e-6 && rpp_max_angular_velocity_ > 0.0){
-        candidate_linear_velocity = std::min(
-          candidate_linear_velocity,
-          rpp_max_angular_velocity_ / std::fabs(candidate_curvature));
-      }
-
-      candidate_linear_velocity =
-        std::max(min_linear_speed, std::min(candidate_linear_velocity, linear_speed_cap));
-      const double candidate_angular_velocity =
-        std::max(-rpp_max_angular_velocity_,
-          std::min(rpp_max_angular_velocity_, candidate_linear_velocity * candidate_curvature));
-
-      RppScoredCandidate candidate;
-      candidate.curvature = candidate_curvature;
-      candidate.linear_velocity = candidate_linear_velocity;
-      candidate.angular_velocity = candidate_angular_velocity;
-      candidate.trajectory = buildPredictedTrajectory(candidate_linear_velocity, candidate_angular_velocity);
-      mpc_critics_ros_->scoreTrajectory(
-        rpp_critic_trajectory_generator_name_,
-        candidate.trajectory);
-
-      if(candidate.trajectory.cost_ >= 0.0){
-        candidate.valid = true;
-        candidate.objective = candidate.trajectory.cost_ +
-          rpp_avoidance_prefer_nominal_weight_ *
-          std::fabs(candidate_curvature - nominal_curvature);
-        if(!goal_alignment_mode && rpp_have_last_selected_curvature_){
-          candidate.objective += rpp_avoidance_curvature_switch_weight_ *
-            std::fabs(candidate_curvature - rpp_last_selected_curvature_);
-          if(std::fabs(candidate_curvature) > rpp_avoidance_turn_deadband_ &&
-            std::fabs(rpp_last_selected_curvature_) > rpp_avoidance_turn_deadband_ &&
-            candidate_curvature * rpp_last_selected_curvature_ < 0.0)
-          {
-            candidate.objective += rpp_avoidance_turn_switch_penalty_;
-          }
-        }
-        if(!have_valid_candidate || candidate.objective < best_valid_candidate.objective){
-          best_valid_candidate = candidate;
-          have_valid_candidate = true;
-        }
-      }
-
-      if(!have_nominal_candidate ||
-        std::fabs(candidate_curvature - nominal_curvature) <
-        std::fabs(nominal_candidate.curvature - nominal_curvature))
-      {
-        nominal_candidate = candidate;
-        have_nominal_candidate = true;
-      }
-    }
-  }
-
-  if(!have_nominal_candidate){
-    nominal_candidate.curvature = nominal_curvature;
-    nominal_candidate.linear_velocity = std::max(min_linear_speed, linear_speed_cap);
-    nominal_candidate.angular_velocity = std::max(-rpp_max_angular_velocity_,
-      std::min(rpp_max_angular_velocity_, nominal_candidate.linear_velocity * nominal_curvature));
-    nominal_candidate.trajectory = buildPredictedTrajectory(
-      nominal_candidate.linear_velocity,
-      nominal_candidate.angular_velocity);
-  }
-
-  const RppScoredCandidate & selected_candidate =
-    have_valid_candidate ? best_valid_candidate : nominal_candidate;
-  const double linear_velocity = selected_candidate.linear_velocity;
-  const double angular_velocity = selected_candidate.angular_velocity;
-  auto predicted_traj = selected_candidate.trajectory;
-  if(have_valid_candidate && !goal_alignment_mode){
-    rpp_last_selected_curvature_ = selected_candidate.curvature;
-    rpp_have_last_selected_curvature_ = true;
-  }
-
-  if(have_valid_candidate &&
-    std::fabs(selected_candidate.curvature - nominal_curvature) > 1e-3)
-  {
-    RCLCPP_DEBUG_THROTTLE(
-      this->get_logger().get_child(name_), *clock_, 1000,
-      "RPP avoidance adjusted curvature, route_version=%zu, goal_seq=%zu, source=%s, nominal_curvature=%.3f selected_curvature=%.3f selected_cost=%.2f",
-      route_version_,
-      goal_seq_,
-      route_source_label_.c_str(),
-      nominal_curvature,
-      selected_candidate.curvature,
-      selected_candidate.trajectory.cost_);
+    mpc_critics_ros_->scoreTrajectory(
+      rpp_critic_trajectory_generator_name_,
+      predicted_traj);
   }
 
   publishDebugPath(

@@ -30,6 +30,8 @@
 */
 #include <perception_3d/perception_3d_ros.h>
 
+#include <algorithm>
+
 namespace perception_3d
 {
 
@@ -251,12 +253,19 @@ void Perception3D_ROS::sensorsUpdateLoop()
 }
 
 void Perception3D_ROS::dGraphPublishLoop(){
+  auto shared_data = stacked_perception_->getSharedDataPtr();
+  if(!shared_data || !shared_data->pcl_ground_){
+    return;
+  }
+  std::unique_lock<std::recursive_mutex> sensor_lock(shared_data->ground_kdtree_cb_mutex_);
+  const size_t ground_size =
+    std::min(shared_data->static_ground_size_, shared_data->pcl_ground_->points.size());
   pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_msg2 (new pcl::PointCloud<pcl::PointXYZI>);
-  for(size_t index=0;index<stacked_perception_->getSharedDataPtr()->static_ground_size_;index++){
+  for(size_t index=0;index<ground_size;index++){
     pcl::PointXYZI ipt;
-    ipt.x = stacked_perception_->getSharedDataPtr()->pcl_ground_->points[index].x;
-    ipt.y = stacked_perception_->getSharedDataPtr()->pcl_ground_->points[index].y;
-    ipt.z = stacked_perception_->getSharedDataPtr()->pcl_ground_->points[index].z; 
+    ipt.x = shared_data->pcl_ground_->points[index].x;
+    ipt.y = shared_data->pcl_ground_->points[index].y;
+    ipt.z = shared_data->pcl_ground_->points[index].z;
     ipt.intensity = get_min_dGraphValue(index);
     pcl_msg2->push_back(ipt);
   }

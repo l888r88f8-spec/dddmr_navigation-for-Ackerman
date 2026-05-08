@@ -1,11 +1,24 @@
+/**:
+  ros__parameters:
+    # 车体包络（碰撞检测），所有节点和 trajectory generator 复用这一份
+    cuboid:
+      flb: [0.50, 0.32, -0.32]                                  # front-left-bottom
+      frb: [0.50, -0.32, -0.32]                                 # front-right-bottom
+      flt: [0.50, 0.32, 0.55]                                   # front-left-top
+      frt: [0.50, -0.32, 0.55]                                  # front-right-top
+      blb: [-0.38, 0.32, -0.32]                                 # back-left-bottom
+      brb: [-0.38, -0.32, -0.32]                                # back-right-bottom
+      blt: [-0.38, 0.32, 0.55]                                  # back-left-top
+      brt: [-0.38, -0.32, 0.55]                                 # back-right-top
+
 p2p_move_base:
   ros__parameters:
     orchestrator_frequency: 15.0                                 # 任务编排循环频率，越高状态切换和控制消费越及时
     route_request_patience: 45.0                                 # 等待全局路径请求返回的最大时长（s）
-    blocked_wait_patience: 10.0                                  # blocked wait 状态最长持续时间（s）
+    blocked_wait_patience: 0.5                                   # blocked wait 状态最长持续时间（s），局部全撞时尽快刷新路线
     control_failure_patience: 10.0                               # 控制连续失败容忍时间（s）
     max_recovery_attempts: 10                                    # 恢复行为最大尝试次数
-    oscillation_distance: 5.0                                    # 位移超过该值视为脱离振荡（m）
+    oscillation_distance: 0.5                                    # 位移超过该值视为脱离振荡（m），Ackermann 低速跟踪不宜过大
     oscillation_angle: 1.0                                       # 转角超过该值视为脱离振荡（rad）
     oscillation_patience: 15.0                                   # 振荡容忍时间，超时触发恢复/重规划（s）
     tracking_controller_name: "ackermann_simple"                 # 跟踪阶段控制器名
@@ -47,8 +60,8 @@ global_planner:
       primitive_length: 0.5                                       # 运动原语长度（m）
       primitive_step: 0.1                                         # 原语离散步长（m）
       projection_search_radius: 0.5                               # 起终点投影搜索半径（m）
-      goal_position_tolerance: 0.4                                # 终点位置容差（m）
-      goal_heading_tolerance: 0.8                                 # 终点航向容差（rad）
+      goal_position_tolerance: 0.3                                # 终点位置容差（m）
+      goal_heading_tolerance: 0.3                                 # 终点航向容差（rad），让全局路径约束目标朝向
       use_goal_heading: true                                      # 是否强制使用目标朝向
       steering_penalty: 1.0                                       # 转向惩罚
       steering_change_penalty: 1.2                                # 转角变化惩罚
@@ -99,9 +112,9 @@ perception_3d_global:
     max_obstacle_distance: 9999.0                                # 障碍最大采样距离（m）
     inscribed_radius: 0.5                                        # 机器人内切安全半径（m）
     inflation_descending_rate: 2.0                               # 膨胀衰减率
-    inflation_radius: 1.5                                        # 全局障碍膨胀半径（m）
+    inflation_radius: 0.8                                        # 全局障碍膨胀半径（m）
     sensors_collected_frequency: 10.0                            # 传感器融合频率（Hz）
-    plugins: ["map"]                                             # 全局层插件列表
+    plugins: ["map", "lidar"]                                    # 全局层插件列表，动态障碍参与重规划
     dgraph_publish_frequency: 1.0                                # 图结构发布频率（Hz）
 
     map:
@@ -131,18 +144,19 @@ perception_3d_global:
       pub_gbl_marking_for_visualization: true                    # 是否发布全局标记点用于可视化
       vertical_FOV_top: 15.0                                     # 垂直视场上限（deg）
       vertical_FOV_bottom: -15.0                                 # 垂直视场下限（deg）
-      scan_effective_positive_start: 90.0                        # 正向扫描有效起始角（deg）
-      scan_effective_positive_end: 150.0                         # 正向扫描有效终止角（deg）
-      scan_effective_negative_start: 90.0                        # 反向扫描有效起始角（deg）
-      scan_effective_negative_end: 30.0                          # 反向扫描有效终止角（deg）
+      scan_effective_positive_start: 0.0                         # 正向扫描有效起始角（deg）
+      scan_effective_positive_end: 180.0                         # 正向扫描有效终止角（deg）
+      scan_effective_negative_start: -0.0                        # 反向扫描有效起始角（deg）
+      scan_effective_negative_end: -180.0                        # 反向扫描有效终止角（deg）
       euclidean_cluster_extraction_tolerance: 0.1                # 欧式聚类距离阈值（m）
       euclidean_cluster_extraction_min_cluster_size: 1           # 欧式聚类最小点数
       xy_resolution: 0.05                                        # 栅格 XY 分辨率（m）
       height_resolution: 0.05                                    # 高度分辨率（m）
+      min_obstacle_height: -0.12
       marking_height: 2.0                                        # 标记障碍物高度上限（m）
-      perception_window_size: 5.0                                # 感知窗口（m），非整图投射
+      perception_window_size: 5.0                                # 全局感知窗口（m）
       segmentation_ignore_ratio: 1.1                             # 与静态图匹配比例阈值（高于该值忽略）
-      expected_sensor_time: 0.1                                  # 传感器时间容忍（s）
+      expected_sensor_time: 0.5                                  # 传感器时间容忍（s），避免调度抖动导致全局动态层过期
 
 # 局部规划器
 local_planner:
@@ -153,7 +167,7 @@ local_planner:
 
     # 局部参考路径窗口：前向窗口拉长可减轻 Ackermann 慢速偏好
     local_reference:
-      forward_distance: 8.0                                     # 前向参考窗口长度（m）
+      forward_distance: 2.5                                     # 前向参考窗口长度（m），决定 blocked_wait 的前向检测距离
       backward_distance: 1.0                                    # 后向保留窗口长度（m）
 
     heading_tracking_distance: 0.5                              # 估计路径朝向的前视距离（m）
@@ -180,12 +194,12 @@ local_planner:
 
     # 到点判定
     xy_goal_tolerance: 0.6                                      # 位置容差（m）
-    yaw_goal_tolerance: 5.0                                     # 航向容差（rad），较大值表示基本不做终端对齐
+    yaw_goal_tolerance: 0.3                                     # 航向容差（rad），与全局终点朝向约束保持一致
 
     # Regulated Pure Pursuit 参数
     regulated_pure_pursuit:
-      critic_trajectory_generator_name: "ackermann_mpc"         # RPP 候选轨迹送入哪套 critics 评估
-      nominal_linear_speed: 0.8                                 # 常规巡航速度（m/s）
+      critic_trajectory_generator_name: "ackermann_simple"       # RPP 名义轨迹送入哪套 critics 评估
+      nominal_linear_speed: 0.3                                 # 常规巡航速度（m/s）
       min_linear_speed: 0.05                                    # 最小跟踪速度（m/s）
       alignment_linear_speed: 0.1                               # 对齐阶段速度（m/s）
       goal_slowdown_distance: 2.5                               # 终点减速起始距离（m）
@@ -194,28 +208,11 @@ local_planner:
       lookahead_time: 1.5                                       # 速度到前视距离换算时间尺度（s）
       alignment_lookahead_distance: 1.0                         # 对齐模式前视距离（m）
       max_lateral_accel: 1.5                                    # 曲率调速横向加速度上限（m/s^2）
-      prediction_horizon_sec: 2.0                               # 单候选轨迹预测时长（s）
+      prediction_horizon_sec: 4.0                               # 单候选轨迹预测时长（s）
       prediction_step_sec: 0.1                                  # 预测离散步长（s）
       wheelbase: 0.46                                           # Ackermann 轴距（m）
       max_steer: 0.238                                          # 最大转角（rad）等效自行车模型前轮转角，atan(wheelbase / min_turning_radius)
-      max_angular_velocity: 0.526                               # 输出角速度上限（rad/s），linear_speed / min_turning_radius
-      avoidance_angular_samples: 7                              # 避障曲率采样数（奇数）
-      avoidance_angular_span_ratio: 1.0                         # 采样跨度占最大曲率比例
-      avoidance_prefer_nominal_weight: 0.2                      # 偏离名义曲率惩罚权重
-      avoidance_curvature_switch_weight: 2.5                    # 曲率切换惩罚，抑制候选轨迹左右抖动
-      avoidance_turn_switch_penalty: 1.25                       # 转向换边额外惩罚
-      avoidance_turn_deadband: 0.02                             # 小曲率视为直行，不触发换边惩罚
-
-    # 车体包络（碰撞检测）
-    cuboid:
-      flb: [0.50, 0.32, -0.32]                                  # front-left-bottom
-      frb: [0.50, -0.32, -0.32]                                 # front-right-bottom
-      flt: [0.50, 0.32, 0.55]                                   # front-left-top
-      frt: [0.50, -0.32, 0.55]                                  # front-right-top
-      blb: [-0.38, 0.32, -0.32]                                 # back-left-bottom
-      brb: [-0.38, -0.32, -0.32]                                # back-right-bottom
-      blt: [-0.38, 0.32, 0.55]                                  # back-left-top
-      brt: [-0.38, -0.32, 0.55]                                 # back-right-top
+      max_angular_velocity: 0.157                               # 输出角速度上限（rad/s），linear_speed / min_turning_radius
 
     # 调试可视化
     debug_publish:
@@ -229,35 +226,17 @@ local_planner:
 # legacy_rollout 轨迹生成
 trajectory_generators:
   ros__parameters:
-    plugins: ["ackermann_simple", "ackermann_heading_rotate_inplace", "ackermann_heading_rotate_shortest"]  # 轨迹生成插件列表
+    plugins: ["ackermann_simple"] # , "ackermann_heading_rotate_inplace", "ackermann_heading_rotate_shortest"]  # 轨迹生成插件列表
 
     ackermann_heading_rotate_shortest:
       plugin: "trajectory_generators::DDRotateInplaceTheory"    # 最短角对齐旋转
       controller_frequency: 10.0                                # 旋转控制频率（Hz）
       rotation_speed: 0.5                                       # 旋转角速度（rad/s）
-      cuboid:
-        flb: [0.50, 0.32, -0.32]                                # front-left-bottom
-        frb: [0.50, -0.32, -0.32]                               # front-right-bottom
-        flt: [0.50, 0.32, 0.55]                                 # front-left-top
-        frt: [0.50, -0.32, 0.55]                                # front-right-top
-        blb: [-0.38, 0.32, -0.32]                               # back-left-bottom
-        brb: [-0.38, -0.32, -0.32]                              # back-right-bottom
-        blt: [-0.38, 0.32, 0.55]                                # back-left-top
-        brt: [-0.38, -0.32, 0.55]                               # back-right-top
 
     ackermann_heading_rotate_inplace:
       plugin: "trajectory_generators::DDRotateInplaceTheory"    # 原地旋转（恢复行为）
       controller_frequency: 10.0                                # 旋转控制频率（Hz）
       rotation_speed: 0.5                                       # 旋转角速度（rad/s）
-      cuboid:
-        flb: [0.50, 0.32, -0.32]                                # front-left-bottom
-        frb: [0.50, -0.32, -0.32]                               # front-right-bottom
-        flt: [0.50, 0.32, 0.55]                                 # front-left-top
-        frt: [0.50, -0.32, 0.55]                                # front-right-top
-        blb: [-0.38, 0.32, -0.32]                               # back-left-bottom
-        brb: [-0.38, -0.32, -0.32]                              # back-right-bottom
-        blt: [-0.38, 0.32, 0.55]                                # back-left-top
-        brt: [-0.38, -0.32, 0.55]                               # back-right-top
 
     ackermann_simple:
       plugin: "trajectory_generators::AckermannSimpleTrajectoryGeneratorTheory"  # Ackermann 常规 rollout
@@ -281,15 +260,6 @@ trajectory_generators:
       angular_z_sample: 10.0                                     # 角速度采样数
       sim_granularity: 0.05                                      # 位移离散步长（m）
       angular_sim_granularity: 0.025                             # 角位移离散步长（rad）
-      cuboid:
-        flb: [0.50, 0.32, -0.32]                                # front-left-bottom
-        frb: [0.50, -0.32, -0.32]                               # front-right-bottom
-        flt: [0.50, 0.32, 0.55]                                 # front-left-top
-        frt: [0.50, -0.32, 0.55]                                # front-right-top
-        blb: [-0.38, 0.32, -0.32]                               # back-left-bottom
-        brb: [-0.38, -0.32, -0.32]                              # back-right-bottom
-        blt: [-0.38, 0.32, 0.55]                                # back-left-top
-        brt: [-0.38, -0.32, 0.55]                               # back-right-top
 
 # 局部感知层
 perception_3d_local:
@@ -301,7 +271,7 @@ perception_3d_local:
     inflation_descending_rate: 2.0                               # 膨胀衰减率
     inflation_radius: 0.8                                        # 局部障碍膨胀半径（m）
     sensors_collected_frequency: 10.0                            # 局部感知融合频率（Hz）
-    plugins: ["map", "lidar"]                                    # 局部层插件列表
+    plugins: ["map", "path_blocked_strategy", "lidar"]           # 局部层插件列表
 
     map:
       plugin: "perception_3d::StaticLayer"                       # 静态地图层
@@ -309,6 +279,10 @@ perception_3d_local:
       mapping_mode: false                                        # 建图模式
       map_topic: "mapcloud"                                      # 地图点云 topic
       ground_topic: "mapground"                                  # 地面点云 topic
+
+    path_blocked_strategy:
+      plugin: "perception_3d::PathBlockedStrategy"               # 检测局部参考路径是否被动态障碍阻塞
+      check_radius: 0.45                                          # 路径点周围障碍检测半径（m）
 
     lidar:
       plugin: "perception_3d::MultiLayerSpinningLidar"           # 多线雷达插件
@@ -325,9 +299,9 @@ perception_3d_local:
       height_resolution: 0.05                                    # 高度分辨率（m）
       min_obstacle_height: -0.12                                 # 障碍最低高度阈值（m）
       marking_height: 2.0                                        # 标记障碍高度上限（m）
-      perception_window_size: 8.0                                # 局部障碍感知窗口（m）
+      perception_window_size: 5.0                                # 局部障碍感知窗口（m）
       segmentation_ignore_ratio: 0.5                             # 与静态图匹配比例阈值（高于该值忽略）
-      expected_sensor_time: 0.2                                  # 传感器时间容忍（s）
+      expected_sensor_time: 0.5                                  # 传感器时间容忍（s），避免偶发点云/调度延迟导致感知误判失效
 
 # 恢复行为
 recovery_behaviors:
@@ -345,8 +319,8 @@ mpc_critics:
     plugins: ["collision", "prefer_forward_speed", "stick_path", "pure_pursuit", "toward_global_plan", "collision_rotate", "collision_rotate_shortest", "prefer_rotate_shortest"]  # 代价模型插件列表
 
     collision:
-      plugin: "mpc_critics::CollisionModel"                      # 碰撞模型
-      trajectory_generator: ackermann_mpc                        # 作用轨迹生成器
+      plugin: "mpc_critics::CollisionModel"                      # trajectory generator 碰撞模型
+      trajectory_generator: ackermann_simple
       weight: 1.0                                                # 碰撞代价总权重
       search_radius: 3.0                                         # 每个轨迹点的障碍搜索半径（m）
       clearance_penalty_distance: 1.5                            # 开始绕障距离（m）
@@ -354,27 +328,27 @@ mpc_critics:
 
     prefer_forward_speed:
       plugin: "mpc_critics::PreferForwardSpeedModel"             # 前向速度偏好模型
-      trajectory_generator: ackermann_mpc                     # 作用轨迹生成器
+      trajectory_generator: ackermann_simple
       weight: 1.0                                                # 速度偏好权重
-      target_speed: 0.8                                          # 巡航偏好目标速度（m/s）
-      goal_slowdown_distance: 2.0                                # 靠近终点减速起始距离（m）
-      goal_slowdown_min_speed: 0.0                               # 终点附近最低目标速度（m/s）
+      target_speed: 0.3                                          # 巡航偏好目标速度（m/s）
+      goal_slowdown_distance: 2.5                                # 靠近终点减速起始距离（m）
+      goal_slowdown_min_speed: 0.1                               # 终点附近最低目标速度（m/s）
 
     stick_path:
       plugin: "mpc_critics::StickPathModel"                      # 贴线模型
-      trajectory_generator: ackermann_mpc                     # 作用轨迹生成器
+      trajectory_generator: ackermann_simple
       weight: 0.05                                               # 贴线权重
 
     pure_pursuit:
       plugin: "mpc_critics::PurePursuitModel"                    # 追踪终点误差模型
-      trajectory_generator: ackermann_mpc                     # 作用轨迹生成器
+      trajectory_generator: ackermann_simple
       weight: 0.35                                               # 总权重
       translation_weight: 1.0                                    # 位置误差权重
       orientation_weight: 0.0                                    # 朝向误差权重
 
     toward_global_plan:
       plugin: "mpc_critics::TowardGlobalPlanModel"               # 贴近全局路径模型
-      trajectory_generator: ackermann_mpc                     # 作用轨迹生成器
+      trajectory_generator: ackermann_simple
       weight: 0.5                                                # 贴近全局路径权重
 
     collision_rotate:

@@ -30,6 +30,8 @@
 */
 #include <perception_3d/cluster_marking.h>
 
+#include <cmath>
+
 
 namespace perception_3d
 {
@@ -51,6 +53,18 @@ void Marking::computeMinDistanceFromObstacle2GroundNodes(
   const pcl::ModelCoefficients::Ptr& pcplaneptr,
   std::unordered_map<int, float>& nodes_of_min_distance){
 
+  if(!pcptr || pcptr->points.empty() || !pcplaneptr ||
+    pcplaneptr->values.size() < 4 || !shared_data_ ||
+    !shared_data_->kdtree_ground_ || !shared_data_->pcl_ground_)
+  {
+    return;
+  }
+  for(size_t i=0; i<4; ++i){
+    if(!std::isfinite(pcplaneptr->values[i])){
+      return;
+    }
+  }
+
   pcl::PointCloud<pcl::PointXYZI>::Ptr projected_cloud_cluster (new pcl::PointCloud<pcl::PointXYZI>);
   pcl::ProjectInliers<pcl::PointXYZI> proj;
   proj.setModelType (pcl::SACMODEL_PLANE);
@@ -64,6 +78,12 @@ void Marking::computeMinDistanceFromObstacle2GroundNodes(
   sor.filter (*projected_cloud_cluster);
 
   for(auto prj_pt_it=projected_cloud_cluster->points.begin();prj_pt_it!=projected_cloud_cluster->points.end();prj_pt_it++){
+    if(!std::isfinite((*prj_pt_it).x) ||
+      !std::isfinite((*prj_pt_it).y) ||
+      !std::isfinite((*prj_pt_it).z))
+    {
+      continue;
+    }
     pcl::PointXYZI pt;
     pt.x = (*prj_pt_it).x;
     pt.y = (*prj_pt_it).y;
@@ -74,6 +94,11 @@ void Marking::computeMinDistanceFromObstacle2GroundNodes(
     //@ We mark lethal
     if(shared_data_->kdtree_ground_->radiusSearch(pt, inflation_radius_, id_tmp, sqdist_tmp)){
       for(int i=0;i<id_tmp.size();i++){
+        if(id_tmp[i] < 0 ||
+          static_cast<size_t>(id_tmp[i]) >= shared_data_->pcl_ground_->points.size())
+        {
+          continue;
+        }
         float dx = pt.x - shared_data_->pcl_ground_->points[id_tmp[i]].x;
         float dy = pt.y - shared_data_->pcl_ground_->points[id_tmp[i]].y;
         float dz = pt.z - shared_data_->pcl_ground_->points[id_tmp[i]].z;
@@ -99,6 +124,12 @@ void Marking::computeMinDistanceFromObstacle2GroundNodes(
 void Marking::addPCPtr(const double cx, const double cy, const double cz, 
   const pcl::PointCloud<pcl::PointXYZI>::Ptr& pcptr, 
   const pcl::ModelCoefficients::Ptr& pcplaneptr){
+
+  if(!std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(cz) ||
+    xy_resolution_ <= 0.0 || height_resolution_ <= 0.0)
+  {
+    return;
+  }
   
   int x = cx/xy_resolution_;
   int y = cy/xy_resolution_;

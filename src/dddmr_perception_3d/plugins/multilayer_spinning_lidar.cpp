@@ -30,6 +30,11 @@
 */
 #include <perception_3d/multilayer_spinning_lidar.h>
 
+#include <algorithm>
+#include <cmath>
+
+#include <pcl/filters/filter.h>
+
 PLUGINLIB_EXPORT_CLASS(perception_3d::MultiLayerSpinningLidar, perception_3d::Sensor)
 
 namespace perception_3d
@@ -203,6 +208,10 @@ void MultiLayerSpinningLidar::cbSensor(const sensor_msgs::msg::PointCloud2::Shar
     }
   }
 
+  std::vector<int> finite_indices;
+  pcl::removeNaNFromPointCloud(*pcl_msg, *pcl_msg, finite_indices);
+  pcl_msg->is_dense = true;
+
   //@Create two trans, baselink->sensor and map->baselink
   try
   {
@@ -258,6 +267,9 @@ void MultiLayerSpinningLidar::cbSensor(const sensor_msgs::msg::PointCloud2::Shar
   sor.setInputCloud (pcl_msg);
   sor.setLeafSize (0.1f, 0.1f, 0.1f);
   sor.filter (*pcl_msg);
+  finite_indices.clear();
+  pcl::removeNaNFromPointCloud(*pcl_msg, *pcl_msg, finite_indices);
+  pcl_msg->is_dense = true;
 
   //@Protect Mark/Clear functions
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
@@ -304,7 +316,15 @@ void MultiLayerSpinningLidar::updateLethalPointCloud(){
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
   
   current_lethal_.reset(new pcl::PointCloud<pcl::PointXYZI>);
+  if(!shared_data_->pcl_ground_){
+    return;
+  }
   for(auto it=pct_marking_->lethal_map_.begin(); it!=pct_marking_->lethal_map_.end(); it++){
+    if((*it).first < 0 ||
+      static_cast<size_t>((*it).first) >= shared_data_->pcl_ground_->points.size())
+    {
+      continue;
+    }
     pcl::PointXYZI ipt;
     ipt.x = shared_data_->pcl_ground_->points[(*it).first].x;
     ipt.y = shared_data_->pcl_ground_->points[(*it).first].y;
@@ -341,6 +361,11 @@ void MultiLayerSpinningLidar::selfMark(){
   pcl_msg_gbl_.reset(new pcl::PointCloud<pcl::PointXYZ>);
   Eigen::Affine3d trans_gbl2b_af3 = tf2::transformToEigen(trans_gbl2b_);
   pcl::transformPointCloud(*pcl_msg_, *pcl_msg_gbl_, trans_gbl2b_af3);
+  std::vector<int> finite_indices;
+  pcl::removeNaNFromPointCloud(*pcl_msg_gbl_, *pcl_msg_gbl_, finite_indices);
+  pcl_msg_gbl_->is_dense = true;
+  if(pcl_msg_gbl_->points.size()<=5)
+    return;
 
   pcl::search::KdTree<pcl::PointXYZ>::Ptr pc_kdtree (new pcl::search::KdTree<pcl::PointXYZ>);
   pc_kdtree->setInputCloud (pcl_msg_gbl_);
@@ -363,6 +388,10 @@ void MultiLayerSpinningLidar::selfMark(){
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZI>);
     pcl::PointXYZI centroid;
+    centroid.x = 0.0;
+    centroid.y = 0.0;
+    centroid.z = 0.0;
+    centroid.intensity = 0.0;
     for (std::vector<int>::const_iterator pit = it->indices.begin (); pit != it->indices.end (); ++pit){
       
       //@For visualization purpose
@@ -777,7 +806,15 @@ bool MultiLayerSpinningLidar::isinLidarObservation(pcl::PointXYZ& pc){
   double dy = pc.y-trans_gbl2s_.transform.translation.y; 
   double dz = pc.z-trans_gbl2s_.transform.translation.z;
   double p2s = sqrt(dx*dx+dy*dy+dz*dz);
-  double result = asin (p2plane/p2s) * 180.0 / 3.1415926535;
+  if(p2s <= 1e-6 || !std::isfinite(p2s)){
+    return false;
+  }
+  double fov_ratio = p2plane/p2s;
+  if(!std::isfinite(fov_ratio)){
+    return false;
+  }
+  fov_ratio = std::max(-1.0, std::min(1.0, fov_ratio));
+  double result = asin (fov_ratio) * 180.0 / 3.1415926535;
   if(result<vertical_FOV_bottom_ || result>vertical_FOV_top_)
     return false;
   
@@ -791,6 +828,9 @@ bool MultiLayerSpinningLidar::isinLidarObservation(pcl::PointXYZ& pc){
   vy = pc.y - trans_gbl2s_.transform.translation.y;
   vz = pc.z - trans_gbl2s_.transform.translation.z;
   double unit = sqrt(vx*vx + vy*vy + vz*vz);
+  if(unit <= 1e-6 || !std::isfinite(unit)){
+    return false;
+  }
   
   tf2::Vector3 axis_vector(vx/unit, vy/unit, vz/unit);
 
@@ -835,8 +875,9 @@ void MultiLayerSpinningLidar::pubUpdateLoop()
     return;
   }
 
+  std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
+
   if(pub_gbl_marking_for_visualization_){
-    std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
     pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_msg (new pcl::PointCloud<pcl::PointXYZI>);
     //for(auto itx=marking_.begin();itx!=marking_.end();itx++){
     for(auto itx=pct_marking_->getBegin();itx!=pct_marking_->getEnd();itx++){
@@ -864,8 +905,13 @@ void MultiLayerSpinningLidar::pubUpdateLoop()
   
   if(!shared_data_->mapping_mode_){
     //we have no choice but to ignore accessing shared_data_->pcl_ground_, otherwise we have to mutex lock here, reducing perception efficiency
+    if(!shared_data_->pcl_ground_){
+      return;
+    }
+    const size_t ground_size =
+      std::min(shared_data_->static_ground_size_, shared_data_->pcl_ground_->points.size());
     pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_msg2 (new pcl::PointCloud<pcl::PointXYZI>);
-    for(size_t index=0;index<shared_data_->static_ground_size_;index++){
+    for(size_t index=0;index<ground_size;index++){
       pcl::PointXYZI ipt;
       ipt.x = shared_data_->pcl_ground_->points[index].x;
       ipt.y = shared_data_->pcl_ground_->points[index].y;

@@ -107,7 +107,7 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       bool isGoalHeadingSatisfied() override;
       bool isGoalHeadingAligned();
 
-      void updateGlobalPose();
+      bool updateGlobalPose();
       geometry_msgs::msg::TransformStamped getGlobalPose() override;
       
     private: 
@@ -325,14 +325,6 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       double rpp_wheelbase_;
       double rpp_max_steer_;
       double rpp_max_angular_velocity_;
-      int rpp_avoidance_angular_samples_;
-      double rpp_avoidance_angular_span_ratio_;
-      double rpp_avoidance_prefer_nominal_weight_;
-      double rpp_avoidance_curvature_switch_weight_;
-      double rpp_avoidance_turn_switch_penalty_;
-      double rpp_avoidance_turn_deadband_;
-      bool rpp_have_last_selected_curvature_;
-      double rpp_last_selected_curvature_;
 
 };
 

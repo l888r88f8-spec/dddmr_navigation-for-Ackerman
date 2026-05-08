@@ -29,6 +29,7 @@
 * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #include <trajectory_generators/ackermann_simple_trajectory_generator_theory.h>
+#include <trajectory_generators/cuboid_parameter_utils.h>
 
 #include <algorithm>
 
@@ -146,64 +147,7 @@ void AckermannSimpleTrajectoryGeneratorTheory::onInitialize(){
   RCLCPP_INFO(node_->get_logger().get_child(name_), "angular_sim_granularity: %.2f", params_->angular_sim_granularity);
 
   RCLCPP_INFO(node_->get_logger().get_child(name_), "Start to parse cuboid.");
-  std::vector<double> p;
-
-  node_->declare_parameter(name_ + ".cuboid.flb", rclcpp::PARAMETER_DOUBLE_ARRAY);
-  rclcpp::Parameter cuboid_flb= node_->get_parameter(name_ + ".cuboid.flb");
-  p = cuboid_flb.as_double_array();
-  pcl::PointXYZ pt_flb;
-  pt_flb.x = p[0];pt_flb.y = p[1];pt_flb.z = p[2];
-
-  node_->declare_parameter(name_ + ".cuboid.frb", rclcpp::PARAMETER_DOUBLE_ARRAY);
-  rclcpp::Parameter cuboid_frb= node_->get_parameter(name_ + ".cuboid.frb");
-  p = cuboid_frb.as_double_array();
-  pcl::PointXYZ pt_frb;
-  pt_frb.x = p[0];pt_frb.y = p[1];pt_frb.z = p[2];
-
-  node_->declare_parameter(name_ + ".cuboid.flt", rclcpp::PARAMETER_DOUBLE_ARRAY);
-  rclcpp::Parameter cuboid_flt= node_->get_parameter(name_ + ".cuboid.flt");
-  p = cuboid_flt.as_double_array();
-  pcl::PointXYZ pt_flt;
-  pt_flt.x = p[0];pt_flt.y = p[1];pt_flt.z = p[2];
-
-  node_->declare_parameter(name_ + ".cuboid.frt", rclcpp::PARAMETER_DOUBLE_ARRAY);
-  rclcpp::Parameter cuboid_frt= node_->get_parameter(name_ + ".cuboid.frt");
-  p = cuboid_frt.as_double_array();
-  pcl::PointXYZ pt_frt;
-  pt_frt.x = p[0];pt_frt.y = p[1];pt_frt.z = p[2];
-
-  node_->declare_parameter(name_ + ".cuboid.blb", rclcpp::PARAMETER_DOUBLE_ARRAY);
-  rclcpp::Parameter cuboid_blb= node_->get_parameter(name_ + ".cuboid.blb");
-  p = cuboid_blb.as_double_array();
-  pcl::PointXYZ pt_blb;
-  pt_blb.x = p[0];pt_blb.y = p[1];pt_blb.z = p[2];
-
-  node_->declare_parameter(name_ + ".cuboid.brb", rclcpp::PARAMETER_DOUBLE_ARRAY);
-  rclcpp::Parameter cuboid_brb= node_->get_parameter(name_ + ".cuboid.brb");
-  p = cuboid_brb.as_double_array();
-  pcl::PointXYZ pt_brb;
-  pt_brb.x = p[0];pt_brb.y = p[1];pt_brb.z = p[2];
-
-  node_->declare_parameter(name_ + ".cuboid.blt", rclcpp::PARAMETER_DOUBLE_ARRAY);
-  rclcpp::Parameter cuboid_blt= node_->get_parameter(name_ + ".cuboid.blt");
-  p = cuboid_blt.as_double_array();
-  pcl::PointXYZ pt_blt;
-  pt_blt.x = p[0];pt_blt.y = p[1];pt_blt.z = p[2];
-
-  node_->declare_parameter(name_ + ".cuboid.brt", rclcpp::PARAMETER_DOUBLE_ARRAY);
-  rclcpp::Parameter cuboid_brt= node_->get_parameter(name_ + ".cuboid.brt");
-  p = cuboid_brt.as_double_array();
-  pcl::PointXYZ pt_brt;
-  pt_brt.x = p[0];pt_brt.y = p[1];pt_brt.z = p[2];
-
-  params_->cuboid.push_back(pt_blb);
-  params_->cuboid.push_back(pt_brb);
-  params_->cuboid.push_back(pt_blt);
-  params_->cuboid.push_back(pt_flb);
-  params_->cuboid.push_back(pt_brt);
-  params_->cuboid.push_back(pt_frt);
-  params_->cuboid.push_back(pt_flt);
-  params_->cuboid.push_back(pt_frb);
+  params_->cuboid = loadCuboidParameters(node_, name_);
 
   if(params_->cuboid.size()!=8){
     RCLCPP_FATAL(node_->get_logger().get_child(name_), "Cuboid is essential.");
