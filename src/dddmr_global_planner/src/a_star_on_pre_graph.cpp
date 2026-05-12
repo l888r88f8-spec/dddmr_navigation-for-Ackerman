@@ -72,23 +72,16 @@ void AstarListPreGraph::updateNode(NodePreGraph_t& a_node){
 }
 
 NodePreGraph_t AstarListPreGraph::getNode_wi_MinimumF(){
-  auto first_it = f_priority_set_.begin();
-  NodePreGraph_t m_node = as_list_[(*first_it).second];
-  if(!m_node.is_closed){
+  while(!f_priority_set_.empty()){
+    auto first_it = f_priority_set_.begin();
+    NodePreGraph_t m_node = as_list_[(*first_it).second];
     f_priority_set_.erase(first_it);
-    return m_node;
+    if(!m_node.is_closed){
+      return m_node;
+    }
   }
-  
-  //Because we updateNode node even when new g value is smaller than that in openlist
-  //We will have duplicate f value in the f_priority_set_
-  int concern_cnt = 0;
-  while(m_node.is_closed && !f_priority_set_.empty()){
-    concern_cnt++;
-    f_priority_set_.erase(first_it);
-    first_it = f_priority_set_.begin();
-    m_node = as_list_[(*first_it).second];
-  }
-  return m_node;
+
+  return NodePreGraph_t{.self_index=0, .g=0, .h=0, .f=0, .parent_index=0, .is_closed=true, .is_opened=false};
 }
 
 bool AstarListPreGraph::isClosed(unsigned int node_index){
@@ -158,6 +151,10 @@ double A_Star_on_PreGraph::getThetaFromParent2Expanding(pcl::PointXYZI m_pcl_cur
 
 bool A_Star_on_PreGraph::isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::PointXYZI& pcl_expanding, double inscribed_radius){
 
+  if(!kdtree_lethal_ || inscribed_radius <= 1e-6 || !std::isfinite(inscribed_radius)){
+    return true;
+  }
+
   //@ generate line equation
   float dX =
       pcl_expanding.x - pcl_current.x;
@@ -167,6 +164,9 @@ bool A_Star_on_PreGraph::isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::Po
       pcl_expanding.z - pcl_current.z;
   
   float distance = sqrt(dX*dX + dY*dY + dZ*dZ);
+  if(distance <= 1e-6 || !std::isfinite(distance)){
+    return true;
+  }
   distance = distance/inscribed_radius; //sample by every inscribed radius
   float dt = 1/distance;
   for(float t=0; t<=1.0+dt; t+=dt){
@@ -193,6 +193,13 @@ void A_Star_on_PreGraph::getPath(
   std::vector<unsigned int>& path){
 
   //ROS_DEBUG("Start: %u, Goal: %u", start, goal);
+  if(!pc_original_z_up_ || pc_original_z_up_->points.empty() ||
+    start >= pc_original_z_up_->points.size() ||
+    goal >= pc_original_z_up_->points.size() ||
+    !ASLS_)
+  {
+    return;
+  }
 
   /*
   Create the first node which is start and add into frontier
@@ -213,11 +220,17 @@ void A_Star_on_PreGraph::getPath(
   while(!ASLS_->isFrontierEmpty()){ 
     /*Pop minimum F, we leverage prior queue, so we dont need to loop frontier everytime*/
     current_node = ASLS_->getNode_wi_MinimumF();
+    if(current_node.is_closed){
+      break;
+    }
     //ROS_DEBUG("Expand node: %u", current_node.self_index);
     /*Get successors*/
     auto successors = static_graph_.getEdge(current_node.self_index);
     
     for(auto it = successors.begin(); it!=successors.end(); it++){
+      if((*it).first >= pc_original_z_up_->points.size()){
+        continue;
+      }
       
       if((*it).second>a_star_expanding_radius_){
         continue;
@@ -285,5 +298,4 @@ void A_Star_on_PreGraph::getPath(
 
     /*Check if*/
   }
-
 }

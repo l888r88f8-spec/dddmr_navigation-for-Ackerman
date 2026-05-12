@@ -61,6 +61,7 @@ void MultiLayerSpinningLidar::ptrInitial(){
   pcl_msg_.reset(new pcl::PointCloud<pcl::PointXYZ>);
   pcl_msg_gbl_.reset(new pcl::PointCloud<pcl::PointXYZ>);
   pc_current_window_.reset(new pcl::PointCloud<pcl::PointXYZI>);
+  sensor_current_observation_.reset(new pcl::PointCloud<pcl::PointXYZI>);
   current_lethal_.reset(new pcl::PointCloud<pcl::PointXYZI>);
 }
 
@@ -344,19 +345,34 @@ void MultiLayerSpinningLidar::updateLethalPointCloud(){
 
 void MultiLayerSpinningLidar::selfMark(){
   
+  if(!shared_data_){
+    return;
+  }
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
 
-  if(is_local_planner_){return;}
-
-  if(!get_first_tf_ || !shared_data_->is_static_layer_ready_)
+  if(is_local_planner_){
     return;
+  }
+
+  if(!get_first_tf_ || !shared_data_->is_static_layer_ready_){
+    return;
+  }
 
   if(!shared_data_->isAllLayersBeenReset()){
     return;
   }
 
-  if(pcl_msg_->points.size()<=5)
+  if(!pct_marking_ || !pcl_msg_ || !shared_data_->pcl_ground_ ||
+    !shared_data_->kdtree_ground_ || !shared_data_->pcl_map_ ||
+    !shared_data_->kdtree_map_ || shared_data_->pcl_ground_->empty() ||
+    shared_data_->pcl_map_->empty())
+  {
     return;
+  }
+
+  if(pcl_msg_->points.size()<=5){
+    return;
+  }
   //@ Transform into global frame
   pcl_msg_gbl_.reset(new pcl::PointCloud<pcl::PointXYZ>);
   Eigen::Affine3d trans_gbl2b_af3 = tf2::transformToEigen(trans_gbl2b_);
@@ -364,8 +380,9 @@ void MultiLayerSpinningLidar::selfMark(){
   std::vector<int> finite_indices;
   pcl::removeNaNFromPointCloud(*pcl_msg_gbl_, *pcl_msg_gbl_, finite_indices);
   pcl_msg_gbl_->is_dense = true;
-  if(pcl_msg_gbl_->points.size()<=5)
+  if(pcl_msg_gbl_->points.size()<=5){
     return;
+  }
 
   pcl::search::KdTree<pcl::PointXYZ>::Ptr pc_kdtree (new pcl::search::KdTree<pcl::PointXYZ>);
   pc_kdtree->setInputCloud (pcl_msg_gbl_);
@@ -385,6 +402,9 @@ void MultiLayerSpinningLidar::selfMark(){
   pcl::PointCloud<pcl::PointXYZI>::Ptr projected_cloud_clusters (new pcl::PointCloud<pcl::PointXYZI>);
   for (std::vector<pcl::PointIndices>::const_iterator it = cluster_indices_segmentation.begin (); it != cluster_indices_segmentation.end (); ++it)
   {
+    if(it->indices.empty()){
+      continue;
+    }
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZI>);
     pcl::PointXYZI centroid;
@@ -392,13 +412,21 @@ void MultiLayerSpinningLidar::selfMark(){
     centroid.y = 0.0;
     centroid.z = 0.0;
     centroid.intensity = 0.0;
+    std::size_t valid_points = 0;
     for (std::vector<int>::const_iterator pit = it->indices.begin (); pit != it->indices.end (); ++pit){
+      if(*pit < 0 || static_cast<std::size_t>(*pit) >= pcl_msg_gbl_->points.size()){
+        continue;
+      }
+      const auto & src_pt = pcl_msg_gbl_->points[*pit];
+      if(!std::isfinite(src_pt.x) || !std::isfinite(src_pt.y) || !std::isfinite(src_pt.z)){
+        continue;
+      }
       
       //@For visualization purpose
       pcl::PointXYZI i_pt;
-      i_pt.x = pcl_msg_gbl_->points[*pit].x;
-      i_pt.y = pcl_msg_gbl_->points[*pit].y;
-      i_pt.z = pcl_msg_gbl_->points[*pit].z;
+      i_pt.x = src_pt.x;
+      i_pt.y = src_pt.y;
+      i_pt.z = src_pt.z;
       i_pt.intensity = intensity_cnt;
       centroid.x += i_pt.x;
       centroid.y += i_pt.y;
@@ -406,11 +434,15 @@ void MultiLayerSpinningLidar::selfMark(){
 
       cloud_cluster->points.push_back(i_pt); 
       cloud_clusters->points.push_back(i_pt);
+      valid_points++;
 
     }
-    centroid.x/=it->indices.size();
-    centroid.y/=it->indices.size();
-    centroid.z/=it->indices.size();
+    if(valid_points == 0 || cloud_cluster->points.empty()){
+      continue;
+    }
+    centroid.x/=valid_points;
+    centroid.y/=valid_points;
+    centroid.z/=valid_points;
     centroid.intensity = intensity_cnt;
     cloud_clusters->points.push_back(centroid);   
     intensity_cnt += 100;
@@ -430,6 +462,9 @@ void MultiLayerSpinningLidar::selfMark(){
     sor.setInputCloud (cloud_cluster);
     sor.setLeafSize (0.2f, 0.2f, 0.2f);
     sor.filter (*cloud_cluster);
+    if(cloud_cluster->points.empty()){
+      continue;
+    }
     size_t hit=0;
     id.clear();
     sqdist.clear();
@@ -513,12 +548,22 @@ void MultiLayerSpinningLidar::selfMark(){
 
 void MultiLayerSpinningLidar::selfClear(){
 
+  if(!shared_data_){
+    return;
+  }
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
 
-  if(is_local_planner_){return;}
-
-  if(! get_first_tf_ || ! shared_data_->is_static_layer_ready_)
+  if(is_local_planner_){
     return;
+  }
+
+  if(! get_first_tf_ || ! shared_data_->is_static_layer_ready_){
+    return;
+  }
+
+  if(!pct_marking_){
+    return;
+  }
 
   if(shared_data_->dgraph_update_request_[name_]){
     //@ need to regenerate dynamic graph
@@ -527,14 +572,18 @@ void MultiLayerSpinningLidar::selfClear(){
   }
 
   pcl::KdTreeFLANN<pcl::PointXYZ>::Ptr kdtree_last_observation(new pcl::KdTreeFLANN<pcl::PointXYZ>());
-  bool observation_clear = false;
+  pcl::PointCloud<pcl::PointXYZ>::Ptr last_observation(new pcl::PointCloud<pcl::PointXYZ>());
+  bool observation_clear = true;
 
-  if(pcl_msg_gbl_->points.size()>5){
-    kdtree_last_observation->setInputCloud(pcl_msg_gbl_);
-    observation_clear = false;
-  }
-  else{
-    observation_clear = true;
+  if(pcl_msg_gbl_ && pcl_msg_gbl_->points.size()>5){
+    *last_observation = *pcl_msg_gbl_;
+    std::vector<int> finite_indices;
+    pcl::removeNaNFromPointCloud(*last_observation, *last_observation, finite_indices);
+    last_observation->is_dense = true;
+    if(last_observation->points.size()>5){
+      kdtree_last_observation->setInputCloud(last_observation);
+      observation_clear = false;
+    }
   }
   
   visualization_msgs::msg::MarkerArray markerArray;
@@ -543,6 +592,7 @@ void MultiLayerSpinningLidar::selfClear(){
   //@ We queue all observation here for later clearing and remarking value
   //@ This is very important!!!!!!!!
   std::vector<perception_3d::marking_voxel> current_observation_ptr;
+  std::vector<perception_3d::per_marking*> markings_to_clear;
   
   //@ find robot location and base on perception window, we extract all nearby marked clusters
   int round_robot_base_x_min = ((trans_gbl2b_.transform.translation.x-perception_window_size_)/resolution_);
@@ -566,24 +616,27 @@ void MultiLayerSpinningLidar::selfClear(){
   size_t cleared_cnt = 0;
   for(auto it_x = it_x_min; it_x!=it_x_max; it_x++){
 
-    auto it_y_min = (*it_x).second.lower_bound(round_robot_base_y_min);
-    auto it_y_max = (*it_x).second.lower_bound(round_robot_base_y_max);
-    if(it_y_min==(*it_x).second.end() && it_y_min==it_y_max)
+    auto& y_cells = (*it_x).second;
+    auto it_y_min = y_cells.lower_bound(round_robot_base_y_min);
+    auto it_y_max = y_cells.lower_bound(round_robot_base_y_max);
+    if(it_y_min==y_cells.end() && it_y_min==it_y_max)
       continue;
 
     for(auto it_y = it_y_min; it_y!=it_y_max; it_y++){
-      if((*it_x).second[(*it_y).first].empty())
+      auto& z_cells = (*it_y).second;
+      if(z_cells.empty())
         continue;
       //@ A marked point exists, loop z for sight check
-      auto it_z_min = (*it_x).second[(*it_y).first].lower_bound(round_robot_base_z_min);
-      auto it_z_max = (*it_x).second[(*it_y).first].lower_bound(round_robot_base_z_max);
-      if(it_z_min==(*it_x).second[(*it_y).first].end() && it_z_min==it_z_max)
+      auto it_z_min = z_cells.lower_bound(round_robot_base_z_min);
+      auto it_z_max = z_cells.lower_bound(round_robot_base_z_max);
+      if(it_z_min==z_cells.end() && it_z_min==it_z_max)
         continue;
 
       //@ fast segmentation of z axis
       for(auto it_z = it_z_min; it_z!=it_z_max;it_z++){
+        auto& marking = (*it_z).second;
 
-        if((*it_z).second.pc_== nullptr){
+        if(marking.pc_== nullptr || marking.pc_->empty()){
           continue;
         }
         
@@ -593,9 +646,9 @@ void MultiLayerSpinningLidar::selfClear(){
         pt.y = (*it_y).first*resolution_;
         pt.z = (*it_z).first*height_resolution_;
         */
-        pt.x = (*it_z).second.pc_->back().x;
-        pt.y = (*it_z).second.pc_->back().y;
-        pt.z = (*it_z).second.pc_->back().z;
+        pt.x = marking.pc_->back().x;
+        pt.y = marking.pc_->back().y;
+        pt.z = marking.pc_->back().z;
         pcl::PointCloud<pcl::PointXYZI> casting_check;
 
         if(!isinLidarObservation(pt)){
@@ -605,7 +658,7 @@ void MultiLayerSpinningLidar::selfClear(){
           a_voxel.y = (*it_y).first;
           a_voxel.z = (*it_z).first;
           current_observation_ptr.push_back(a_voxel);
-          *pc_current_window_ += (*(*it_z).second.pc_);
+          *pc_current_window_ += (*marking.pc_);
           continue;
         }
         else{
@@ -678,7 +731,7 @@ void MultiLayerSpinningLidar::selfClear(){
             a_voxel.y = (*it_y).first;
             a_voxel.z = (*it_z).first;
             current_observation_ptr.push_back(a_voxel);
-            *pc_current_window_ += (*(*it_z).second.pc_);
+            *pc_current_window_ += (*marking.pc_);
             //addCastingMarker(pt, current_observation_ptr.size(), markerArray);
             continue;
           }
@@ -687,8 +740,8 @@ void MultiLayerSpinningLidar::selfClear(){
           std::vector<int> id;
           std::vector<float> sqdist;
           //@ I am not sure what happen below, looks like I redo check again but the threshold (1) is different
-          if(kdtree_last_observation->radiusSearch(pt, resolution_, id, sqdist)>1){
-            *pc_current_window_ += (*(*it_z).second.pc_);
+          if(!observation_clear && kdtree_last_observation->radiusSearch(pt, resolution_, id, sqdist)>1){
+            *pc_current_window_ += (*marking.pc_);
 
             perception_3d::marking_voxel a_voxel;
             a_voxel.x = (*it_x).first;
@@ -699,13 +752,19 @@ void MultiLayerSpinningLidar::selfClear(){
           }       
           else{
             addCastingMarker(pt, cleared_cnt, markerArray);
-            pct_marking_->removePCPtr((*it_z).second);
+            markings_to_clear.push_back(&marking);
             cleared_cnt++;
           } 
                  
         }
       }
 
+    }
+  }
+
+  for(auto* marking : markings_to_clear){
+    if(marking){
+      pct_marking_->removePCPtr(*marking);
     }
   }
 
@@ -722,7 +781,6 @@ void MultiLayerSpinningLidar::selfClear(){
     pcl::toROSMsg(*pc_current_window_, ros_pc2_msg);
     pub_current_window_marking_->publish(ros_pc2_msg);     
   }
-  
 }
 
 void MultiLayerSpinningLidar::getCastingPointCloud(pcl::PointXYZ& cluster_center, pcl::PointCloud<pcl::PointXYZI>& pc_for_check){
@@ -742,6 +800,9 @@ void MultiLayerSpinningLidar::getCastingPointCloud(pcl::PointXYZ& cluster_center
   
   float distance = sqrt(dX*dX + dY*dY + dZ*dZ);
   //@ Distance is the distance from point sample to sensor
+  if(distance <= 1e-6 || !std::isfinite(distance)){
+    return;
+  }
   distance = distance/0.05; //sample by every 5 cm
   float dt = 1/distance;
   for(float t=0; t<=1.0; t+=dt){
@@ -871,11 +932,15 @@ bool MultiLayerSpinningLidar::isinLidarObservation(pcl::PointXYZ& pc){
 void MultiLayerSpinningLidar::pubUpdateLoop()
 {
 
-  if(shared_data_->dgraph_update_request_[name_]){
+  if(!shared_data_ || !pct_marking_){
     return;
   }
 
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
+
+  if(shared_data_->dgraph_update_request_[name_]){
+    return;
+  }
 
   if(pub_gbl_marking_for_visualization_){
     pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_msg (new pcl::PointCloud<pcl::PointXYZI>);
@@ -924,8 +989,6 @@ void MultiLayerSpinningLidar::pubUpdateLoop()
     pcl::toROSMsg(*pcl_msg2, ros_pc2_msg2);
     pub_dGraph_->publish(ros_pc2_msg2);
   }
-
-  
 }
 
 void MultiLayerSpinningLidar::addCastingMarker(const pcl::PointXYZ& pt, size_t id, visualization_msgs::msg::MarkerArray& markerArray){
@@ -969,6 +1032,9 @@ void MultiLayerSpinningLidar::resetdGraph(){
 
 double MultiLayerSpinningLidar::get_dGraphValue(const unsigned int index){
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
+  if(!pct_marking_){
+    return gbl_utils_ ? gbl_utils_->getMaxObstacleDistance() : 9999.0;
+  }
   return pct_marking_->get_dGraphValue(index);
 }
 

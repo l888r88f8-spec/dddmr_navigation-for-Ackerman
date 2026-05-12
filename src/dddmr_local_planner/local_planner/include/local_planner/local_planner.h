@@ -98,12 +98,6 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       bool isGoalPositionReached() override;
       bool isGoalReached();
       
-      bool isRouteStartAligned() override;
-      dddmr_sys_core::RouteStartupStatus evaluateRouteStartupStatus(
-        std::string * detail) override;
-      bool isInitialHeadingAligned();
-      bool isInitialHeadingAlignedOnCurrentPrunePlan();
-      bool isRouteStartFrontReachableOnCurrentPrunePlan(std::string * detail) const;
       bool isGoalHeadingSatisfied() override;
       bool isGoalHeadingAligned();
 
@@ -216,9 +210,7 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
          This should be optimize in future. The variables affect the control behavior.
          The variable should be adapt to vehicle speed!!!
       */
-      double forward_prune_, backward_prune_, heading_tracking_distance_, heading_align_angle_;
-      double route_start_front_reach_distance_;
-      double route_start_front_projection_threshold_;
+      double forward_prune_, backward_prune_;
       std::size_t causal_prune_search_window_, causal_prune_max_index_jump_;
       double causal_prune_max_arc_jump_, causal_prune_max_lateral_distance_, causal_prune_max_heading_error_;
       double min_heading_reference_length_;

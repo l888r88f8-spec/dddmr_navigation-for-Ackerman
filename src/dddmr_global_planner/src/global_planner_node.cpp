@@ -32,7 +32,6 @@
 
 int main(int argc, char **argv)
 {
-
   rclcpp::init(argc, argv);
   auto perception_3d = std::make_shared<perception_3d::Perception3D_ROS>("perception_3d_global");
   auto global_planner = std::make_shared<global_planner::GlobalPlanner>("global_planner");

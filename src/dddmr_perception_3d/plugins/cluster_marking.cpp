@@ -126,7 +126,9 @@ void Marking::addPCPtr(const double cx, const double cy, const double cz,
   const pcl::ModelCoefficients::Ptr& pcplaneptr){
 
   if(!std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(cz) ||
-    xy_resolution_ <= 0.0 || height_resolution_ <= 0.0)
+    xy_resolution_ <= 0.0 || height_resolution_ <= 0.0 ||
+    !dGraph_ || !pcptr || pcptr->empty() ||
+    !pcplaneptr || pcplaneptr->values.size() < 4)
   {
     return;
   }
@@ -155,6 +157,12 @@ void Marking::addPCPtr(const double cx, const double cy, const double cz,
 
 void Marking::removePCPtr(perception_3d::per_marking& per_marking){
   
+  if(!dGraph_){
+    per_marking.pc_.reset();
+    per_marking.mc_.reset();
+    return;
+  }
+
   auto nodes_of_min_distance = per_marking.nodes_of_min_distance_;
 
   for(auto id=nodes_of_min_distance.begin();id!=nodes_of_min_distance.end();id++){

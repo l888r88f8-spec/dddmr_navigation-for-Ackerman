@@ -65,23 +65,12 @@ public:
     double projection_search_radius = 0.6;
     double goal_position_tolerance = 0.4;
     double goal_heading_tolerance = 0.35;
-    bool use_goal_heading = false;
-    double steering_penalty = 0.2;
-    double steering_change_penalty = 0.3;
-    double heading_change_penalty = 0.4;
     double obstacle_penalty_weight = 1.0;
     double edge_weight_penalty_weight = 1.0;
     double edge_weight_safe_threshold = 1.0;
     double edge_weight_soft_cap = 8.0;
     double edge_weight_hard_reject_threshold = 0.0;
     double heuristic_heading_weight = 0.2;
-    double turn_side_hysteresis_penalty = 0.8;
-    double rearward_check_distance = 1.5;
-    double rearward_allowance = 0.05;
-    double rearward_excursion_penalty = 4.0;
-    double rearward_hard_reject_distance = 0.20;
-    double strict_forward_check_distance = 1.5;
-    double min_initial_forward_projection = 0.05;
     double max_projected_pitch = 0.55;
     double max_projected_vertical_jump = 0.25;
     bool allow_sample_nearest_fallback = false;
@@ -102,7 +91,6 @@ public:
     nav_msgs::msg::Path * ros_path,
     bool force_position_only_goal = false,
     bool force_use_goal_heading = false,
-    int preferred_initial_turn_sign = 0,
     const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
     bool * was_canceled = nullptr,
     const std::string & debug_label = "",
@@ -121,7 +109,6 @@ private:
     double f = std::numeric_limits<double>::infinity();
     std::size_t parent_state_id = std::numeric_limits<std::size_t>::max();
     int primitive_index = -1;
-    int initial_turn_sign = 0;
     std::size_t ground_index = 0;
     int heading_bin = 0;
     double x = 0.0;
@@ -161,10 +148,8 @@ private:
     std::size_t end_ground_index = 0;
     int end_heading_bin = 0;
     double path_length = 0.0;
-    double heading_change = 0.0;
     double obstacle_penalty = 0.0;
     double edge_penalty = 0.0;
-    double rearward_penalty = 0.0;
   };
 
   static constexpr std::size_t kInvalidStateId = std::numeric_limits<std::size_t>::max();
@@ -219,20 +204,14 @@ private:
     bool has_goal_yaw,
     bool use_goal_heading) const;
 
-  double GetPrimitiveSteerByIndex(int primitive_index) const;
-  int GetPrimitiveTurnSign(int primitive_index) const;
   double ComputeTransitionCost(
     const NodeRecord & parent,
     int primitive_index,
-    const PrimitiveResult & primitive_result,
-    int preferred_initial_turn_sign) const;
+    const PrimitiveResult & primitive_result) const;
 
   bool RolloutPrimitive(
     const NodeRecord & parent,
     int primitive_index,
-    double planning_start_x,
-    double planning_start_y,
-    double planning_start_yaw,
     PrimitiveResult * primitive_result,
     std::vector<SamplePose> * sampled_poses) const;
 

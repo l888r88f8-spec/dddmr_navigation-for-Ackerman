@@ -123,8 +123,11 @@ class Marking{
     marking_t::iterator getEnd(){return marking_.end();};
 
     double get_dGraphValue(const unsigned int index){
+      if(!dGraph_){
+        return 9999.0;
+      }
       if (dGraph_->graph_.find(index) == dGraph_->graph_.end())
-        return 0.0;
+        return 9999.0;
       return dGraph_->getValue(index);
     };
 

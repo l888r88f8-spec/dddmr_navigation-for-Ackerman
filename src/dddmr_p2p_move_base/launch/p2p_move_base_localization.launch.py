@@ -16,6 +16,7 @@ def generate_launch_description():
     map_dir = LaunchConfiguration('map_dir')
     ground_dir = LaunchConfiguration('ground_dir')
     rviz_config = LaunchConfiguration('rviz_config')
+    global_planner_prefix = LaunchConfiguration('global_planner_prefix')
 
     localization_config = os.path.join(
         p2p_share_dir,
@@ -55,6 +56,11 @@ def generate_launch_description():
             default_value=default_rviz_config,
             description='Path to the RViz configuration file.',
         ),
+        DeclareLaunchArgument(
+            'global_planner_prefix',
+            default_value='',
+            description='Optional command prefix for global_planner_node, e.g. gdb.',
+        ),
         SetEnvironmentVariable('RCUTILS_COLORIZED_OUTPUT', '1'),
         Node(
             package='mcl_3dl',
@@ -77,6 +83,7 @@ def generate_launch_description():
             output='screen',
             respawn=False,
             emulate_tty=True,
+            prefix=global_planner_prefix,
             parameters=[
                 localization_config,
                 {'use_sim_time': use_sim},

@@ -79,18 +79,8 @@ void ForwardHybridAStar::SetConfig(const Config & config)
   config_.edge_weight_soft_cap = std::max(config_.edge_weight_soft_cap, 0.0);
   config_.edge_weight_hard_reject_threshold =
     std::max(config_.edge_weight_hard_reject_threshold, 0.0);
-  config_.turn_side_hysteresis_penalty = std::max(config_.turn_side_hysteresis_penalty, 0.0);
-  config_.rearward_check_distance = std::max(config_.rearward_check_distance, 0.0);
-  config_.rearward_allowance = std::max(config_.rearward_allowance, 0.0);
-  config_.rearward_excursion_penalty = std::max(config_.rearward_excursion_penalty, 0.0);
-  config_.rearward_hard_reject_distance = std::max(config_.rearward_hard_reject_distance, 0.0);
-  config_.strict_forward_check_distance = std::max(config_.strict_forward_check_distance, 0.0);
-  config_.min_initial_forward_projection = std::max(config_.min_initial_forward_projection, 0.0);
   config_.max_projected_pitch = std::clamp(config_.max_projected_pitch, 0.05, 1.4);
   config_.max_projected_vertical_jump = std::max(config_.max_projected_vertical_jump, 0.02);
-  if (config_.rearward_hard_reject_distance < config_.rearward_allowance) {
-    config_.rearward_hard_reject_distance = config_.rearward_allowance;
-  }
 
   primitive_steers_.clear();
   primitive_steers_.reserve(static_cast<std::size_t>(config_.steer_sample_count));
@@ -457,10 +447,10 @@ bool ForwardHybridAStar::ValidateSample(
   double yaw,
   double z_hint,
   std::size_t * ground_index,
-  double * projected_z,
-  double * dgraph_value,
-  std::size_t previous_ground_index,
-  bool allow_nearest_fallback) const
+    double * projected_z,
+    double * dgraph_value,
+    std::size_t previous_ground_index,
+    bool allow_nearest_fallback) const
 {
   if (ground_index == nullptr || projected_z == nullptr || dgraph_value == nullptr) {
     return false;
@@ -623,59 +613,16 @@ bool ForwardHybridAStar::IsGoalReached(
   return heading_error <= config_.goal_heading_tolerance;
 }
 
-double ForwardHybridAStar::GetPrimitiveSteerByIndex(int primitive_index) const
-{
-  if (primitive_index < 0 ||
-    primitive_index >= static_cast<int>(primitive_steers_.size()))
-  {
-    return 0.0;
-  }
-  return primitive_steers_[static_cast<std::size_t>(primitive_index)];
-}
-
-int ForwardHybridAStar::GetPrimitiveTurnSign(int primitive_index) const
-{
-  const double steer = GetPrimitiveSteerByIndex(primitive_index);
-  const double steer_eps = std::max(1e-4, config_.max_steer * 0.05);
-  if (steer > steer_eps) {
-    return 1;
-  }
-  if (steer < -steer_eps) {
-    return -1;
-  }
-  return 0;
-}
-
 double ForwardHybridAStar::ComputeTransitionCost(
   const NodeRecord & parent,
   int primitive_index,
-  const PrimitiveResult & primitive_result,
-  int preferred_initial_turn_sign) const
+  const PrimitiveResult & primitive_result) const
 {
-  const double steer = GetPrimitiveSteerByIndex(primitive_index);
-  const double parent_steer = GetPrimitiveSteerByIndex(parent.primitive_index);
-  const double steer_norm = std::max(config_.max_steer, 1e-6);
-
+  (void)parent;
+  (void)primitive_index;
   double cost = primitive_result.path_length;
-  cost += config_.steering_penalty * (std::abs(steer) / steer_norm);
-  cost +=
-    config_.steering_change_penalty *
-    (std::abs(steer - parent_steer) / steer_norm);
-  cost += config_.heading_change_penalty * primitive_result.heading_change;
   cost += config_.obstacle_penalty_weight * primitive_result.obstacle_penalty;
   cost += config_.edge_weight_penalty_weight * primitive_result.edge_penalty;
-  cost += primitive_result.rearward_penalty;
-
-  // Hysteresis for turn-side stability: penalize selecting the opposite side
-  // on the first non-zero steering decision.
-  const int primitive_turn_sign = GetPrimitiveTurnSign(primitive_index);
-  if (preferred_initial_turn_sign != 0 &&
-    parent.initial_turn_sign == 0 &&
-    primitive_turn_sign != 0 &&
-    primitive_turn_sign != preferred_initial_turn_sign)
-  {
-    cost += config_.turn_side_hysteresis_penalty;
-  }
 
   return std::max(cost, 1e-6);
 }
@@ -683,9 +630,6 @@ double ForwardHybridAStar::ComputeTransitionCost(
 bool ForwardHybridAStar::RolloutPrimitive(
   const NodeRecord & parent,
   int primitive_index,
-  double planning_start_x,
-  double planning_start_y,
-  double planning_start_yaw,
   PrimitiveResult * primitive_result,
   std::vector<SamplePose> * sampled_poses) const
 {
@@ -721,10 +665,8 @@ bool ForwardHybridAStar::RolloutPrimitive(
     return false;
   }
 
-  double heading_change = 0.0;
   double obstacle_penalty_sum = 0.0;
   double edge_penalty_sum = 0.0;
-  double rearward_penalty_sum = 0.0;
   std::size_t sample_count = 0;
   std::size_t end_ground_index = parent.ground_index;
   double end_projected_z = z;
@@ -736,8 +678,6 @@ bool ForwardHybridAStar::RolloutPrimitive(
 
   while (remaining > 1e-9) {
     const double ds = std::min(step, remaining);
-    const double previous_yaw = yaw;
-
     x += ds * std::cos(yaw);
     y += ds * std::sin(yaw);
     yaw = NormalizeAngle(yaw + ds / config_.wheelbase * std::tan(steer));
@@ -775,27 +715,6 @@ bool ForwardHybridAStar::RolloutPrimitive(
       edge_penalty_sum += edge_over;
     }
 
-    // Rearward excursion is evaluated in the current planning-start frame.
-    // It suppresses local reconnect arcs that fold into the vehicle rear side.
-    const double dx_start = x - planning_start_x;
-    const double dy_start = y - planning_start_y;
-    const double distance_from_start = std::hypot(dx_start, dy_start);
-    if (distance_from_start <= config_.rearward_check_distance) {
-      const double x_local =
-        std::cos(planning_start_yaw) * dx_start + std::sin(planning_start_yaw) * dy_start;
-      if (distance_from_start <= config_.strict_forward_check_distance &&
-        x_local < config_.min_initial_forward_projection)
-      {
-        return false;
-      }
-      if (x_local < -config_.rearward_hard_reject_distance) {
-        return false;
-      }
-      if (x_local < -config_.rearward_allowance) {
-        rearward_penalty_sum += config_.rearward_excursion_penalty;
-      }
-    }
-
     if (sampled_poses != nullptr) {
       sampled_poses->push_back(SamplePose{x, y, sample_z, yaw});
     }
@@ -805,7 +724,6 @@ bool ForwardHybridAStar::RolloutPrimitive(
     end_projected_z = sample_z;
     previous_ground_index = sample_ground_index;
 
-    heading_change += std::abs(NormalizeAngle(yaw - previous_yaw));
     const double obstacle_factor =
       std::exp(-1.0 * inflation_descending_rate * (sample_dgraph - inscribed_radius));
     obstacle_penalty_sum += obstacle_factor;
@@ -821,13 +739,10 @@ bool ForwardHybridAStar::RolloutPrimitive(
   primitive_result->end_ground_index = end_ground_index;
   primitive_result->end_heading_bin = QuantizeYaw(yaw);
   primitive_result->path_length = config_.primitive_length;
-  primitive_result->heading_change = heading_change;
   primitive_result->obstacle_penalty =
     sample_count > 0 ? obstacle_penalty_sum / static_cast<double>(sample_count) : 0.0;
   primitive_result->edge_penalty =
     sample_count > 0 ? edge_penalty_sum / static_cast<double>(sample_count) : 0.0;
-  primitive_result->rearward_penalty =
-    sample_count > 0 ? rearward_penalty_sum / static_cast<double>(sample_count) : 0.0;
 
   return true;
 }
@@ -970,9 +885,6 @@ bool ForwardHybridAStar::ReconstructPath(
     if (!RolloutPrimitive(
         *parent,
         child->primitive_index,
-        start_node->x,
-        start_node->y,
-        start_node->yaw,
         &primitive_result,
         &sampled_poses))
     {
@@ -1030,7 +942,6 @@ bool ForwardHybridAStar::MakePlan(
   nav_msgs::msg::Path * ros_path,
   bool force_position_only_goal,
   bool force_use_goal_heading,
-  int preferred_initial_turn_sign,
   const CancelRequestedCallback & cancel_requested,
   bool * was_canceled,
   const std::string & debug_label,
@@ -1151,19 +1062,11 @@ bool ForwardHybridAStar::MakePlan(
   double goal_yaw = 0.0;
   const bool has_goal_yaw = ExtractYaw(goal, &goal_yaw);
   const bool use_goal_heading =
-    !force_position_only_goal && (force_use_goal_heading || config_.use_goal_heading);
+    !force_position_only_goal && force_use_goal_heading;
   if (use_goal_heading && !has_goal_yaw) {
-    RCLCPP_WARN(logger_, "Hybrid A*: use_goal_heading enabled but goal yaw is invalid.");
+    RCLCPP_WARN(logger_, "Hybrid A*: forced goal heading enabled but goal yaw is invalid.");
     return false;
   }
-  if (preferred_initial_turn_sign > 0) {
-    preferred_initial_turn_sign = 1;
-  } else if (preferred_initial_turn_sign < 0) {
-    preferred_initial_turn_sign = -1;
-  } else {
-    preferred_initial_turn_sign = 0;
-  }
-
   std::size_t start_ground_index = 0;
   double start_projected_z = 0.0;
   if (!PoseToGroundIndex(
@@ -1290,7 +1193,6 @@ bool ForwardHybridAStar::MakePlan(
   start_node.f = start_node.g + start_node.h;
   start_node.parent_state_id = kInvalidStateId;
   start_node.primitive_index = -1;
-  start_node.initial_turn_sign = 0;
   start_node.ground_index = start_ground_index;
   start_node.heading_bin = start_heading_bin;
   start_node.x = start.pose.position.x;
@@ -1356,9 +1258,6 @@ bool ForwardHybridAStar::MakePlan(
       if (!RolloutPrimitive(
           current,
           primitive_index,
-          start.pose.position.x,
-          start.pose.position.y,
-          start_yaw,
           &primitive_result,
           nullptr))
       {
@@ -1380,8 +1279,7 @@ bool ForwardHybridAStar::MakePlan(
       }
 
       const double transition_cost =
-        ComputeTransitionCost(
-        current, primitive_index, primitive_result, preferred_initial_turn_sign);
+        ComputeTransitionCost(current, primitive_index, primitive_result);
       const double tentative_g = current.g + transition_cost;
       if (neighbor != nullptr && neighbor->opened && tentative_g >= neighbor->g - 1e-9) {
         continue;
@@ -1405,11 +1303,6 @@ bool ForwardHybridAStar::MakePlan(
       updated_neighbor.f = updated_neighbor.g + updated_neighbor.h;
       updated_neighbor.parent_state_id = top_entry.state_id;
       updated_neighbor.primitive_index = primitive_index;
-      updated_neighbor.initial_turn_sign = current.initial_turn_sign;
-      const int primitive_turn_sign = GetPrimitiveTurnSign(primitive_index);
-      if (updated_neighbor.initial_turn_sign == 0 && primitive_turn_sign != 0) {
-        updated_neighbor.initial_turn_sign = primitive_turn_sign;
-      }
       updated_neighbor.ground_index = primitive_result.end_ground_index;
       updated_neighbor.heading_bin = primitive_result.end_heading_bin;
       updated_neighbor.x = primitive_result.end_x;

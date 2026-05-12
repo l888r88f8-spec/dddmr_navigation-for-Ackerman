@@ -57,7 +57,6 @@ class FSM{
       kIdle,
       kRouteRequest,
       kRoutePending,
-      kRouteStartAlignment,
       kRouteTracking,
       kGoalAlignment,
       kBlockedWait,

@@ -45,7 +45,11 @@ void DynamicGraph::clearValue(unsigned int key, double distance){
 }
 
 double DynamicGraph::getValue(const unsigned int index){
-  return graph_[index];
+  const auto it = graph_.find(index);
+  if(it == graph_.end()){
+    return 9999.0;
+  }
+  return it->second;
 }
 
 void DynamicGraph::clear(){

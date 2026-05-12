@@ -129,8 +129,6 @@ std::string FSM::phaseName(NavigationPhase phase)
       return "route_request";
     case NavigationPhase::kRoutePending:
       return "route_pending";
-    case NavigationPhase::kRouteStartAlignment:
-      return "route_start_alignment";
     case NavigationPhase::kRouteTracking:
       return "route_tracking";
     case NavigationPhase::kGoalAlignment:
@@ -159,10 +157,6 @@ bool FSM::legacyDecisionToPhase(const std::string & decision, NavigationPhase * 
   }
   if(decision == "d_planning_waitdone" || decision == "route_pending"){
     *phase = NavigationPhase::kRoutePending;
-    return true;
-  }
-  if(decision == "d_align_heading" || decision == "route_start_alignment"){
-    *phase = NavigationPhase::kRouteStartAlignment;
     return true;
   }
   if(decision == "d_controlling" || decision == "route_tracking"){

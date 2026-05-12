@@ -218,14 +218,6 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
   this->get_parameter("hybrid_astar.goal_position_tolerance", forward_hybrid_astar_config_.goal_position_tolerance);
   declare_parameter("hybrid_astar.goal_heading_tolerance", rclcpp::ParameterValue(0.35));
   this->get_parameter("hybrid_astar.goal_heading_tolerance", forward_hybrid_astar_config_.goal_heading_tolerance);
-  declare_parameter("hybrid_astar.use_goal_heading", rclcpp::ParameterValue(false));
-  this->get_parameter("hybrid_astar.use_goal_heading", forward_hybrid_astar_config_.use_goal_heading);
-  declare_parameter("hybrid_astar.steering_penalty", rclcpp::ParameterValue(0.2));
-  this->get_parameter("hybrid_astar.steering_penalty", forward_hybrid_astar_config_.steering_penalty);
-  declare_parameter("hybrid_astar.steering_change_penalty", rclcpp::ParameterValue(0.3));
-  this->get_parameter("hybrid_astar.steering_change_penalty", forward_hybrid_astar_config_.steering_change_penalty);
-  declare_parameter("hybrid_astar.heading_change_penalty", rclcpp::ParameterValue(0.4));
-  this->get_parameter("hybrid_astar.heading_change_penalty", forward_hybrid_astar_config_.heading_change_penalty);
   declare_parameter("hybrid_astar.obstacle_penalty_weight", rclcpp::ParameterValue(1.0));
   this->get_parameter("hybrid_astar.obstacle_penalty_weight", forward_hybrid_astar_config_.obstacle_penalty_weight);
   declare_parameter("hybrid_astar.edge_weight_penalty_weight", rclcpp::ParameterValue(1.0));
@@ -248,26 +240,6 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
     forward_hybrid_astar_config_.edge_weight_hard_reject_threshold);
   declare_parameter("hybrid_astar.heuristic_heading_weight", rclcpp::ParameterValue(0.2));
   this->get_parameter("hybrid_astar.heuristic_heading_weight", forward_hybrid_astar_config_.heuristic_heading_weight);
-  declare_parameter("hybrid_astar.turn_side_hysteresis_penalty", rclcpp::ParameterValue(0.8));
-  this->get_parameter("hybrid_astar.turn_side_hysteresis_penalty", forward_hybrid_astar_config_.turn_side_hysteresis_penalty);
-  declare_parameter("hybrid_astar.rearward_check_distance", rclcpp::ParameterValue(1.5));
-  this->get_parameter("hybrid_astar.rearward_check_distance", forward_hybrid_astar_config_.rearward_check_distance);
-  declare_parameter("hybrid_astar.rearward_allowance", rclcpp::ParameterValue(0.05));
-  this->get_parameter("hybrid_astar.rearward_allowance", forward_hybrid_astar_config_.rearward_allowance);
-  declare_parameter("hybrid_astar.rearward_excursion_penalty", rclcpp::ParameterValue(4.0));
-  this->get_parameter("hybrid_astar.rearward_excursion_penalty", forward_hybrid_astar_config_.rearward_excursion_penalty);
-  declare_parameter("hybrid_astar.rearward_hard_reject_distance", rclcpp::ParameterValue(0.20));
-  this->get_parameter(
-    "hybrid_astar.rearward_hard_reject_distance",
-    forward_hybrid_astar_config_.rearward_hard_reject_distance);
-  declare_parameter("hybrid_astar.strict_forward_check_distance", rclcpp::ParameterValue(1.5));
-  this->get_parameter(
-    "hybrid_astar.strict_forward_check_distance",
-    forward_hybrid_astar_config_.strict_forward_check_distance);
-  declare_parameter("hybrid_astar.min_initial_forward_projection", rclcpp::ParameterValue(0.05));
-  this->get_parameter(
-    "hybrid_astar.min_initial_forward_projection",
-    forward_hybrid_astar_config_.min_initial_forward_projection);
   declare_parameter("hybrid_astar.max_projected_pitch", rclcpp::ParameterValue(0.55));
   this->get_parameter(
     "hybrid_astar.max_projected_pitch",
@@ -294,16 +266,13 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
     forward_hybrid_astar_config_.primitive_step);
   RCLCPP_DEBUG(
     this->get_logger(),
-    "hybrid_astar: goal_tol=(%.2f, %.2f) use_goal_heading=%d proj_radius=%.2f",
+    "hybrid_astar: goal_tol=(%.2f, %.2f) proj_radius=%.2f",
     forward_hybrid_astar_config_.goal_position_tolerance,
     forward_hybrid_astar_config_.goal_heading_tolerance,
-    forward_hybrid_astar_config_.use_goal_heading,
     forward_hybrid_astar_config_.projection_search_radius);
   RCLCPP_DEBUG(
     this->get_logger(),
-    "hybrid_astar: strict_forward_check_distance=%.2f min_initial_forward_projection=%.2f max_projected_pitch=%.2f max_projected_vertical_jump=%.2f allow_sample_nearest_fallback=%d edge_weight_penalty_weight=%.2f edge_weight_safe_threshold=%.2f edge_weight_soft_cap=%.2f edge_weight_hard_reject_threshold=%.2f",
-    forward_hybrid_astar_config_.strict_forward_check_distance,
-    forward_hybrid_astar_config_.min_initial_forward_projection,
+    "hybrid_astar: max_projected_pitch=%.2f max_projected_vertical_jump=%.2f allow_sample_nearest_fallback=%d edge_weight_penalty_weight=%.2f edge_weight_safe_threshold=%.2f edge_weight_soft_cap=%.2f edge_weight_hard_reject_threshold=%.2f",
     forward_hybrid_astar_config_.max_projected_pitch,
     forward_hybrid_astar_config_.max_projected_vertical_jump,
     forward_hybrid_astar_config_.allow_sample_nearest_fallback ? 1 : 0,
@@ -380,22 +349,30 @@ GlobalPlanner::~GlobalPlanner(){
 
 void GlobalPlanner::checkPerception3DThread(){
   
-  if(!perception_3d_ros_->getSharedDataPtr()->is_static_layer_ready_){
+  auto shared_data = perception_3d_ros_->getSharedDataPtr();
+  if(!shared_data || !shared_data->is_static_layer_ready_){
     RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000, "Waiting for static layer");
     return;
   }
   
-  if(static_ground_size_!=perception_3d_ros_->getSharedDataPtr()->static_ground_size_){
+  if(static_ground_size_!=shared_data->static_ground_size_){
     std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
-    *pcl_ground_ = *(perception_3d_ros_->getSharedDataPtr()->pcl_ground_);
+    std::unique_lock<std::recursive_mutex> sensor_lock(shared_data->ground_kdtree_cb_mutex_);
+    if(!shared_data->pcl_ground_ || !shared_data->pcl_map_ ||
+      !shared_data->kdtree_ground_ || !shared_data->kdtree_map_ ||
+      !shared_data->sGraph_ptr_)
+    {
+      return;
+    }
+    *pcl_ground_ = *(shared_data->pcl_ground_);
     global_frame_ = perception_3d_ros_->getGlobalUtils()->getGblFrame();
-    *kdtree_ground_ = *(perception_3d_ros_->getSharedDataPtr()->kdtree_ground_);
-    *kdtree_map_ = *(perception_3d_ros_->getSharedDataPtr()->kdtree_map_);
-    *pcl_map_ = *(perception_3d_ros_->getSharedDataPtr()->pcl_map_);
-    static_graph_ = *perception_3d_ros_->getSharedDataPtr()->sGraph_ptr_; //@ node weight
+    *kdtree_ground_ = *(shared_data->kdtree_ground_);
+    *kdtree_map_ = *(shared_data->kdtree_map_);
+    *pcl_map_ = *(shared_data->pcl_map_);
+    static_graph_ = *shared_data->sGraph_ptr_; //@ node weight
     RCLCPP_DEBUG(this->get_logger(), "Ground and Kd-tree ground have been received from perception_3d.");
     getStaticGraphFromPerception3D();
-    static_ground_size_ = perception_3d_ros_->getSharedDataPtr()->static_ground_size_;
+    static_ground_size_ = std::min(shared_data->static_ground_size_, pcl_ground_->points.size());
   }
 
 }
@@ -1192,7 +1169,6 @@ bool GlobalPlanner::buildFrozenRouteLocked(
     goal,
     false,
     false,
-    0,
     cancel_requested,
     was_canceled,
     raw_route_debug_label.str(),
@@ -1419,7 +1395,6 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlan(
   const geometry_msgs::msg::PoseStamped& goal,
   bool force_position_only_goal,
   bool force_use_goal_heading,
-  int preferred_initial_turn_sign,
   const CancelRequestedCallback & cancel_requested,
   bool * was_canceled,
   const std::string & debug_label,
@@ -1434,7 +1409,6 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlan(
     goal,
     force_position_only_goal,
     force_use_goal_heading,
-    preferred_initial_turn_sign,
     cancel_requested,
     was_canceled,
     debug_label,
@@ -1449,7 +1423,6 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
   const geometry_msgs::msg::PoseStamped& goal,
   bool force_position_only_goal,
   bool force_use_goal_heading,
-  int preferred_initial_turn_sign,
   const CancelRequestedCallback & cancel_requested,
   bool * was_canceled,
   const std::string & debug_label,
@@ -1498,7 +1471,6 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
         start, goal, &hybrid_path,
         force_position_only_goal,
         force_use_goal_heading,
-        preferred_initial_turn_sign,
         cancel_requested,
         &hybrid_planning_canceled,
         debug_label,
@@ -1731,8 +1703,12 @@ void GlobalPlanner::pubWeight(){
 
   pcl::PointCloud<pcl::PointXYZI>::Ptr weighted_pc (new pcl::PointCloud<pcl::PointXYZI>);
   
-  unsigned long node_weight_size = perception_3d_ros_->getSharedDataPtr()->sGraph_ptr_->getNodeWeightSize();
-  for(auto it=0; it<node_weight_size; it++){
+  auto shared_data = perception_3d_ros_->getSharedDataPtr();
+  const size_t node_weight_size =
+    (shared_data && shared_data->sGraph_ptr_) ? shared_data->sGraph_ptr_->getNodeWeightSize() : 0;
+  const size_t ground_size = pcl_ground_ ? pcl_ground_->points.size() : 0;
+  const size_t publish_size = std::min(node_weight_size, ground_size);
+  for(size_t it=0; it<publish_size; it++){
 
     pcl::PointXYZI ipt;
 

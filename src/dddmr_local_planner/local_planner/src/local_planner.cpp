@@ -83,8 +83,6 @@ Local_Planner::Local_Planner(const std::string& name): Node(name)
   rpp_wheelbase_ = 0.55;
   rpp_max_steer_ = 0.69;
   rpp_max_angular_velocity_ = 1.2;
-  route_start_front_reach_distance_ = 1.2;
-  route_start_front_projection_threshold_ = 0.05;
   enable_prune_deviation_hard_fail_ = true;
   allow_offroute_anchor_recovery_ = false;
 }
@@ -145,56 +143,6 @@ void Local_Planner::initial(
       "backward_prune (legacy local reference alias): %.2f",
       backward_prune_);
   }
-
-  declare_parameter("heading_tracking_distance", rclcpp::ParameterValue(0.5));
-  this->get_parameter("heading_tracking_distance", heading_tracking_distance_);
-  RCLCPP_DEBUG(this->get_logger(), "heading_tracking_distance: %.2f", heading_tracking_distance_);
-
-  declare_parameter(
-    "route_start_alignment.heading_tolerance",
-    rclcpp::ParameterValue(std::numeric_limits<double>::quiet_NaN()));
-  double configured_route_start_alignment_tolerance =
-    std::numeric_limits<double>::quiet_NaN();
-  this->get_parameter(
-    "route_start_alignment.heading_tolerance",
-    configured_route_start_alignment_tolerance);
-  declare_parameter("heading_align_angle", rclcpp::ParameterValue(0.5));
-  this->get_parameter("heading_align_angle", heading_align_angle_);
-  if(std::isfinite(configured_route_start_alignment_tolerance)){
-    heading_align_angle_ = configured_route_start_alignment_tolerance;
-    RCLCPP_DEBUG(
-      this->get_logger(),
-      "route_start_alignment.heading_tolerance: %.2f",
-      heading_align_angle_);
-  }
-  else{
-    RCLCPP_DEBUG(
-      this->get_logger(),
-      "heading_align_angle (legacy route start alignment alias): %.2f",
-      heading_align_angle_);
-  }
-
-  declare_parameter(
-    "route_start_alignment.front_reach_distance",
-    rclcpp::ParameterValue(1.2));
-  this->get_parameter(
-    "route_start_alignment.front_reach_distance",
-    route_start_front_reach_distance_);
-  RCLCPP_DEBUG(
-    this->get_logger(),
-    "route_start_alignment.front_reach_distance: %.2f",
-    route_start_front_reach_distance_);
-
-  declare_parameter(
-    "route_start_alignment.min_front_projection",
-    rclcpp::ParameterValue(0.05));
-  this->get_parameter(
-    "route_start_alignment.min_front_projection",
-    route_start_front_projection_threshold_);
-  RCLCPP_DEBUG(
-    this->get_logger(),
-    "route_start_alignment.min_front_projection: %.2f",
-    route_start_front_projection_threshold_);
 
   declare_parameter("causal_prune_search_window", rclcpp::ParameterValue(40));
   this->get_parameter("causal_prune_search_window", causal_prune_search_window_);
@@ -1510,165 +1458,6 @@ double Local_Planner::getShortestAngleFromPose2RobotHeading(tf2::Transform m_pos
 
 }
 
-bool Local_Planner::isInitialHeadingAligned(){
-  prunePlan(heading_tracking_distance_, 0.0);
-  return isInitialHeadingAlignedOnCurrentPrunePlan();
-}
-
-bool Local_Planner::isInitialHeadingAlignedOnCurrentPrunePlan(){
-  tf2::Transform heading_reference_pose;
-  bool have_heading_reference = false;
-
-  if(buildHeadingReferenceFromPlan(prune_plan_.poses, 0, heading_tracking_distance_, &heading_reference_pose)){
-    cacheHeadingReference(heading_reference_pose);
-    have_heading_reference = true;
-  }
-  else if(buildHeadingReferenceFromPlan(
-            global_plan_,
-            local_route_progress_index_,
-            min_heading_reference_length_,
-            &heading_reference_pose)){
-    cacheHeadingReference(heading_reference_pose);
-    have_heading_reference = true;
-    RCLCPP_DEBUG_THROTTLE(
-      this->get_logger().get_child(name_), *clock_, 2000,
-      "heading check degraded to route tangent, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu",
-      route_version_,
-      goal_seq_,
-      route_source_label_.c_str(),
-      local_route_progress_index_);
-  }
-  else if(last_heading_reference_valid_ &&
-          heading_reference_stale_cycles_ < max_heading_reference_stale_cycles_){
-    heading_reference_pose = last_heading_reference_pose_;
-    have_heading_reference = true;
-    ++heading_reference_stale_cycles_;
-    consecutive_heading_reference_failure_cycles_ = 0;
-    RCLCPP_DEBUG_THROTTLE(
-      this->get_logger().get_child(name_), *clock_, 2000,
-      "heading check reused previous valid heading reference, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, stale_cycles=%zu",
-      route_version_,
-      goal_seq_,
-      route_source_label_.c_str(),
-      local_route_progress_index_,
-      heading_reference_stale_cycles_);
-  }
-  else if(!prune_plan_.poses.empty() &&
-          buildHeadingReferenceFromPlan(
-            prune_plan_.poses, 0, min_heading_reference_length_, &heading_reference_pose)){
-    cacheHeadingReference(heading_reference_pose);
-    have_heading_reference = true;
-    RCLCPP_DEBUG_THROTTLE(
-      this->get_logger().get_child(name_), *clock_, 2000,
-      "heading check degraded to short local prune tangent, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu",
-      route_version_,
-      goal_seq_,
-      route_source_label_.c_str(),
-      local_route_progress_index_);
-  }
-  else if(!prune_plan_.poses.empty() &&
-          buildHeadingReferenceFromPoseOrientation(prune_plan_.poses.back(), &heading_reference_pose)){
-    cacheHeadingReference(heading_reference_pose);
-    have_heading_reference = true;
-    RCLCPP_DEBUG_THROTTLE(
-      this->get_logger().get_child(name_), *clock_, 2000,
-      "heading check degraded to local path tail orientation, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu",
-      route_version_,
-      goal_seq_,
-      route_source_label_.c_str(),
-      local_route_progress_index_);
-  }
-
-  if(!have_heading_reference){
-    ++consecutive_heading_reference_failure_cycles_;
-    RCLCPP_WARN_THROTTLE(
-      this->get_logger().get_child(name_), *clock_, 2000,
-      "heading check failed after fallback, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu",
-      route_version_,
-      goal_seq_,
-      route_source_label_.c_str(),
-      local_route_progress_index_,
-      consecutive_heading_reference_failure_cycles_);
-    return false;
-  }
-
-  const double yaw = updateHeadingDeviation(heading_reference_pose);
-  RCLCPP_DEBUG(
-    this->get_logger().get_child(name_),
-    "Heading difference from the prune plan starting at %.2f is %.2f",
-    heading_tracking_distance_,
-    yaw);
-
-  return std::fabs(yaw) < heading_align_angle_;
-}
-
-bool Local_Planner::isRouteStartFrontReachableOnCurrentPrunePlan(std::string * detail) const
-{
-  if(detail != nullptr){
-    detail->clear();
-  }
-
-  if(prune_plan_.poses.size() < 2){
-    if(detail != nullptr){
-      *detail = "route_start_front_check_failed: local_reference_path_too_short";
-    }
-    return false;
-  }
-
-  const double lookahead_distance = std::max(0.10, route_start_front_reach_distance_);
-  geometry_msgs::msg::PoseStamped lookahead_pose;
-  if(!selectLookaheadPose(lookahead_distance, &lookahead_pose)){
-    if(detail != nullptr){
-      *detail = "route_start_front_check_failed: lookahead_pose_unavailable";
-    }
-    return false;
-  }
-
-  if(!std::isfinite(lookahead_pose.pose.position.x) ||
-     !std::isfinite(lookahead_pose.pose.position.y) ||
-     !std::isfinite(lookahead_pose.pose.position.z))
-  {
-    if(detail != nullptr){
-      *detail = "route_start_front_check_failed: lookahead_pose_invalid";
-    }
-    return false;
-  }
-
-  return true;
-}
-
-dddmr_sys_core::RouteStartupStatus Local_Planner::evaluateRouteStartupStatus(std::string * detail)
-{
-  if(detail != nullptr){
-    detail->clear();
-  }
-
-  if(global_plan_.size() < 2){
-    if(detail != nullptr){
-      *detail = "route_start_alignment_failed: global_route_unavailable";
-    }
-    return dddmr_sys_core::RouteStartupStatus::kRouteUnavailable;
-  }
-
-  const double startup_check_distance =
-    std::max(heading_tracking_distance_, route_start_front_reach_distance_);
-  if(!prunePlan(startup_check_distance, 0.0)){
-    if(detail != nullptr){
-      *detail = "route_start_alignment_failed: local_reference_unavailable";
-    }
-    return dddmr_sys_core::RouteStartupStatus::kRouteUnavailable;
-  }
-
-  if(!isInitialHeadingAlignedOnCurrentPrunePlan()){
-    if(detail != nullptr){
-      *detail = "route_start_alignment_failed: heading_tolerance_unsatisfied";
-    }
-    return dddmr_sys_core::RouteStartupStatus::kAlignmentUnsatisfied;
-  }
-
-  return dddmr_sys_core::RouteStartupStatus::kAligned;
-}
-
 bool Local_Planner::isGoalHeadingAligned(){
 
   if(global_plan_.empty()){
@@ -1710,9 +1499,8 @@ bool Local_Planner::isGoalReached(){
   final_pose = global_plan_.back();
   double dx = trans_gbl2b_.transform.translation.x - final_pose.pose.position.x;
   double dy = trans_gbl2b_.transform.translation.y - final_pose.pose.position.y;
-  double dz = trans_gbl2b_.transform.translation.z - final_pose.pose.position.z;
-  double distance = sqrt(dx*dx + dy*dy + dz*dz);
-  if(xy_goal_tolerance_>distance)
+  double distance = sqrt(dx*dx + dy*dy);
+  if(distance <= xy_goal_tolerance_)
     return true;
   else
     return false;
@@ -1721,11 +1509,6 @@ bool Local_Planner::isGoalReached(){
 bool Local_Planner::isGoalPositionReached()
 {
   return isGoalReached();
-}
-
-bool Local_Planner::isRouteStartAligned()
-{
-  return evaluateRouteStartupStatus(nullptr) == dddmr_sys_core::RouteStartupStatus::kAligned;
 }
 
 bool Local_Planner::isGoalHeadingSatisfied()
@@ -2303,29 +2086,14 @@ dddmr_sys_core::PlannerState Local_Planner::computeRppControlCommand(
       predicted_traj.cost_,
       reject_reason);
 
-    base_trajectory::Trajectory fallback_traj;
-    const auto fallback_state = computeVelocityCommand(controller_name, fallback_traj);
-    if(fallback_state == dddmr_sys_core::TRAJECTORY_FOUND){
-      if(cmd_vel != nullptr){
-        cmd_vel->linear.x = fallback_traj.xv_;
-        cmd_vel->linear.y = 0.0;
-        cmd_vel->linear.z = 0.0;
-        cmd_vel->angular.x = 0.0;
-        cmd_vel->angular.y = 0.0;
-        cmd_vel->angular.z = fallback_traj.thetav_;
-      }
+    if(std::fabs(predicted_traj.cost_ + 1.0) < 1e-6){
       RCLCPP_WARN_THROTTLE(
         this->get_logger().get_child(name_), *clock_, 2000,
-        "RPP fallback accepted rollout command, controller=%s, route_version=%zu, goal_seq=%zu, source=%s, rollout_cost=%.2f, cmd=(%.2f, %.2f)",
-        controller_name.c_str(),
-        route_version_,
-        goal_seq_,
-        route_source_label_.c_str(),
-        fallback_traj.cost_,
-        fallback_traj.xv_,
-        fallback_traj.thetav_);
+        "RPP collision rejection is treated as route blocked, request route replanning.");
+      return dddmr_sys_core::PATH_BLOCKED_REPLANNING;
     }
-    return fallback_state;
+
+    return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
   }
 
   if(cmd_vel != nullptr){

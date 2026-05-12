@@ -20,9 +20,6 @@ local_planner:
     local_reference:
       forward_distance: 3.0
       backward_distance: 1.0
-    heading_tracking_distance: 0.5
-    route_start_alignment:
-      heading_tolerance: 0.5
     causal_prune_search_window: 40
     causal_prune_max_index_jump: 15
     causal_prune_max_arc_jump: 2.0

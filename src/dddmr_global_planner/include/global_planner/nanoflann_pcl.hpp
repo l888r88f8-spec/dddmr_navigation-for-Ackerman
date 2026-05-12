@@ -176,19 +176,28 @@ inline void KdTreeFLANN<PointT>::setInputCloud(const KdTreeFLANN::PointCloudCons
 template <typename PointT>
 inline int KdTreeFLANN<PointT>::nearestKSearch(const PointT& point, int num_closest, std::vector<int>& k_indices,
                                                std::vector<float>& k_sqr_distances) const {
+    if (num_closest <= 0) {
+        k_indices.clear();
+        k_sqr_distances.clear();
+        return 0;
+    }
+
     k_indices.resize(num_closest);
     k_sqr_distances.resize(num_closest);
 
     nanoflann::KNNResultSet<float, int> resultSet(num_closest);
     resultSet.init(k_indices.data(), k_sqr_distances.data());
     _kdtree.findNeighbors(resultSet, point.data, _params);
-    return resultSet.size();
+    const size_t n_found = resultSet.size();
+    k_indices.resize(n_found);
+    k_sqr_distances.resize(n_found);
+    return static_cast<int>(n_found);
 }
 
 template <typename PointT>
 inline int KdTreeFLANN<PointT>::radiusSearch(const PointT& point, float radius, std::vector<int>& k_indices,
                                              std::vector<float>& k_sqr_distances) const {
-    static std::vector<nanoflann::ResultItem<int, float>> result;
+    std::vector<nanoflann::ResultItem<int, float>> result;
     result.reserve(256);
 
     // From nanoflann README

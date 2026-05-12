@@ -33,6 +33,7 @@
 #include <unordered_map>
 #include <set>
 #include <queue> 
+#include <cmath>
 
 /*For pcl::PointXYZ*/
 #include <pcl/common/geometry.h>
@@ -130,4 +131,3 @@ class A_Star_on_PreGraph{
 
       double a_star_expanding_radius_;
 };
-

@@ -83,6 +83,9 @@ void StackedPerception::doClear_then_Mark(){
   for (std::vector<std::shared_ptr<Sensor> >::iterator plugin = plugins_.begin(); plugin != plugins_.end();
        ++plugin)
   {
+    if(!(*plugin)){
+      continue;
+    }
     (*plugin)->selfClear();
     (*plugin)->selfMark();
     (*plugin)->updateLethalPointCloud();
@@ -91,10 +94,14 @@ void StackedPerception::doClear_then_Mark(){
 }
 
 void StackedPerception::resetdGraph(){
+  std::unique_lock<mutex_t> lock(*access_);
 
   for (std::vector<std::shared_ptr<Sensor> >::iterator plugin = plugins_.begin(); plugin != plugins_.end();
        ++plugin)
   {
+    if(!(*plugin)){
+      continue;
+    }
 
     (*plugin)->resetdGraph();
 
@@ -107,6 +114,9 @@ unsigned long StackedPerception::getdGraphSize(){
   for (std::vector<std::shared_ptr<Sensor> >::iterator plugin = plugins_.begin(); plugin != plugins_.end();
        ++plugin)
   {
+    if(!(*plugin)){
+      continue;
+    }
     tmp_val = std::min(tmp_val, (*plugin)->get_dGraphSize());
   }
   return tmp_val;
@@ -120,6 +130,9 @@ double StackedPerception::get_min_dGraphValue(const unsigned int index){
   for (std::vector<std::shared_ptr<Sensor> >::iterator plugin = plugins_.begin(); plugin != plugins_.end();
        ++plugin)
   {
+    if(!(*plugin)){
+      continue;
+    }
     RCLCPP_DEBUG(logger_->get_logger(), "%s with dGraph value of: %.1f",(*plugin)->getName().c_str(),(*plugin)->get_dGraphValue(index));
     tmp_val = std::min(tmp_val, (*plugin)->get_dGraphValue(index));
   }
@@ -172,14 +185,32 @@ void StackedPerception::refreshObservationCache(){
 void StackedPerception::aggregateLethal(){
   
   //@ before calling this function, make sure we mutex lock, i.e.
+  if(!shared_data_){
+    return;
+  }
+
+  std::unique_lock<mutex_t> lock(*access_);
+  std::unique_lock<std::recursive_mutex> sensor_lock(shared_data_->ground_kdtree_cb_mutex_);
+
   shared_data_->aggregate_lethal_.reset(new pcl::PointCloud<pcl::PointXYZI>);
 
   for (std::vector<std::shared_ptr<Sensor> >::iterator plugin = plugins_.begin(); plugin != plugins_.end();
        ++plugin)
   {
+    if(!(*plugin)){
+      continue;
+    }
+
     //@aggregate observation for perception
-    (*shared_data_->aggregate_lethal_) += (*(*plugin)->getLethal());
-    shared_data_->aggregate_lethal_->header.frame_id = (*plugin)->getGlobalUtils()->getGblFrame();
+    auto lethal = (*plugin)->getLethal();
+    if(lethal){
+      (*shared_data_->aggregate_lethal_) += (*lethal);
+    }
+
+    auto gbl_utils = (*plugin)->getGlobalUtils();
+    if(gbl_utils){
+      shared_data_->aggregate_lethal_->header.frame_id = gbl_utils->getGblFrame();
+    }
   }
 
 }

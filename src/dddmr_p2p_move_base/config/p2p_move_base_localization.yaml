@@ -62,23 +62,12 @@ global_planner:
       projection_search_radius: 0.5                               # 起终点投影搜索半径（m）
       goal_position_tolerance: 0.3                                # 终点位置容差（m）
       goal_heading_tolerance: 0.3                                 # 终点航向容差（rad），让全局路径约束目标朝向
-      use_goal_heading: true                                      # 是否强制使用目标朝向
-      steering_penalty: 1.0                                       # 转向惩罚
-      steering_change_penalty: 1.2                                # 转角变化惩罚
-      heading_change_penalty: 1.0                                 # 航向变化惩罚
       obstacle_penalty_weight: 1.0                                # 障碍代价权重
       edge_weight_penalty_weight: 6.0                             # 地面边缘权重惩罚
       edge_weight_safe_threshold: 1.2                             # 边缘权重安全阈值
       edge_weight_soft_cap: 12.0                                  # 边缘权重软上限
       edge_weight_hard_reject_threshold: 0.0                      # 边缘权重硬拒绝阈值（0 表示关闭）
       heuristic_heading_weight: 0.35                              # 启发式中航向项权重
-      turn_side_hysteresis_penalty: 0.8                           # 左右转切换滞回惩罚
-      rearward_check_distance: 4.0                                # 反向检查距离（m）
-      rearward_allowance: 0.0                                     # 允许反向段距离（m）
-      rearward_excursion_penalty: 8.0                             # 反向偏移惩罚
-      rearward_hard_reject_distance: 0.0                          # 反向硬拒绝距离（0 表示关闭）
-      strict_forward_check_distance: 0.0                          # 严格前向检查距离（0 表示关闭）
-      min_initial_forward_projection: 0.0                         # 起步最小前向投影（0 表示关闭）
       max_projected_pitch: 0.55                                   # 投影点最大坡度（rad）
       max_projected_vertical_jump: 0.12                           # 投影点最大垂向跳变（m）
       allow_sample_nearest_fallback: false                        # 采样投影失败时是否允许最近邻回退
@@ -100,7 +89,6 @@ dynamic_window_aware_global_planner:
     connector_timeout_sec: 4.0                                   # connector 超时保护（s）
     startup_replan_lock_distance: 0.8                            # 起步重规划锁定距离（m）
     startup_replan_lock_offtrack_tolerance: 0.8                  # 偏离超过该值解除起步锁（m）
-    preferred_turn_sign_lookahead_distance: 1.8                  # 前视窗口估计转向偏好距离（m）
     min_force_goal_heading_distance: 3.0                         # 仅中远距接入才强制目标朝向（m）
     max_force_goal_heading_angle: 1.75                           # 起点航向与切线夹角过大时不强制目标朝向（rad）
 
@@ -110,9 +98,9 @@ perception_3d_global:
     global_frame: "map"                                          # 全局坐标系
     robot_base_frame: "base_link"                                # 机器人基坐标系
     max_obstacle_distance: 9999.0                                # 障碍最大采样距离（m）
-    inscribed_radius: 0.5                                        # 机器人内切安全半径（m）
+    inscribed_radius: 0.52                                       # 小车最小外接圆半径
     inflation_descending_rate: 2.0                               # 膨胀衰减率
-    inflation_radius: 0.8                                        # 全局障碍膨胀半径（m）
+    inflation_radius: 0.9                                        # 全局障碍膨胀半径（m）
     sensors_collected_frequency: 10.0                            # 传感器融合频率（Hz）
     plugins: ["map", "lidar"]                                    # 全局层插件列表，动态障碍参与重规划
     dgraph_publish_frequency: 1.0                                # 图结构发布频率（Hz）
@@ -134,7 +122,7 @@ perception_3d_global:
         enable_edge_detection: true                              # 是否启用边缘检测
         generate_static_graph: false                             # 是否生成静态图缓存
         merge_ground_layers: true                                # 是否合并多层地面点
-        merge_ground_xy_resolution: 0.1                         # 合并地面 XY 分辨率（m）
+        merge_ground_xy_resolution: 0.1                          # 合并地面 XY 分辨率（m）
         merge_ground_z_tolerance: 0.15                           # 合并地面 Z 容差（m）
 
     lidar:
@@ -167,16 +155,8 @@ local_planner:
 
     # 局部参考路径窗口：前向窗口拉长可减轻 Ackermann 慢速偏好
     local_reference:
-      forward_distance: 2.5                                     # 前向参考窗口长度（m），决定 blocked_wait 的前向检测距离
+      forward_distance: 4.0                                     # 前向参考窗口长度（m），决定 blocked_wait 的前向检测距离
       backward_distance: 1.0                                    # 后向保留窗口长度（m）
-
-    heading_tracking_distance: 0.5                              # 估计路径朝向的前视距离（m）
-
-    # 起步接入约束
-    route_start_alignment:
-      heading_tolerance: 3.2                                    # 起步朝向容差（rad）
-      front_reach_distance: 1.2                                 # 起步前向可达检查距离（m）
-      min_front_projection: 0.05                                # 最小前向投影阈值（base_link x）
 
     # 因果裁剪与偏离恢复
     causal_prune_search_window: 40                              # 仅在当前进度附近搜索，防止跳段
@@ -193,7 +173,7 @@ local_planner:
     prune_plane_timeout: 3.0                                    # 局部裁剪路径失效超时（s）
 
     # 到点判定
-    xy_goal_tolerance: 0.6                                      # 位置容差（m）
+    xy_goal_tolerance: 0.2                                      # 位置容差（m）
     yaw_goal_tolerance: 0.3                                     # 航向容差（rad），与全局终点朝向约束保持一致
 
     # Regulated Pure Pursuit 参数
@@ -201,14 +181,14 @@ local_planner:
       critic_trajectory_generator_name: "ackermann_simple"       # RPP 名义轨迹送入哪套 critics 评估
       nominal_linear_speed: 0.3                                 # 常规巡航速度（m/s）
       min_linear_speed: 0.05                                    # 最小跟踪速度（m/s）
-      alignment_linear_speed: 0.1                               # 对齐阶段速度（m/s）
+      alignment_linear_speed: 0.08                              # 对齐阶段速度（m/s）
       goal_slowdown_distance: 2.5                               # 终点减速起始距离（m）
-      min_lookahead_distance: 1.0                               # 最小前视距离（m）
-      max_lookahead_distance: 2.5                               # 最大前视距离（m）
+      min_lookahead_distance: 0.4                               # 最小前视距离（m）
+      max_lookahead_distance: 0.8                               # 最大前视距离（m）
       lookahead_time: 1.5                                       # 速度到前视距离换算时间尺度（s）
       alignment_lookahead_distance: 1.0                         # 对齐模式前视距离（m）
       max_lateral_accel: 1.5                                    # 曲率调速横向加速度上限（m/s^2）
-      prediction_horizon_sec: 4.0                               # 单候选轨迹预测时长（s）
+      prediction_horizon_sec: 6.0                               # 单候选轨迹预测时长（s）
       prediction_step_sec: 0.1                                  # 预测离散步长（s）
       wheelbase: 0.46                                           # Ackermann 轴距（m）
       max_steer: 0.238                                          # 最大转角（rad）等效自行车模型前轮转角，atan(wheelbase / min_turning_radius)
@@ -267,9 +247,9 @@ perception_3d_local:
     global_frame: "map"                                          # 全局坐标系
     robot_base_frame: "base_link"                                # 机器人基坐标系
     max_obstacle_distance: 9999.0                                # 障碍最大采样距离（m）
-    inscribed_radius: 0.5                                        # 车体内切安全半径（m）
+    inscribed_radius: 0.52                                        # 车体内切安全半径（m）
     inflation_descending_rate: 2.0                               # 膨胀衰减率
-    inflation_radius: 0.8                                        # 局部障碍膨胀半径（m）
+    inflation_radius: 0.9                                        # 局部障碍膨胀半径（m）
     sensors_collected_frequency: 10.0                            # 局部感知融合频率（Hz）
     plugins: ["map", "path_blocked_strategy", "lidar"]           # 局部层插件列表
 
@@ -282,7 +262,7 @@ perception_3d_local:
 
     path_blocked_strategy:
       plugin: "perception_3d::PathBlockedStrategy"               # 检测局部参考路径是否被动态障碍阻塞
-      check_radius: 0.45                                          # 路径点周围障碍检测半径（m）
+      check_radius: 0.55                                          # 路径点周围障碍检测半径（m）
 
     lidar:
       plugin: "perception_3d::MultiLayerSpinningLidar"           # 多线雷达插件
@@ -291,10 +271,10 @@ perception_3d_local:
       pub_gbl_marking_for_visualization: false                   # 是否发布可视化标记点
       vertical_FOV_top: 15.0                                     # 垂直视场上限（deg）
       vertical_FOV_bottom: -15.0                                 # 垂直视场下限（deg）
-      scan_effective_positive_start: 90.0                        # 正向扫描有效起始角（deg）
-      scan_effective_positive_end: 150.0                         # 正向扫描有效终止角（deg）
-      scan_effective_negative_start: 90.0                        # 反向扫描有效起始角（deg）
-      scan_effective_negative_end: 30.0                          # 反向扫描有效终止角（deg）
+      scan_effective_positive_start: 0.0                        # 正向扫描有效起始角（deg）
+      scan_effective_positive_end: 180.0                         # 正向扫描有效终止角（deg）
+      scan_effective_negative_start: -0.0                        # 反向扫描有效起始角（deg）
+      scan_effective_negative_end: -180.0                          # 反向扫描有效终止角（deg）
       xy_resolution: 0.05                                        # 栅格 XY 分辨率（m）
       height_resolution: 0.05                                    # 高度分辨率（m）
       min_obstacle_height: -0.12                                 # 障碍最低高度阈值（m）
@@ -332,7 +312,7 @@ mpc_critics:
       weight: 1.0                                                # 速度偏好权重
       target_speed: 0.3                                          # 巡航偏好目标速度（m/s）
       goal_slowdown_distance: 2.5                                # 靠近终点减速起始距离（m）
-      goal_slowdown_min_speed: 0.1                               # 终点附近最低目标速度（m/s）
+      goal_slowdown_min_speed: 0.0                               # 终点附近最低目标速度（m/s）
 
     stick_path:
       plugin: "mpc_critics::StickPathModel"                      # 贴线模型

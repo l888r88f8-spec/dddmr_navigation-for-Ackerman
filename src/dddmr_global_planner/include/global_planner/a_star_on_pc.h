@@ -33,6 +33,7 @@
 #include <unordered_map>
 #include <set>
 #include <queue> 
+#include <cmath>
 
 /*For pcl::PointXYZ*/
 #include <pcl/common/geometry.h>
@@ -127,4 +128,3 @@ class A_Star_on_Graph{
 
       bool isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::PointXYZI& pcl_expanding, double inscribed_radius);
 };
-

@@ -133,7 +133,6 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       double reconnect_deviation_threshold_;
       double reconnect_heading_threshold_;
       double max_reconnect_failures_before_global_replan_;
-      double preferred_turn_sign_lookahead_distance_;
       double min_force_goal_heading_distance_;
       double max_force_goal_heading_angle_;
       double connector_goal_tolerance_;
@@ -155,7 +154,6 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       nav_msgs::msg::Path active_connector_path_;
       geometry_msgs::msg::PoseStamped active_connector_start_pose_;
       bool active_connector_has_goal_heading_;
-      int active_connector_preferred_turn_sign_;
 
       enum class PlannerMode
       {
@@ -226,10 +224,6 @@ class DWA_GlobalPlanner : public rclcpp::Node {
       std::size_t FindNearestPathIndex(
         const nav_msgs::msg::Path & path,
         const geometry_msgs::msg::PoseStamped & pose) const;
-      int EstimatePreferredTurnSignAhead(
-        const nav_msgs::msg::Path & path,
-        std::size_t start_index,
-        double max_forward_distance) const;
       bool ShouldLockStartupReplan(
         const nav_msgs::msg::Path & dwa_path,
         const geometry_msgs::msg::PoseStamped & robot_pose) const;

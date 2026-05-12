@@ -183,12 +183,6 @@ void DWA_GlobalPlanner::initial(
   max_reconnect_failures_before_global_replan_ =
     std::max(max_reconnect_failures_before_global_replan_, 1.0);
 
-  declare_parameter("preferred_turn_sign_lookahead_distance", rclcpp::ParameterValue(1.8));
-  this->get_parameter(
-    "preferred_turn_sign_lookahead_distance",
-    preferred_turn_sign_lookahead_distance_);
-  preferred_turn_sign_lookahead_distance_ = std::max(preferred_turn_sign_lookahead_distance_, 0.5);
-
   declare_parameter("min_force_goal_heading_distance", rclcpp::ParameterValue(3.0));
   this->get_parameter("min_force_goal_heading_distance", min_force_goal_heading_distance_);
   min_force_goal_heading_distance_ = std::max(min_force_goal_heading_distance_, 0.0);
@@ -232,7 +226,6 @@ void DWA_GlobalPlanner::initial(
     active_connector_path_.header.frame_id = global_frame_;
     active_connector_path_.header.stamp = now;
     active_connector_has_goal_heading_ = false;
-    active_connector_preferred_turn_sign_ = 0;
     active_reconnect_goal_.header.frame_id = global_frame_;
     active_reconnect_goal_.header.stamp = now;
     active_reconnect_goal_.pose.orientation.w = 1.0;
@@ -425,7 +418,6 @@ void DWA_GlobalPlanner::makePlan(
       active_reconnect_goal_.pose.orientation.z = 0.0;
       active_reconnect_goal_.pose.orientation.w = 1.0;
       active_connector_has_goal_heading_ = false;
-      active_connector_preferred_turn_sign_ = 0;
       goal_seq = goal_seq_;
       route_version = route_version_;
     }
@@ -951,57 +943,6 @@ std::size_t DWA_GlobalPlanner::FindNearestPathIndex(
   return nearest_index;
 }
 
-int DWA_GlobalPlanner::EstimatePreferredTurnSignAhead(
-  const nav_msgs::msg::Path & path,
-  std::size_t start_index,
-  double max_forward_distance) const
-{
-  // Estimate turn-side preference from the untraversed local path segment.
-  // Do not use historical curvature in the already-traversed path prefix.
-  if (path.poses.size() < 3 || start_index >= path.poses.size()) {
-    return 0;
-  }
-  max_forward_distance = std::max(max_forward_distance, 0.0);
-
-  std::size_t end_index = start_index;
-  double accumulated_distance = 0.0;
-  while (end_index + 1 < path.poses.size() && accumulated_distance < max_forward_distance) {
-    const auto & p0 = path.poses[end_index].pose.position;
-    const auto & p1 = path.poses[end_index + 1].pose.position;
-    const double segment_length = std::hypot(p1.x - p0.x, p1.y - p0.y);
-    if (!std::isfinite(segment_length)) {
-      break;
-    }
-    accumulated_distance += segment_length;
-    ++end_index;
-  }
-  if (end_index <= start_index + 1) {
-    return 0;
-  }
-
-  for (std::size_t i = start_index; i + 2 <= end_index; ++i) {
-    const auto & p0 = path.poses[i].pose.position;
-    const auto & p1 = path.poses[i + 1].pose.position;
-    const auto & p2 = path.poses[i + 2].pose.position;
-    const double v1x = p1.x - p0.x;
-    const double v1y = p1.y - p0.y;
-    const double v2x = p2.x - p1.x;
-    const double v2y = p2.y - p1.y;
-    const double n1 = std::hypot(v1x, v1y);
-    const double n2 = std::hypot(v2x, v2y);
-    if (!std::isfinite(n1) || !std::isfinite(n2) || n1 < 1e-4 || n2 < 1e-4) {
-      continue;
-    }
-
-    const double cross = v1x * v2y - v1y * v2x;
-    if (!std::isfinite(cross) || std::abs(cross) < 1e-4) {
-      continue;
-    }
-    return cross > 0.0 ? 1 : -1;
-  }
-  return 0;
-}
-
 bool DWA_GlobalPlanner::ShouldLockStartupReplan(
   const nav_msgs::msg::Path & dwa_path,
   const geometry_msgs::msg::PoseStamped & robot_pose) const
@@ -1159,8 +1100,6 @@ void DWA_GlobalPlanner::ResetReconnectLayerState(const rclcpp::Time & now)
   active_connector_start_pose_.pose.orientation.w = 1.0;
 
   active_connector_has_goal_heading_ = false;
-  active_connector_preferred_turn_sign_ = 0;
-
   global_dwa_path_.poses.clear();
   global_dwa_path_.header.frame_id = global_frame_;
   global_dwa_path_.header.stamp = now;
@@ -1246,7 +1185,6 @@ void DWA_GlobalPlanner::determineDWAPlan()
   std::size_t active_connector_route_version_snapshot = 0;
   nav_msgs::msg::Path active_connector_path_snapshot;
   bool active_connector_has_goal_heading_snapshot = false;
-  int active_connector_preferred_turn_sign_snapshot = 0;
 
   {
     std::lock_guard<std::mutex> lock(plan_state_mutex_);
@@ -1269,7 +1207,6 @@ void DWA_GlobalPlanner::determineDWAPlan()
     active_connector_route_version_snapshot = active_connector_route_version_;
     active_connector_path_snapshot = active_connector_path_;
     active_connector_has_goal_heading_snapshot = active_connector_has_goal_heading_;
-    active_connector_preferred_turn_sign_snapshot = active_connector_preferred_turn_sign_;
   }
 
   const rclcpp::Time now = clock_->now();
@@ -1456,7 +1393,6 @@ void DWA_GlobalPlanner::determineDWAPlan()
         active_reconnect_goal_.pose.orientation.z = 0.0;
         active_reconnect_goal_.pose.orientation.w = 1.0;
         active_connector_has_goal_heading_ = false;
-        active_connector_preferred_turn_sign_ = 0;
 
         pcl_global_path_->points.clear();
         for (const auto & pose : global_path_.poses) {
@@ -1543,8 +1479,7 @@ void DWA_GlobalPlanner::determineDWAPlan()
           start,
           active_reconnect_goal_snapshot,
           false,
-          active_connector_has_goal_heading_snapshot,
-          active_connector_preferred_turn_sign_snapshot);
+          active_connector_has_goal_heading_snapshot);
 
         if (retry_connector.poses.empty()) {
           const std::size_t failure_count = get_reconnect_failure_count() + 1;
@@ -1718,14 +1653,6 @@ void DWA_GlobalPlanner::determineDWAPlan()
     return;
   }
 
-  int preferred_turn_sign = 0;
-  const nav_msgs::msg::Path & turn_sign_path = route_snapshot;
-  const std::size_t turn_sign_start_index = FindNearestPathIndex(turn_sign_path, start);
-  preferred_turn_sign = EstimatePreferredTurnSignAhead(
-    turn_sign_path,
-    turn_sign_start_index,
-    preferred_turn_sign_lookahead_distance_);
-
   bool force_use_goal_heading = false;
   if (has_tangent_yaw) {
     double start_yaw = 0.0;
@@ -1747,8 +1674,7 @@ void DWA_GlobalPlanner::determineDWAPlan()
     start,
     reconnect_goal,
     false,
-    force_use_goal_heading,
-    preferred_turn_sign);
+    force_use_goal_heading);
 
   if (connector_path.poses.empty()) {
     const std::size_t failure_count = get_reconnect_failure_count() + 1;
@@ -1808,7 +1734,6 @@ void DWA_GlobalPlanner::determineDWAPlan()
     active_connector_path_ = composed_path_full;
     active_connector_start_pose_ = start;
     active_connector_has_goal_heading_ = force_use_goal_heading;
-    active_connector_preferred_turn_sign_ = preferred_turn_sign;
     connector_progress_index_ = 0;
     ++connector_version_;
     consecutive_reconnect_failures_ = 0;

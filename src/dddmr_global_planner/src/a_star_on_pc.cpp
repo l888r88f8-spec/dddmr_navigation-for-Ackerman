@@ -68,23 +68,16 @@ void AstarList::updateNode(Node_t& a_node){
 }
 
 Node_t AstarList::getNode_wi_MinimumF(){
-  auto first_it = f_priority_set_.begin();
-  Node_t m_node = as_list_[(*first_it).second];
-  if(!m_node.is_closed){
+  while(!f_priority_set_.empty()){
+    auto first_it = f_priority_set_.begin();
+    Node_t m_node = as_list_[(*first_it).second];
     f_priority_set_.erase(first_it);
-    return m_node;
+    if(!m_node.is_closed){
+      return m_node;
+    }
   }
-  
-  //Because we updateNode node even when new g value is smaller than that in openlist
-  //We will have duplicate f value in the f_priority_set_
-  int concern_cnt = 0;
-  while(m_node.is_closed && !f_priority_set_.empty()){
-    concern_cnt++;
-    f_priority_set_.erase(first_it);
-    first_it = f_priority_set_.begin();
-    m_node = as_list_[(*first_it).second];
-  }
-  return m_node;
+
+  return Node_t{.self_index=0, .g=0, .h=0, .f=0, .parent_index=0, .is_closed=true, .is_opened=false};
 }
 
 bool AstarList::isClosed(unsigned int node_index){
@@ -167,6 +160,14 @@ double A_Star_on_Graph::getThetaFromParent2Expanding(pcl::PointXYZI m_pcl_curren
 
 bool A_Star_on_Graph::isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::PointXYZI& pcl_expanding, double inscribed_radius){
 
+  if(!kdtree_lethal_ || !perception_ros_ || !perception_ros_->getSharedDataPtr() ||
+    !perception_ros_->getSharedDataPtr()->aggregate_lethal_ ||
+    perception_ros_->getSharedDataPtr()->aggregate_lethal_->empty() ||
+    inscribed_radius <= 1e-6 || !std::isfinite(inscribed_radius))
+  {
+    return true;
+  }
+
   //@ generate line equation
   float dX =
       pcl_expanding.x - pcl_current.x;
@@ -176,6 +177,9 @@ bool A_Star_on_Graph::isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::Point
       pcl_expanding.z - pcl_current.z;
   
   float distance = sqrt(dX*dX + dY*dY + dZ*dZ);
+  if(distance <= 1e-6 || !std::isfinite(distance)){
+    return true;
+  }
   distance = distance/inscribed_radius; //sample by every inscribed radius
   float dt = 1/distance;
   for(float t=0; t<=1.0+dt; t+=dt){
@@ -202,6 +206,13 @@ void A_Star_on_Graph::getPath(
   std::vector<unsigned int>& path){
 
   //RCLCPP_DEBUG(rclcpp::get_logger("astar"),"Start: %u, Goal: %u", start, goal);
+  if(!pc_original_z_up_ || pc_original_z_up_->points.empty() ||
+    start >= pc_original_z_up_->points.size() ||
+    goal >= pc_original_z_up_->points.size() ||
+    !ASLS_ || !ASLS_->kdtree_ground_)
+  {
+    return;
+  }
 
   /*
   Create the first node which is start and add into frontier
@@ -231,6 +242,9 @@ void A_Star_on_Graph::getPath(
   while(!ASLS_->isFrontierEmpty()){ 
     /*Pop minimum F, we leverage prior queue, so we dont need to loop frontier everytime*/
     current_node = ASLS_->getNode_wi_MinimumF();
+    if(current_node.is_closed){
+      break;
+    }
 
     //RCLCPP_DEBUG(rclcpp::get_logger("astar"), "Expand node: %u", current_node.self_index);
     /*Get successors*/
@@ -243,17 +257,37 @@ void A_Star_on_Graph::getPath(
     if(pointIdxRadiusSearch.size()<8){
       ASLS_->kdtree_ground_->nearestKSearch(pcl_now, 8, pointIdxRadiusSearch, pointRadiusSquaredDistance);
     }
+    if(pointIdxRadiusSearch.empty()){
+      ASLS_->closeNode(current_node);
+      continue;
+    }
 
     //@ calculated average intensity, because we have sparse low cost orphan, and it is unlikely to have a low cost node surrounded by high cost nodes
     float avg_intensity = 0.0;
+    std::size_t valid_neighbor_count = 0;
     for(unsigned int it = 0; it!=pointIdxRadiusSearch.size(); it++){
+      if(pointIdxRadiusSearch[it] < 0 ||
+        static_cast<std::size_t>(pointIdxRadiusSearch[it]) >= pc_original_z_up_->points.size())
+      {
+        continue;
+      }
       avg_intensity += pc_original_z_up_->points[pointIdxRadiusSearch[it]].intensity;
+      valid_neighbor_count++;
     }
-    avg_intensity = avg_intensity/pointIdxRadiusSearch.size();
+    if(valid_neighbor_count == 0){
+      ASLS_->closeNode(current_node);
+      continue;
+    }
+    avg_intensity = avg_intensity/valid_neighbor_count;
 
     for(unsigned int it = 0; it!=pointIdxRadiusSearch.size(); it++){
       
       int current_expanding_index = pointIdxRadiusSearch[it];
+      if(current_expanding_index < 0 ||
+        static_cast<std::size_t>(current_expanding_index) >= pc_original_z_up_->points.size())
+      {
+        continue;
+      }
       float current_expanding_g = sqrt(pointRadiusSquaredDistance[it]);
 
       //@ dGraphValue is the distance to lethal
@@ -289,7 +323,7 @@ void A_Star_on_Graph::getPath(
       float new_h = sqrt(pcl::geometry::squaredDistance(pcl_expanding, pcl_goal));
       float new_f = new_g + new_h;
 
-      Node_t new_node = {.self_index=(current_expanding_index), .g=new_g, .h=new_h, .f=new_f, .parent_index=current_node.self_index, .is_closed=false, .is_opened=true};
+      Node_t new_node = {.self_index=static_cast<unsigned int>(current_expanding_index), .g=new_g, .h=new_h, .f=new_f, .parent_index=current_node.self_index, .is_closed=false, .is_opened=true};
 
       /*Check is in closed list*/
       if(ASLS_->isClosed(current_expanding_index))
@@ -325,5 +359,4 @@ void A_Star_on_Graph::getPath(
 
     /*Check if*/
   }
-
 }

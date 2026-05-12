@@ -13,19 +13,11 @@
 
 namespace dddmr_sys_core {
 
-enum class RouteStartupStatus
-{
-  kAligned = 0,
-  kAlignmentUnsatisfied,
-  kFrontUnreachable,
-  kRouteUnavailable
-};
-
 /**
  * Stable controller-side abstraction consumed by the goal orchestrator.
  *
- * The orchestrator should only care about route updates, alignment checks,
- * goal checks, and velocity commands. It should not depend on a concrete
+ * The orchestrator should only care about route updates, goal checks,
+ * and velocity commands. It should not depend on a concrete
  * rollout implementation or trajectory-generator internals.
  */
 class RouteTrackingController
@@ -44,18 +36,8 @@ public:
     geometry_msgs::msg::Twist * cmd_vel) = 0;
 
   virtual bool isGoalPositionReached() = 0;
-  virtual bool isRouteStartAligned() = 0;
   virtual bool isGoalHeadingSatisfied() = 0;
   virtual geometry_msgs::msg::TransformStamped getGlobalPose() = 0;
-  virtual RouteStartupStatus evaluateRouteStartupStatus(std::string * detail)
-  {
-    if(detail != nullptr){
-      detail->clear();
-    }
-    return isRouteStartAligned() ?
-      RouteStartupStatus::kAligned :
-      RouteStartupStatus::kAlignmentUnsatisfied;
-  }
 };
 
 }  // namespace dddmr_sys_core

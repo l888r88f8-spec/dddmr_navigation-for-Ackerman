@@ -1,18 +1,18 @@
 Panels:
   - Class: rviz_common/Displays
-    Help Height: 78
+    Help Height: 0
     Name: Displays
     Property Tree Widget:
       Expanded:
         - /WeightGround1/Topic1
       Splitter Ratio: 0.5735294222831726
-    Tree Height: 470
+    Tree Height: 548
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
     Expanded:
-      - /3D Goal Pose1
       - /2D Pose Estimate1
+      - /3D Goal Pose1
     Name: Tool Properties
     Splitter Ratio: 0.5886790156364441
   - Class: rviz_common/Views
@@ -591,13 +591,6 @@ Visualization Manager:
     - Class: rviz_default_plugins/FocusCamera
     - Class: rviz_default_plugins/Measure
       Line color: 128; 128; 0
-    - Class: dddmr_rviz_default_plugins/3DGoalPose
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: goal_pose_3d
     - Class: rviz_default_plugins/SetInitialPose
       Covariance x: 0.25
       Covariance y: 0.25
@@ -608,6 +601,13 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: initialpose
+    - Class: dddmr_rviz_default_plugins/3DGoalPose
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: goal_pose_3d
   Transformation:
     Current:
       Class: rviz_default_plugins/TF
@@ -641,7 +641,7 @@ Window Geometry:
   Height: 766
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd00000002000000000000015600000262fc0200000004fb000000100044006900730070006c006100790073010000003e00000262000000ca00fffffffb0000001200530065006c0065006300740069006f006e000000021e000000e70000005c00fffffffb0000001e0054006f006f006c002000500072006f00700065007200740069006500730000000268000000b30000005c00fffffffb0000000a005600690065007700730000000278000000b4000000a600ffffff00000003000006400000003afc0100000001fb0000000800540069006d00650100000000000006400000027100ffffff000004e40000026200000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000002000000000000015600000262fc0200000004fb000000100044006900730070006c006100790073010000003e00000262000000ca00fffffffb0000001200530065006c0065006300740069006f006e000000021e000000e70000005c00fffffffb0000001e0054006f006f006c002000500072006f00700065007200740069006500730000000217000000890000005c00fffffffb0000000a005600690065007700730000000278000000b4000000a600ffffff00000003000006400000003afc0100000001fb0000000800540069006d00650100000000000006400000027100ffffff000004e40000026200000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Time:

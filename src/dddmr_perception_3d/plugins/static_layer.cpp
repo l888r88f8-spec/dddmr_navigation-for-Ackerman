@@ -302,8 +302,13 @@ void StaticLayer::updateLethalPointCloud(){
 void StaticLayer::selfMark(){
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
   if(pub_dGraph_->get_subscription_count()>0){
+    if(!shared_data_ || !shared_data_->pcl_ground_){
+      return;
+    }
+    const size_t ground_size =
+      std::min(shared_data_->static_ground_size_, shared_data_->pcl_ground_->points.size());
     pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_msg2 (new pcl::PointCloud<pcl::PointXYZI>);
-    for(size_t index=0;index<shared_data_->static_ground_size_;index++){
+    for(size_t index=0;index<ground_size;index++){
       pcl::PointXYZI ipt;
       ipt.x = shared_data_->pcl_ground_->points[index].x;
       ipt.y = shared_data_->pcl_ground_->points[index].y;
@@ -351,6 +356,9 @@ void StaticLayer::selfClear(){
 }
 
 void StaticLayer::generateStaticGraph(){
+  if(!pcl_ground_ || !shared_data_->kdtree_ground_ || !shared_data_->kdtree_map_){
+    return;
+  }
   unsigned int index_cnt = 0;
   for(auto it = pcl_ground_->points.begin();it!=pcl_ground_->points.end();it++){
     pcl::PointXYZI pcl_node;
@@ -381,6 +389,9 @@ void StaticLayer::generateStaticGraph(){
     }
     
     for(auto it = pointIdxRadiusSearch.begin(); it!=pointIdxRadiusSearch.end();it++){
+      if(*it < 0 || static_cast<std::size_t>(*it) >= pcl_ground_->points.size()){
+        continue;
+      }
       //chekc relative z value for the edge, because we need to eliminate stair and wheel chair passage issue
       edge_t a_edge;
       auto node = index_cnt;
@@ -404,6 +415,9 @@ void StaticLayer::generateStaticGraph(){
   }
 }
 void StaticLayer::radiusSearchConnection(){
+  if(!pcl_ground_ || !pcl_map_ || !shared_data_->kdtree_ground_ || !shared_data_->kdtree_map_){
+    return;
+  }
   unsigned int index_cnt = 0;
   for(auto it = pcl_ground_->points.begin();it!=pcl_ground_->points.end();it++){
 
@@ -436,6 +450,9 @@ void StaticLayer::radiusSearchConnection(){
     
     pcl::PointCloud<pcl::PointXYZI>::Ptr nn_pc (new pcl::PointCloud<pcl::PointXYZI>);
     for(auto it = pointIdxRadiusSearch.begin(); it!=pointIdxRadiusSearch.end();it++){
+      if(*it < 0 || static_cast<std::size_t>(*it) >= pcl_ground_->points.size()){
+        continue;
+      }
       
       //chekc relative z value for the edge, because we need to eliminate stair and wheel chair passage issue
       /*
@@ -514,6 +531,9 @@ void StaticLayer::radiusSearchConnection(){
       shared_data_->kdtree_map_->radiusSearch (pcl_node, static_imposing_radius_, pointIdxRadiusSearch, pointRadiusSquaredDistance);
       pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_z_axes(new pcl::PointCloud<pcl::PointXYZI>);
       for(auto i_pcl_z_axes=pointIdxRadiusSearch.begin();i_pcl_z_axes!=pointIdxRadiusSearch.end();i_pcl_z_axes++){
+        if(*i_pcl_z_axes < 0 || static_cast<std::size_t>(*i_pcl_z_axes) >= pcl_map_->points.size()){
+          continue;
+        }
         pcl_z_axes->push_back(pcl_map_->points[*i_pcl_z_axes]);
       }
 
@@ -550,7 +570,7 @@ void StaticLayer::resetdGraph(){
 double StaticLayer::get_dGraphValue(const unsigned int index){
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
   if (dGraph_.graph_.find(index) == dGraph_.graph_.end())
-    return 0.0;
+    return gbl_utils_ ? gbl_utils_->getMaxObstacleDistance() : 9999.0;
   return dGraph_.getValue(index);
 }
 

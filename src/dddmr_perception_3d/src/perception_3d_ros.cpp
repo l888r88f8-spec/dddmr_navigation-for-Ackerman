@@ -230,7 +230,6 @@ void Perception3D_ROS::sensorsUpdateLoop()
   gettimeofday(&start, NULL);
   #endif
 
-
   stacked_perception_->doClear_then_Mark();
   stacked_perception_->refreshObservationCache();
 

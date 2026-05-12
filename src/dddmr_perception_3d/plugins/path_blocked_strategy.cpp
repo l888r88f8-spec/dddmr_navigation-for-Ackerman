@@ -97,7 +97,7 @@ void PathBlockedStrategy::selfMark(){
   }
 
   if(prune_plan_blocked_ratio_>0.0)
-    opinion_ = perception_3d::PATH_BLOCKED_WAIT;
+    opinion_ = perception_3d::PATH_BLOCKED_REPLANNING;
   
   //RCLCPP_WARN(node_->get_logger().get_child(name_), "%s: blocked_ratio:%.2f", name_.c_str(), prune_plan_blocked_ratio_ );
 }
