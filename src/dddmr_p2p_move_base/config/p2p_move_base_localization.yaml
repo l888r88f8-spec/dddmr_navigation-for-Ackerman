@@ -162,12 +162,9 @@ local_planner:
     causal_prune_search_window: 40                              # 仅在当前进度附近搜索，防止跳段
     causal_prune_max_index_jump: 15                             # 单周期最大索引跳步
     causal_prune_max_arc_jump: 2.0                              # 单周期最大弧长跳步（m）
-    causal_prune_max_lateral_distance: 1.0                      # 机器人到候选段最大横向距离（m）
+    causal_prune_max_lateral_distance: 2.0                      # 机器人到候选段最大横向距离（m）
     causal_prune_max_heading_error: 1.75                        # 候选切线与车头最大夹角（rad）
-    min_heading_reference_length: 0.3                           # 朝向参考最小长度（m）
-    max_heading_reference_stale_cycles: 10                      # 朝向参考最大复用周期
-    max_prune_failure_cycles: 3                                 # 连续 prune 失败确认阈值
-    enable_prune_deviation_hard_fail: false                     # 关闭偏离过大直接失败，优先尝试回拉
+    max_prune_failure_cycles: 3                                 # 连续 prune 失败阈值
     allow_offroute_anchor_recovery: true                        # 偏离后允许在前向窗口恢复锚点
     cached_pruned_path_timeout_sec: 0.8                         # 复用缓存局部路径的最长时长（s）
     prune_plane_timeout: 3.0                                    # 局部裁剪路径失效超时（s）
@@ -183,9 +180,8 @@ local_planner:
       min_linear_speed: 0.05                                    # 最小跟踪速度（m/s）
       alignment_linear_speed: 0.08                              # 对齐阶段速度（m/s）
       goal_slowdown_distance: 2.5                               # 终点减速起始距离（m）
-      min_lookahead_distance: 0.4                               # 最小前视距离（m）
-      max_lookahead_distance: 0.8                               # 最大前视距离（m）
-      lookahead_time: 1.5                                       # 速度到前视距离换算时间尺度（s）
+      use_velocity_scaled_lookahead_dist: false                 # false 时使用固定前视距离，不按速度缩放
+      lookahead_dist: 0.6                                       # 固定前视距离（m）
       alignment_lookahead_distance: 1.0                         # 对齐模式前视距离（m）
       max_lateral_accel: 1.5                                    # 曲率调速横向加速度上限（m/s^2）
       prediction_horizon_sec: 6.0                               # 单候选轨迹预测时长（s）
@@ -203,7 +199,7 @@ local_planner:
       best_trajectory: true                                     # 发布最优轨迹
       all_trajectories: false                                   # 发布全部采样轨迹（较重）
 
-# legacy_rollout 轨迹生成
+# legacy_rollout 轨迹生成/跟踪
 trajectory_generators:
   ros__parameters:
     plugins: ["ackermann_simple"] # , "ackermann_heading_rotate_inplace", "ackermann_heading_rotate_shortest"]  # 轨迹生成插件列表

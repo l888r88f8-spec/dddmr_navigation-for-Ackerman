@@ -189,20 +189,9 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
         nav_msgs::msg::Path * prune_plan,
         pcl::PointCloud<pcl::PointXYZI> * pcl_prune_plan) const;
       bool tryReuseCachedPrunedPath();
-      bool buildHeadingReferenceFromPoses(
-        const geometry_msgs::msg::PoseStamped & first_pose,
-        const geometry_msgs::msg::PoseStamped & last_pose,
-        tf2::Transform * reference_pose) const;
-      bool buildHeadingReferenceFromPlan(
-        const std::vector<geometry_msgs::msg::PoseStamped> & plan,
-        std::size_t start_index,
-        double min_reference_length,
-        tf2::Transform * reference_pose) const;
       bool buildHeadingReferenceFromPoseOrientation(
         const geometry_msgs::msg::PoseStamped & pose,
         tf2::Transform * reference_pose) const;
-      void cacheHeadingReference(const tf2::Transform & reference_pose);
-      double updateHeadingDeviation(const tf2::Transform & reference_pose);
 
       bool compute_best_trajectory_in_odomCb_;
 
@@ -213,11 +202,8 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       double forward_prune_, backward_prune_;
       std::size_t causal_prune_search_window_, causal_prune_max_index_jump_;
       double causal_prune_max_arc_jump_, causal_prune_max_lateral_distance_, causal_prune_max_heading_error_;
-      double min_heading_reference_length_;
-      std::size_t max_heading_reference_stale_cycles_;
       std::size_t max_prune_failure_cycles_;
       double cached_pruned_path_timeout_sec_;
-      bool enable_prune_deviation_hard_fail_;
       bool allow_offroute_anchor_recovery_;
 
       /*Timer for robust system design*/
@@ -233,10 +219,6 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       nav_msgs::msg::Path cached_local_pruned_path_;
       pcl::PointCloud<pcl::PointXYZI> cached_pcl_prune_plan_;
       std::vector<double> global_plan_arc_lengths_;
-      bool last_heading_reference_valid_;
-      tf2::Transform last_heading_reference_pose_;
-      std::size_t heading_reference_stale_cycles_;
-      std::size_t consecutive_heading_reference_failure_cycles_;
 
       double xy_goal_tolerance_, yaw_goal_tolerance_;
       double controller_frequency_;
@@ -307,6 +289,8 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       double rpp_min_linear_speed_;
       double rpp_alignment_linear_speed_;
       double rpp_goal_slowdown_distance_;
+      bool rpp_use_velocity_scaled_lookahead_dist_;
+      double rpp_lookahead_dist_;
       double rpp_min_lookahead_distance_;
       double rpp_max_lookahead_distance_;
       double rpp_lookahead_time_;

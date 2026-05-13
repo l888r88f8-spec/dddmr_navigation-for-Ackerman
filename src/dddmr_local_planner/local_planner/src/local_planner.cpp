@@ -64,15 +64,14 @@ Local_Planner::Local_Planner(const std::string& name): Node(name)
   consecutive_prune_failure_cycles_ = 0;
   last_prune_used_cache_ = false;
   cached_local_pruned_path_valid_ = false;
-  last_heading_reference_valid_ = false;
-  heading_reference_stale_cycles_ = 0;
-  consecutive_heading_reference_failure_cycles_ = 0;
   controller_backend_ = "legacy_rollout";
   rpp_critic_trajectory_generator_name_ = "ackermann_simple";
   rpp_nominal_linear_speed_ = 1.0;
   rpp_min_linear_speed_ = 0.15;
   rpp_alignment_linear_speed_ = 0.25;
   rpp_goal_slowdown_distance_ = 1.5;
+  rpp_use_velocity_scaled_lookahead_dist_ = false;
+  rpp_lookahead_dist_ = 1.0;
   rpp_min_lookahead_distance_ = 1.0;
   rpp_max_lookahead_distance_ = 3.0;
   rpp_lookahead_time_ = 1.5;
@@ -83,7 +82,6 @@ Local_Planner::Local_Planner(const std::string& name): Node(name)
   rpp_wheelbase_ = 0.55;
   rpp_max_steer_ = 0.69;
   rpp_max_angular_velocity_ = 1.2;
-  enable_prune_deviation_hard_fail_ = true;
   allow_offroute_anchor_recovery_ = false;
 }
 
@@ -164,24 +162,9 @@ void Local_Planner::initial(
   this->get_parameter("causal_prune_max_heading_error", causal_prune_max_heading_error_);
   RCLCPP_DEBUG(this->get_logger(), "causal_prune_max_heading_error: %.2f", causal_prune_max_heading_error_);
 
-  declare_parameter("min_heading_reference_length", rclcpp::ParameterValue(0.3));
-  this->get_parameter("min_heading_reference_length", min_heading_reference_length_);
-  RCLCPP_DEBUG(this->get_logger(), "min_heading_reference_length: %.2f", min_heading_reference_length_);
-
-  declare_parameter("max_heading_reference_stale_cycles", rclcpp::ParameterValue(10));
-  this->get_parameter("max_heading_reference_stale_cycles", max_heading_reference_stale_cycles_);
-  RCLCPP_DEBUG(this->get_logger(), "max_heading_reference_stale_cycles: %zu", max_heading_reference_stale_cycles_);
-
   declare_parameter("max_prune_failure_cycles", rclcpp::ParameterValue(10));
   this->get_parameter("max_prune_failure_cycles", max_prune_failure_cycles_);
   RCLCPP_DEBUG(this->get_logger(), "max_prune_failure_cycles: %zu", max_prune_failure_cycles_);
-
-  declare_parameter("enable_prune_deviation_hard_fail", rclcpp::ParameterValue(true));
-  this->get_parameter("enable_prune_deviation_hard_fail", enable_prune_deviation_hard_fail_);
-  RCLCPP_DEBUG(
-    this->get_logger(),
-    "enable_prune_deviation_hard_fail: %d",
-    enable_prune_deviation_hard_fail_ ? 1 : 0);
 
   declare_parameter("allow_offroute_anchor_recovery", rclcpp::ParameterValue(false));
   this->get_parameter("allow_offroute_anchor_recovery", allow_offroute_anchor_recovery_);
@@ -274,6 +257,18 @@ void Local_Planner::initial(
     "regulated_pure_pursuit.goal_slowdown_distance",
     rpp_goal_slowdown_distance_);
   declare_parameter(
+    "regulated_pure_pursuit.use_velocity_scaled_lookahead_dist",
+    rclcpp::ParameterValue(false));
+  this->get_parameter(
+    "regulated_pure_pursuit.use_velocity_scaled_lookahead_dist",
+    rpp_use_velocity_scaled_lookahead_dist_);
+  declare_parameter(
+    "regulated_pure_pursuit.lookahead_dist",
+    rclcpp::ParameterValue(1.0));
+  this->get_parameter(
+    "regulated_pure_pursuit.lookahead_dist",
+    rpp_lookahead_dist_);
+  declare_parameter(
     "regulated_pure_pursuit.min_lookahead_distance",
     rclcpp::ParameterValue(1.0));
   this->get_parameter(
@@ -354,6 +349,14 @@ void Local_Planner::initial(
       this->get_logger(),
       "regulated_pure_pursuit.goal_slowdown_distance: %.2f",
       rpp_goal_slowdown_distance_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.use_velocity_scaled_lookahead_dist: %d",
+      rpp_use_velocity_scaled_lookahead_dist_);
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "regulated_pure_pursuit.lookahead_dist: %.2f",
+      rpp_lookahead_dist_);
     RCLCPP_DEBUG(
       this->get_logger(),
       "regulated_pure_pursuit.min_lookahead_distance: %.2f",
@@ -626,30 +629,17 @@ dddmr_sys_core::PlannerState Local_Planner::prepareControllerContext(
       deviation_distance;
 
     if(deviation_confirmed){
-      if(enable_prune_deviation_hard_fail_){
-        RCLCPP_FATAL(
-          this->get_logger().get_child(name_),
-          "deviation confirmed after consecutive prune failures, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f",
-          route_version_,
-          goal_seq_,
-          route_source_label_.c_str(),
-          local_route_progress_index_,
-          consecutive_prune_failure_cycles_,
-          last_robot_to_route_distance_);
-        RCLCPP_FATAL(
-          this->get_logger().get_child(name_),
-          "deviation from route reference exceeded tolerance, controller returns PRUNE_PLAN_FAIL.");
-        return dddmr_sys_core::PRUNE_PLAN_FAIL;
-      }
-      RCLCPP_WARN_THROTTLE(
-        this->get_logger().get_child(name_), *clock_, 2000,
-        "deviation confirmed but hard fail disabled; keep trying local pull-back, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f",
+      RCLCPP_WARN(
+        this->get_logger().get_child(name_),
+        "deviation from route reference exceeded tolerance, request route replanning, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f, tolerance=%.2f",
         route_version_,
         goal_seq_,
         route_source_label_.c_str(),
         local_route_progress_index_,
         consecutive_prune_failure_cycles_,
-        last_robot_to_route_distance_);
+        last_robot_to_route_distance_,
+        causal_prune_max_lateral_distance_);
+      return dddmr_sys_core::PRUNE_PLAN_FAIL;
     }
 
     RCLCPP_WARN_THROTTLE(
@@ -755,20 +745,7 @@ bool Local_Planner::buildGoalAlignmentReference(tf2::Transform * reference_pose)
     return false;
   }
 
-  if(buildHeadingReferenceFromPoseOrientation(global_plan_.back(), reference_pose)){
-    return true;
-  }
-
-  if(global_plan_.size() < 2){
-    return false;
-  }
-
-  const std::size_t start_index = global_plan_.size() >= 2 ? global_plan_.size() - 2 : 0;
-  return buildHeadingReferenceFromPlan(
-    global_plan_,
-    start_index,
-    std::max(0.05, min_heading_reference_length_),
-    reference_pose);
+  return buildHeadingReferenceFromPoseOrientation(global_plan_.back(), reference_pose);
 }
 
 double Local_Planner::getDistanceToGoal() const
@@ -903,9 +880,6 @@ void Local_Planner::resetLocalRouteTrackingState()
   prune_plan_.header.stamp = clock_->now();
   pcl_prune_plan_.clear();
   global_plan_arc_lengths_.clear();
-  last_heading_reference_valid_ = false;
-  heading_reference_stale_cycles_ = 0;
-  consecutive_heading_reference_failure_cycles_ = 0;
   last_valid_prune_plan_ = clock_->now();
 }
 
@@ -1224,12 +1198,6 @@ bool Local_Planner::tryReuseCachedPrunedPath()
     return false;
   }
 
-  if(enable_prune_deviation_hard_fail_ &&
-     consecutive_prune_failure_cycles_ > max_prune_failure_cycles_)
-  {
-    return false;
-  }
-
   prune_plan_ = cached_local_pruned_path_;
   prune_plan_.header.frame_id = global_frame_;
   prune_plan_.header.stamp = clock_->now();
@@ -1258,75 +1226,6 @@ bool Local_Planner::tryReuseCachedPrunedPath()
   return true;
 }
 
-bool Local_Planner::buildHeadingReferenceFromPoses(
-  const geometry_msgs::msg::PoseStamped & first_pose,
-  const geometry_msgs::msg::PoseStamped & last_pose,
-  tf2::Transform * reference_pose) const
-{
-  if(reference_pose == nullptr){
-    return false;
-  }
-
-  const double vx = last_pose.pose.position.x - first_pose.pose.position.x;
-  const double vy = last_pose.pose.position.y - first_pose.pose.position.y;
-  const double vz = last_pose.pose.position.z - first_pose.pose.position.z;
-  const double distance = std::sqrt(vx * vx + vy * vy + vz * vz);
-  if(distance < 1e-6){
-    return false;
-  }
-
-  tf2::Quaternion q;
-  if(std::fabs(vz) > 1e-6){
-    tf2::Vector3 axis_vector(vx / distance, vy / distance, vz / distance);
-    tf2::Vector3 up_vector(1.0, 0.0, 0.0);
-    tf2::Vector3 right_vector = axis_vector.cross(up_vector);
-    if(right_vector.length2() < 1e-6){
-      return false;
-    }
-    right_vector.normalize();
-    tf2::Quaternion q_pre(right_vector, -1.0 * std::acos(axis_vector.dot(up_vector)));
-    q_pre.normalize();
-    q = q_pre;
-  }
-  else{
-    tf2::Quaternion q_pre;
-    q_pre.setRPY(0.0, 0.0, std::atan2(vy, vx));
-    q = q_pre;
-  }
-
-  reference_pose->setRotation(q);
-  reference_pose->setOrigin(tf2::Vector3(
-    first_pose.pose.position.x,
-    first_pose.pose.position.y,
-    first_pose.pose.position.z));
-  return true;
-}
-
-bool Local_Planner::buildHeadingReferenceFromPlan(
-  const std::vector<geometry_msgs::msg::PoseStamped> & plan,
-  std::size_t start_index,
-  double min_reference_length,
-  tf2::Transform * reference_pose) const
-{
-  if(reference_pose == nullptr || plan.size() < 2){
-    return false;
-  }
-
-  start_index = std::min(start_index, plan.size() - 1);
-  double accumulated_distance = 0.0;
-  for(std::size_t end_index = start_index + 1; end_index < plan.size(); ++end_index){
-    accumulated_distance += getDistanceBTWPoseStamp(plan[end_index - 1], plan[end_index]);
-    if(accumulated_distance + 1e-6 < min_reference_length){
-      continue;
-    }
-    if(buildHeadingReferenceFromPoses(plan[start_index], plan[end_index], reference_pose)){
-      return true;
-    }
-  }
-
-  return false;
-}
-
 bool Local_Planner::buildHeadingReferenceFromPoseOrientation(
   const geometry_msgs::msg::PoseStamped & pose,
   tf2::Transform * reference_pose) const
@@ -1351,21 +1250,6 @@ bool Local_Planner::buildHeadingReferenceFromPoseOrientation(
     pose.pose.position.y,
     pose.pose.position.z));
   return true;
-}
-
-void Local_Planner::cacheHeadingReference(const tf2::Transform & reference_pose)
-{
-  last_heading_reference_pose_ = reference_pose;
-  last_heading_reference_valid_ = true;
-  heading_reference_stale_cycles_ = 0;
-  consecutive_heading_reference_failure_cycles_ = 0;
-}
-
-double Local_Planner::updateHeadingDeviation(const tf2::Transform & reference_pose)
-{
-  const double yaw = getShortestAngleFromPose2RobotHeading(reference_pose);
-  mpc_critics_ros_->getSharedDataPtr()->heading_deviation_ = yaw;
-  return yaw;
 }
 
 void Local_Planner::parseCuboid(){
@@ -1660,8 +1544,11 @@ bool Local_Planner::prunePlan(double forward_distance, double backward_distance)
   double robot_to_route_distance = std::numeric_limits<double>::infinity();
   const bool have_anchor = selectCausalPruneAnchor(&anchor_index, &robot_to_route_distance);
   last_robot_to_route_distance_ = robot_to_route_distance;
+  const bool within_route_deviation_tolerance =
+    robot_to_route_distance <= causal_prune_max_lateral_distance_;
 
   if(have_anchor &&
+     within_route_deviation_tolerance &&
      buildPrunedPlanAroundIndex(anchor_index, forward_distance, backward_distance, &prune_plan_, &pcl_prune_plan_)){
     local_route_progress_index_ = std::max(local_route_progress_index_, anchor_index);
     consecutive_prune_failure_cycles_ = 0;
@@ -1675,6 +1562,19 @@ bool Local_Planner::prunePlan(double forward_distance, double backward_distance)
     ++consecutive_prune_failure_cycles_;
     if(tryReuseCachedPrunedPath()){
       return true;
+    }
+    if(have_anchor && !within_route_deviation_tolerance){
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger().get_child(name_), *clock_, 2000,
+        "local route reference rejected because robot is off route, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, anchor_index=%zu, robot_to_route_distance=%.2f, tolerance=%.2f, failure_cycles=%zu",
+        route_version_,
+        goal_seq_,
+        route_source_label_.c_str(),
+        local_route_progress_index_,
+        anchor_index,
+        last_robot_to_route_distance_,
+        causal_prune_max_lateral_distance_,
+        consecutive_prune_failure_cycles_);
     }
     RCLCPP_WARN_THROTTLE(
       this->get_logger().get_child(name_), *clock_, 2000,
@@ -1972,11 +1872,14 @@ dddmr_sys_core::PlannerState Local_Planner::computeRppControlCommand(
       2.0 * std::sin(heading_error) / std::max(0.05, rpp_alignment_lookahead_distance_);
   }
   else{
-    const double current_speed = std::fabs(robot_state_.twist.twist.linear.x);
-    double lookahead_distance = std::max(
-      rpp_min_lookahead_distance_,
-      current_speed * rpp_lookahead_time_);
-    lookahead_distance = std::min(lookahead_distance, rpp_max_lookahead_distance_);
+    double lookahead_distance = std::max(0.05, rpp_lookahead_dist_);
+    if(rpp_use_velocity_scaled_lookahead_dist_){
+      const double current_speed = std::fabs(robot_state_.twist.twist.linear.x);
+      lookahead_distance = std::max(
+        rpp_min_lookahead_distance_,
+        current_speed * rpp_lookahead_time_);
+      lookahead_distance = std::min(lookahead_distance, rpp_max_lookahead_distance_);
+    }
 
     geometry_msgs::msg::PoseStamped lookahead_pose;
     if(!selectLookaheadPose(lookahead_distance, &lookahead_pose)){
