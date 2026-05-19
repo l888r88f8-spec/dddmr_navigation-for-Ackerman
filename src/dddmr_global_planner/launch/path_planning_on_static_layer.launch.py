@@ -1,7 +1,6 @@
 import os
 
 from ament_index_python.packages import get_package_share_directory
-
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
 from launch.substitutions import LaunchConfiguration
@@ -11,12 +10,12 @@ from launch_ros.actions import Node
 def generate_launch_description():
     p2p_share_dir = get_package_share_directory('p2p_move_base')
     mcl_share_dir = get_package_share_directory('mcl_3dl')
+    global_planner_share_dir = get_package_share_directory('global_planner')
 
     use_sim = LaunchConfiguration('use_sim')
     map_dir = LaunchConfiguration('map_dir')
     ground_dir = LaunchConfiguration('ground_dir')
     rviz_config = LaunchConfiguration('rviz_config')
-    global_planner_prefix = LaunchConfiguration('global_planner_prefix')
 
     localization_config = os.path.join(
         p2p_share_dir,
@@ -29,37 +28,31 @@ def generate_launch_description():
         'pcl_publisher.yaml',
     )
     default_rviz_config = os.path.join(
-        p2p_share_dir,
+        global_planner_share_dir,
         'rviz',
-        'p2p_move_base_localization.rviz',
+        'path_planning_on_static_layer.rviz',
     )
 
     return LaunchDescription([
         DeclareLaunchArgument(
             'use_sim',
-            default_value='true', # set true only when replaying with /clock
+            default_value='true',
             description='Set use_sim_time for launched nodes.',
         ),
         DeclareLaunchArgument(
             'map_dir',
-            default_value='/home/robot/map/hesai_sim/GlobalMap.pcd', # change this to your global map pcd file path
+            default_value='/home/robot/map/hesai_sim/GlobalMap.pcd',
             description='Path to the global map PCD file.',
         ),
         DeclareLaunchArgument(
             'ground_dir',
-            default_value='/home/robot/map/hesai_sim/GroundMap.pcd', # change this to your ground map pcd file path
-
+            default_value='/home/robot/map/hesai_sim/GroundMap.pcd',
             description='Path to the ground map PCD file.',
         ),
         DeclareLaunchArgument(
             'rviz_config',
             default_value=default_rviz_config,
             description='Path to the RViz configuration file.',
-        ),
-        DeclareLaunchArgument(
-            'global_planner_prefix',
-            default_value='',
-            description='Optional command prefix for global_planner_node, e.g. gdb.',
         ),
         SetEnvironmentVariable('RCUTILS_COLORIZED_OUTPUT', '1'),
         Node(
@@ -83,44 +76,37 @@ def generate_launch_description():
             output='screen',
             respawn=False,
             emulate_tty=True,
-            prefix=global_planner_prefix,
             parameters=[
                 localization_config,
                 {'use_sim_time': use_sim},
             ],
         ),
         Node(
-            package='p2p_move_base',
-            executable='p2p_move_base_node',
-            output='screen',
-            respawn=False,
-            emulate_tty=True,
-            parameters=[
-                localization_config,
-                {'use_sim_time': use_sim},
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='map2baselink',
+            arguments=[
+                '-3.73',
+                '3.18',
+                '-0.5',
+                '0.0',
+                '0.0',
+                '0.0',
+                'map',
+                'base_link',
             ],
-            remappings=[
-                ('/odom', '/lio_sam/localization/odometry'),
+            parameters=[
+                {'use_sim_time': use_sim},
             ],
         ),
         Node(
-            package='p2p_move_base',
-            executable='clicked2goal.py',
-            output='screen',
-            respawn=False,
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            arguments=['-d', rviz_config],
             emulate_tty=True,
             parameters=[
                 {'use_sim_time': use_sim},
             ],
         ),
-        # Node(
-        #     package='rviz2',
-        #     executable='rviz2',
-        #     name='rviz2',
-        #     arguments=['-d', rviz_config],
-        #     emulate_tty=True,
-        #     parameters=[
-        #         {'use_sim_time': use_sim},
-        #     ],
-        # ),
     ])

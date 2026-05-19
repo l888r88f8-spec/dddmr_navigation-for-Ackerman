@@ -15,6 +15,7 @@ namespace
 {
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kTwoPi = 2.0 * kPi;
+constexpr std::size_t kHybridRefineSegmentMaxExpansions = 2500;
 
 bool IsFinite(double value)
 {
@@ -1207,7 +1208,10 @@ bool ForwardHybridAStar::MakePlan(
   std::size_t goal_state_id = kInvalidStateId;
 
   std::size_t expand_count = 0;
-  const std::size_t max_expand_count = std::max<std::size_t>(state_space_size, 1);
+  std::size_t max_expand_count = std::max<std::size_t>(state_space_size, 1);
+  if(debug_label.find("hybrid_refine_segment") != std::string::npos){
+    max_expand_count = std::min(max_expand_count, kHybridRefineSegmentMaxExpansions);
+  }
   while (!open_list.empty()) {
     if (check_cancel_requested()) {
       if (!debug_label.empty()) {

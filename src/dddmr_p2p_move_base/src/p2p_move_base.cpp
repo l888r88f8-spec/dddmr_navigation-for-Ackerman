@@ -369,12 +369,6 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
 
 bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> goal_handle){
   FSM_->global_pose_ = route_controller_->getGlobalPose();
-  if(FSM_->getDistance(FSM_->global_pose_, FSM_->oscillation_pose_) >= FSM_->oscillation_distance_ ||
-     FSM_->getAngle(FSM_->global_pose_, FSM_->oscillation_pose_) >= FSM_->oscillation_angle_)
-  {
-    FSM_->oscillation_pose_ = FSM_->global_pose_;
-    FSM_->last_oscillation_reset_ = clock_->now();
-  }
 
   const auto abort_goal_with_reason =
     [&](const std::string & reason) -> bool {
@@ -424,6 +418,23 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       FSM_->setPhase(FSM::NavigationPhase::kBlockedWait, reason);
       return false;
     };
+
+  const auto reset_oscillation_watchdog =
+    [&]() {
+      FSM_->oscillation_pose_ = FSM_->global_pose_;
+      FSM_->last_oscillation_reset_ = clock_->now();
+    };
+
+  const bool update_oscillation_progress =
+    FSM_->isPhase(FSM::NavigationPhase::kRouteTracking) ||
+    FSM_->isPhase(FSM::NavigationPhase::kGoalAlignment) ||
+    FSM_->isPhase(FSM::NavigationPhase::kBlockedWait);
+  if(update_oscillation_progress &&
+     (FSM_->getDistance(FSM_->global_pose_, FSM_->oscillation_pose_) >= FSM_->oscillation_distance_ ||
+      FSM_->getAngle(FSM_->global_pose_, FSM_->oscillation_pose_) >= FSM_->oscillation_angle_))
+  {
+    reset_oscillation_watchdog();
+  }
 
   const auto handle_tracking_control_fault =
     [&](dddmr_sys_core::PlannerState planner_state,
@@ -521,6 +532,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
     if(syncRouteReferenceFromManager("route_pending")){
       FSM_->last_valid_plan_ = clock_->now();
       FSM_->last_valid_control_ = clock_->now();
+      reset_oscillation_watchdog();
       FSM_->setPhase(FSM::NavigationPhase::kRouteTracking, "route received");
       return false;
     }
@@ -575,6 +587,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
     if(route_controller_->isGoalPositionReached()){
       publishZeroVelocity();
       RCLCPP_DEBUG(this->get_logger(), "goal position tolerance reached, entering goal alignment");
+      reset_oscillation_watchdog();
       FSM_->setPhase(FSM::NavigationPhase::kGoalAlignment, "goal position reached");
       return false;
     }
@@ -657,6 +670,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       route_controller_->computeControlCommand(tracking_controller_name_, &cmd_vel);
     if(planner_state == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
       FSM_->last_valid_control_ = clock_->now();
+      reset_oscillation_watchdog();
       FSM_->setPhase(FSM::NavigationPhase::kRouteTracking, "blocked wait cleared");
       publishVelocity(cmd_vel);
       return false;

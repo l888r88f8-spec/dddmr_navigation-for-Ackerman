@@ -576,17 +576,32 @@ dddmr_sys_core::PlannerState Local_Planner::prepareControllerContext(
   auto perception_shared_data = perception_3d_ros_ ? perception_3d_ros_->getSharedDataPtr() : nullptr;
 
   if(!got_odom_){
-    RCLCPP_ERROR(this->get_logger().get_child(name_), "Odom is not received.");
+    RCLCPP_ERROR(
+      this->get_logger().get_child(name_),
+      "local planner trigger: state=TF_FAIL, action=stop_wait, reason=odom_not_received, route_version=%zu, goal_seq=%zu, source=%s",
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str());
     return dddmr_sys_core::TF_FAIL;
   }
 
   if(!stacked_perception || !perception_shared_data){
-    RCLCPP_ERROR(this->get_logger().get_child(name_), "Perception 3D shared data is not ready.");
+    RCLCPP_ERROR(
+      this->get_logger().get_child(name_),
+      "local planner trigger: state=PERCEPTION_MALFUNCTION, action=stop_wait, reason=perception_shared_data_unavailable, route_version=%zu, goal_seq=%zu, source=%s",
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str());
     return dddmr_sys_core::PERCEPTION_MALFUNCTION;
   }
 
   if(!stacked_perception->isSensorOK()){
-    RCLCPP_ERROR(this->get_logger().get_child(name_), "Perception 3D is not ok.");
+    RCLCPP_ERROR(
+      this->get_logger().get_child(name_),
+      "local planner trigger: state=PERCEPTION_MALFUNCTION, action=stop_wait, reason=perception_sensor_not_ok, route_version=%zu, goal_seq=%zu, source=%s",
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str());
     return dddmr_sys_core::PERCEPTION_MALFUNCTION;
   }
 
@@ -614,7 +629,13 @@ dddmr_sys_core::PlannerState Local_Planner::prepareControllerContext(
   }
 
   if((clock_->now()-trans_gbl2b_.header.stamp).seconds() > 2.0){
-    RCLCPP_ERROR(this->get_logger().get_child(name_), "TF out of date in local planner, the local planner wont go further.");
+    RCLCPP_ERROR(
+      this->get_logger().get_child(name_),
+      "local planner trigger: state=TF_FAIL, action=stop_wait, reason=tf_out_of_date, route_version=%zu, goal_seq=%zu, source=%s, tf_age=%.2f",
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str(),
+      (clock_->now()-trans_gbl2b_.header.stamp).seconds());
     return dddmr_sys_core::TF_FAIL;
   }
 
@@ -631,7 +652,7 @@ dddmr_sys_core::PlannerState Local_Planner::prepareControllerContext(
     if(deviation_confirmed){
       RCLCPP_WARN(
         this->get_logger().get_child(name_),
-        "deviation from route reference exceeded tolerance, request route replanning, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f, tolerance=%.2f",
+        "local planner trigger: state=PRUNE_PLAN_FAIL, action=route_replan, reason=route_deviation_confirmed, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f, tolerance=%.2f",
         route_version_,
         goal_seq_,
         route_source_label_.c_str(),
@@ -644,7 +665,7 @@ dddmr_sys_core::PlannerState Local_Planner::prepareControllerContext(
 
     RCLCPP_WARN_THROTTLE(
       this->get_logger().get_child(name_), *clock_, 2000,
-      "transient prune failure, not treating as deviation yet, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f",
+      "local planner trigger: state=ALL_TRAJECTORIES_FAIL, action=stop_wait, reason=transient_prune_failure, route_version=%zu, goal_seq=%zu, source=%s, local_route_progress_index=%zu, failure_cycles=%zu, robot_to_route_distance=%.2f",
       route_version_,
       goal_seq_,
       route_source_label_.c_str(),
@@ -664,13 +685,19 @@ dddmr_sys_core::PlannerState Local_Planner::evaluatePerceptionOpinions(
     if((*opinion_it) == perception_3d::PATH_BLOCKED_WAIT){
       RCLCPP_WARN_THROTTLE(
         this->get_logger().get_child(name_), *clock_, 5000,
-        "Found the prune plan is blocked, go to wait state.");
+        "local planner trigger: state=PATH_BLOCKED_WAIT, action=blocked_wait, reason=perception_opinion_path_blocked_wait, route_version=%zu, goal_seq=%zu, source=%s",
+        route_version_,
+        goal_seq_,
+        route_source_label_.c_str());
       return dddmr_sys_core::PATH_BLOCKED_WAIT;
     }
     if((*opinion_it) == perception_3d::PATH_BLOCKED_REPLANNING){
       RCLCPP_WARN_THROTTLE(
         this->get_logger().get_child(name_), *clock_, 5000,
-        "Found the prune plan is blocked, go to replanning.");
+        "local planner trigger: state=PATH_BLOCKED_REPLANNING, action=route_replan, reason=perception_opinion_path_blocked_replanning, route_version=%zu, goal_seq=%zu, source=%s",
+        route_version_,
+        goal_seq_,
+        route_source_label_.c_str());
       return dddmr_sys_core::PATH_BLOCKED_REPLANNING;
     }
   }
@@ -1845,10 +1872,13 @@ dddmr_sys_core::PlannerState Local_Planner::computeRppControlCommand(
   if(linear_speed_cap <= 1e-3){
     RCLCPP_WARN_THROTTLE(
       this->get_logger().get_child(name_), *clock_, 2000,
-      "RPP speed cap collapsed to zero, route_version=%zu, goal_seq=%zu, source=%s",
+      "RPP trigger: state=ALL_TRAJECTORIES_FAIL, action=stop_wait, reason=speed_cap_zero, controller=%s, route_version=%zu, goal_seq=%zu, source=%s, distance_to_goal=%.2f, allowed_max_speed=%.2f",
+      controller_name.c_str(),
       route_version_,
       goal_seq_,
-      route_source_label_.c_str());
+      route_source_label_.c_str(),
+      distance_to_goal,
+      context.current_allowed_max_linear_speed);
     return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
   }
 
@@ -1859,10 +1889,12 @@ dddmr_sys_core::PlannerState Local_Planner::computeRppControlCommand(
     if(!buildGoalAlignmentReference(&reference_pose)){
       RCLCPP_WARN_THROTTLE(
         this->get_logger().get_child(name_), *clock_, 2000,
-        "RPP goal alignment reference is unavailable, route_version=%zu, goal_seq=%zu, source=%s",
+        "RPP trigger: state=ALL_TRAJECTORIES_FAIL, action=stop_wait, reason=goal_alignment_reference_unavailable, controller=%s, route_version=%zu, goal_seq=%zu, source=%s, distance_to_goal=%.2f",
+        controller_name.c_str(),
         route_version_,
         goal_seq_,
-        route_source_label_.c_str());
+        route_source_label_.c_str(),
+        distance_to_goal);
       return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
     }
 
@@ -1885,10 +1917,13 @@ dddmr_sys_core::PlannerState Local_Planner::computeRppControlCommand(
     if(!selectLookaheadPose(lookahead_distance, &lookahead_pose)){
       RCLCPP_WARN_THROTTLE(
         this->get_logger().get_child(name_), *clock_, 2000,
-        "RPP lookahead target is unavailable, route_version=%zu, goal_seq=%zu, source=%s",
+        "RPP trigger: state=ALL_TRAJECTORIES_FAIL, action=stop_wait, reason=lookahead_target_unavailable, controller=%s, route_version=%zu, goal_seq=%zu, source=%s, lookahead_distance=%.2f, velocity_scaled=%d",
+        controller_name.c_str(),
         route_version_,
         goal_seq_,
-        route_source_label_.c_str());
+        route_source_label_.c_str(),
+        lookahead_distance,
+        rpp_use_velocity_scaled_lookahead_dist_ ? 1 : 0);
       return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
     }
 
@@ -1902,11 +1937,14 @@ dddmr_sys_core::PlannerState Local_Planner::computeRppControlCommand(
     if(distance_sq < 1e-6){
       RCLCPP_WARN_THROTTLE(
         this->get_logger().get_child(name_), *clock_, 2000,
-        "RPP lookahead target is invalid (distance too small), controller=%s, route_version=%zu, goal_seq=%zu, source=%s",
+        "RPP trigger: state=ALL_TRAJECTORIES_FAIL, action=stop_wait, reason=lookahead_target_too_close, controller=%s, route_version=%zu, goal_seq=%zu, source=%s, lookahead_distance=%.2f, x_local=%.3f, y_local=%.3f",
         controller_name.c_str(),
         route_version_,
         goal_seq_,
-        route_source_label_.c_str());
+        route_source_label_.c_str(),
+        lookahead_distance,
+        x_local,
+        y_local);
       return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
     }
 
@@ -1981,18 +2019,21 @@ dddmr_sys_core::PlannerState Local_Planner::computeRppControlCommand(
     }
     RCLCPP_WARN_THROTTLE(
       this->get_logger().get_child(name_), *clock_, 2000,
-      "RPP control trajectory was rejected by critics, controller=%s, route_version=%zu, goal_seq=%zu, source=%s, cost=%.2f, reason=%s",
+      "RPP trigger: state=%s, action=%s, reason=critic_reject_%s, controller=%s, route_version=%zu, goal_seq=%zu, source=%s, cost=%.2f, linear_velocity=%.2f, angular_velocity=%.3f, curvature=%.3f, prediction_horizon=%.2f",
+      std::fabs(predicted_traj.cost_ + 1.0) < 1e-6 ? "PATH_BLOCKED_REPLANNING" : "ALL_TRAJECTORIES_FAIL",
+      std::fabs(predicted_traj.cost_ + 1.0) < 1e-6 ? "route_replan" : "stop_wait",
+      reject_reason,
       controller_name.c_str(),
       route_version_,
       goal_seq_,
       route_source_label_.c_str(),
       predicted_traj.cost_,
-      reject_reason);
+      linear_velocity,
+      angular_velocity,
+      curvature,
+      rpp_prediction_horizon_sec_);
 
     if(std::fabs(predicted_traj.cost_ + 1.0) < 1e-6){
-      RCLCPP_WARN_THROTTLE(
-        this->get_logger().get_child(name_), *clock_, 2000,
-        "RPP collision rejection is treated as route blocked, request route replanning.");
       return dddmr_sys_core::PATH_BLOCKED_REPLANNING;
     }
 

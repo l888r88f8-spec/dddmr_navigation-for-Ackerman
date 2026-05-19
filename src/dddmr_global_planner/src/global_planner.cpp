@@ -41,6 +41,71 @@ using namespace std::chrono_literals;
 
 namespace global_planner
 {
+namespace
+{
+
+constexpr double kHybridRefineSegmentLength = 8.0;
+constexpr double kHybridRefineMinSegmentLength = 1.0;
+constexpr double kPathDuplicateDistance = 0.05;
+
+double Distance2D(
+  const geometry_msgs::msg::PoseStamped & lhs,
+  const geometry_msgs::msg::PoseStamped & rhs)
+{
+  const double dx = lhs.pose.position.x - rhs.pose.position.x;
+  const double dy = lhs.pose.position.y - rhs.pose.position.y;
+  return std::hypot(dx, dy);
+}
+
+std::size_t IndexAtDistanceFromIndex(
+  const nav_msgs::msg::Path & path,
+  std::size_t start_index,
+  double distance)
+{
+  if(path.poses.empty()){
+    return 0;
+  }
+
+  const std::size_t last_index = path.poses.size() - 1;
+  if(start_index >= last_index){
+    return last_index;
+  }
+
+  double accumulated = 0.0;
+  for(std::size_t i = start_index + 1; i < path.poses.size(); ++i){
+    accumulated += Distance2D(path.poses[i - 1], path.poses[i]);
+    if(accumulated >= distance){
+      return i;
+    }
+  }
+  return last_index;
+}
+
+void AppendPath(
+  const nav_msgs::msg::Path & source,
+  nav_msgs::msg::Path * destination,
+  std::size_t begin,
+  std::size_t end)
+{
+  if(destination == nullptr || source.poses.empty() || begin >= source.poses.size()){
+    return;
+  }
+  end = std::min(end, source.poses.size() - 1);
+  if(begin > end){
+    return;
+  }
+
+  for(std::size_t i = begin; i <= end; ++i){
+    if(!destination->poses.empty() &&
+      Distance2D(destination->poses.back(), source.poses[i]) < kPathDuplicateDistance)
+    {
+      continue;
+    }
+    destination->poses.push_back(source.poses[i]);
+  }
+}
+
+}  // namespace
 
 GlobalPlanner::GlobalPlanner(const std::string& name)
     : Node(name) 
@@ -1164,18 +1229,30 @@ bool GlobalPlanner::buildFrozenRouteLocked(
     << ", request_id=" << request_id
     << ", stage=raw_route";
 
-  *raw_route = makeROSPlanLocked(
-    start,
-    goal,
-    false,
-    false,
-    cancel_requested,
-    was_canceled,
-    raw_route_debug_label.str(),
-    &raw_route_search_diagnostics,
-    &start_projection,
-    &goal_projection,
-    raw_route_progress_callback);
+  if(raw_route_backend_ == "hybrid_a_star"){
+    *raw_route = makeGraphRouteLocked(
+      start,
+      goal,
+      cancel_requested,
+      was_canceled,
+      &raw_route_search_diagnostics,
+      &start_projection,
+      &goal_projection);
+  }
+  else{
+    *raw_route = makeROSPlanLocked(
+      start,
+      goal,
+      false,
+      false,
+      cancel_requested,
+      was_canceled,
+      raw_route_debug_label.str(),
+      &raw_route_search_diagnostics,
+      &start_projection,
+      &goal_projection,
+      raw_route_progress_callback);
+  }
   if(!raw_route_stage_started && start_projection.success && goal_projection.success){
     raw_route_stage_started = true;
     raw_route_stage_started_at = std::chrono::steady_clock::now();
@@ -1206,7 +1283,7 @@ bool GlobalPlanner::buildFrozenRouteLocked(
       "raw route stage finished, goal_seq=%zu, request_id=%zu, stage=raw_route, backend=%s, success=0, result_class=%s, expansions=%zu, planning_time=%.3f, path_poses=%zu, start_ground_idx=%zu, start_ground_z=%.2f, start_projection_distance=%.3f, start_fallback=%s, goal_ground_idx=%zu, goal_ground_z=%.2f, goal_projection_distance=%.3f, goal_fallback=%s",
       goal_seq,
       request_id,
-      raw_route_backend_.c_str(),
+      raw_route_backend_ == "hybrid_a_star" ? "graph_a_star" : raw_route_backend_.c_str(),
       raw_route_result_class.c_str(),
       raw_route_search_diagnostics.expansions,
       raw_route_search_diagnostics.planning_time_sec,
@@ -1225,7 +1302,7 @@ bool GlobalPlanner::buildFrozenRouteLocked(
       "raw route stage finished, goal_seq=%zu, request_id=%zu, stage=raw_route, backend=%s, success=1, result_class=succeeded, expansions=%zu, planning_time=%.3f, path_poses=%zu, start_ground_idx=%zu, start_ground_z=%.2f, start_projection_distance=%.3f, start_fallback=%s, goal_ground_idx=%zu, goal_ground_z=%.2f, goal_projection_distance=%.3f, goal_fallback=%s",
       goal_seq,
       request_id,
-      raw_route_backend_.c_str(),
+      raw_route_backend_ == "hybrid_a_star" ? "graph_a_star" : raw_route_backend_.c_str(),
       raw_route_search_diagnostics.expansions,
       raw_route_search_diagnostics.planning_time_sec,
       raw_route_search_diagnostics.path_pose_count,
@@ -1257,6 +1334,31 @@ bool GlobalPlanner::buildFrozenRouteLocked(
 
   const auto composing_started_at = std::chrono::steady_clock::now();
   publish_stage("composing_frozen_route", composing_started_at, 0, "in_progress");
+  if(raw_route_backend_ == "hybrid_a_star"){
+    bool refine_canceled = false;
+    std::ostringstream refine_debug_label;
+    refine_debug_label
+      << "hybrid_refine goal_seq=" << goal_seq
+      << ", request_id=" << request_id
+      << ", stage=hybrid_refine";
+    *frozen_route = makeHybridRefinedRouteLocked(
+      start,
+      goal,
+      *raw_route,
+      cancel_requested,
+      &refine_canceled,
+      refine_debug_label.str());
+    if(refine_canceled){
+      if(was_canceled != nullptr){
+        *was_canceled = true;
+      }
+      if(request_result_class != nullptr){
+        *request_result_class = "planner_canceled";
+      }
+      frozen_route->poses.clear();
+      return false;
+    }
+  }
   if(request_result_class != nullptr){
     *request_result_class = "succeeded";
   }
@@ -1429,7 +1531,8 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
   ForwardHybridAStar::SearchDiagnostics * search_diagnostics,
   ForwardHybridAStar::ProjectionDiagnostics * start_projection,
   ForwardHybridAStar::ProjectionDiagnostics * goal_projection,
-  const ForwardHybridAStar::ProgressCallback & progress_callback){
+  const ForwardHybridAStar::ProgressCallback & progress_callback,
+  const std::string & route_backend_override){
 
   unsigned int start_id = 0;
   unsigned int goal_id = 0;
@@ -1456,8 +1559,9 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
     return mark_canceled();
   }
 
-  const bool raw_route_uses_forward_hybrid_astar =
-    raw_route_backend_ == "hybrid_a_star";
+  const std::string & route_backend =
+    route_backend_override.empty() ? raw_route_backend_ : route_backend_override;
+  const bool raw_route_uses_forward_hybrid_astar = route_backend == "hybrid_a_star";
   const auto elapsed_seconds =
     [](const std::chrono::steady_clock::time_point & started_at) {
       return std::chrono::duration<double>(
@@ -1641,6 +1745,142 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
   }
 }
 
+nav_msgs::msg::Path GlobalPlanner::makeGraphRouteLocked(
+  const geometry_msgs::msg::PoseStamped & start,
+  const geometry_msgs::msg::PoseStamped & goal,
+  const CancelRequestedCallback & cancel_requested,
+  bool * was_canceled,
+  ForwardHybridAStar::SearchDiagnostics * search_diagnostics,
+  ForwardHybridAStar::ProjectionDiagnostics * start_projection,
+  ForwardHybridAStar::ProjectionDiagnostics * goal_projection)
+{
+  return makeROSPlanLocked(
+    start,
+    goal,
+    false,
+    false,
+    cancel_requested,
+    was_canceled,
+    "graph_global_route",
+    search_diagnostics,
+    start_projection,
+    goal_projection,
+    ForwardHybridAStar::ProgressCallback(),
+    "graph_a_star");
+}
+
+nav_msgs::msg::Path GlobalPlanner::makeHybridRefinedRouteLocked(
+  const geometry_msgs::msg::PoseStamped & start,
+  const geometry_msgs::msg::PoseStamped & goal,
+  const nav_msgs::msg::Path & graph_route,
+  const CancelRequestedCallback & cancel_requested,
+  bool * was_canceled,
+  const std::string & debug_label)
+{
+  nav_msgs::msg::Path refined_route;
+  refined_route.header.frame_id = global_frame_;
+  refined_route.header.stamp = clock_->now();
+
+  if(was_canceled != nullptr){
+    *was_canceled = false;
+  }
+  if(graph_route.poses.empty() || !forward_hybrid_astar_planner_){
+    return graph_route;
+  }
+
+  const auto mark_canceled = [&]() {
+    if(was_canceled != nullptr){
+      *was_canceled = true;
+    }
+    refined_route.poses.clear();
+  };
+
+  if(cancel_requested && cancel_requested()){
+    mark_canceled();
+    return refined_route;
+  }
+
+  std::size_t segment_start_index = 0;
+  geometry_msgs::msg::PoseStamped segment_start = start;
+  segment_start.header = graph_route.header;
+  const std::size_t last_index = graph_route.poses.size() - 1;
+
+  while(segment_start_index < last_index){
+    if(cancel_requested && cancel_requested()){
+      mark_canceled();
+      return refined_route;
+    }
+
+    std::size_t segment_goal_index = IndexAtDistanceFromIndex(
+      graph_route,
+      segment_start_index,
+      kHybridRefineSegmentLength);
+    if(segment_goal_index <= segment_start_index){
+      segment_goal_index = last_index;
+    }
+
+    geometry_msgs::msg::PoseStamped segment_goal = graph_route.poses[segment_goal_index];
+    segment_goal.header = graph_route.header;
+    const bool is_final_segment = segment_goal_index == last_index;
+    if(is_final_segment){
+      segment_goal.pose.position = goal.pose.position;
+      segment_goal.pose.orientation = goal.pose.orientation;
+    }
+
+    bool use_graph_segment = true;
+    if(Distance2D(segment_start, segment_goal) >= kHybridRefineMinSegmentLength){
+      nav_msgs::msg::Path hybrid_segment;
+      bool segment_canceled = false;
+      std::ostringstream segment_label;
+      segment_label
+        << debug_label
+        << " hybrid_refine_segment start_index=" << segment_start_index
+        << ", goal_index=" << segment_goal_index;
+      if(forward_hybrid_astar_planner_->MakePlan(
+          segment_start,
+          segment_goal,
+          &hybrid_segment,
+          false,
+          true,
+          cancel_requested,
+          &segment_canceled,
+          segment_label.str()) &&
+        !hybrid_segment.poses.empty())
+      {
+        hybrid_segment.header.frame_id = global_frame_;
+        hybrid_segment.header.stamp = clock_->now();
+        if(is_final_segment){
+          hybrid_segment.poses.back().pose.orientation = goal.pose.orientation;
+        }
+        AppendPath(hybrid_segment, &refined_route, 0, hybrid_segment.poses.size() - 1);
+        segment_start = hybrid_segment.poses.back();
+        segment_start.header = graph_route.header;
+        use_graph_segment = false;
+      }
+      else if(segment_canceled){
+        mark_canceled();
+        return refined_route;
+      }
+    }
+
+    if(use_graph_segment){
+      AppendPath(graph_route, &refined_route, segment_start_index, segment_goal_index);
+      segment_start = segment_goal;
+    }
+
+    segment_start_index = segment_goal_index;
+  }
+
+  if(refined_route.poses.empty()){
+    return graph_route;
+  }
+  refreshPathOrientations(&refined_route);
+  if(!refined_route.poses.empty()){
+    refined_route.poses.back().pose.orientation = goal.pose.orientation;
+  }
+  return refined_route;
+}
+
 void GlobalPlanner::getStaticGraphFromPerception3D(){
   
   //@Calculate node weight
@@ -1654,11 +1894,12 @@ void GlobalPlanner::getStaticGraphFromPerception3D(){
   RCLCPP_DEBUG(this->get_logger(), "Static graph is generated with size: %lu", static_graph_.getSize());
   */
 
-  const bool raw_route_uses_graph_astar = raw_route_backend_ == "graph_a_star";
+  const bool needs_graph_astar =
+    raw_route_backend_ == "graph_a_star" || raw_route_backend_ == "hybrid_a_star";
 
   if(!has_initialized_){
     has_initialized_ = true;
-    if(raw_route_uses_graph_astar){
+    if(needs_graph_astar){
       if(a_star_expanding_radius_ >= perception_3d_ros_->getGlobalUtils()->getInscribedRadius()*2){
         RCLCPP_WARN(this->get_logger(), "Expanding radius is much larger than InscribedRadius, the planning time will be increased.");
       }
@@ -1678,7 +1919,7 @@ void GlobalPlanner::getStaticGraphFromPerception3D(){
     forward_hybrid_astar_planner_->SetGlobalFrame(global_frame_);
   }
   else{
-    if(raw_route_uses_graph_astar){
+    if(needs_graph_astar){
       if(!use_pre_graph_ && a_star_planner_){
         a_star_planner_->updateGraph(pcl_ground_);
       }

@@ -51,6 +51,7 @@ double getDistanceBTWPoints(T pt, T2 pt2){
 }
 
 MultiLayerSpinningLidar::MultiLayerSpinningLidar(){
+  enable_detail_log_ = false;
   return;
 }
 
@@ -71,6 +72,7 @@ void MultiLayerSpinningLidar::onInitialize()
   ptrInitial();
 
   std::string node_name = std::string{node_->get_name()};
+  node_->get_parameter("enable_detail_log", enable_detail_log_);
 
   node_->declare_parameter(name_ + ".topic", rclcpp::ParameterValue(""));
   node_->get_parameter(name_ + ".topic", topic_);
@@ -231,7 +233,14 @@ void MultiLayerSpinningLidar::cbSensor(const sensor_msgs::msg::PointCloud2::Shar
 
   get_first_tf_ = true;
   
-  RCLCPP_INFO_THROTTLE(node_->get_logger().get_child(name_), *clock_, 60000, "Receiving Lidar topic: %s", topic_.c_str());
+  if(enable_detail_log_){
+    RCLCPP_INFO_THROTTLE(
+      node_->get_logger().get_child(name_),
+      *clock_,
+      60000,
+      "Receiving Lidar topic: %s",
+      topic_.c_str());
+  }
 
   //@Justify affine 3d
   //Eigen::Affine3d a = tf2::transformToEigen(trans_gbl2b_);

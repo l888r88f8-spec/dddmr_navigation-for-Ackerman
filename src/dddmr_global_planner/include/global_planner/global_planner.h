@@ -243,7 +243,23 @@ class GlobalPlanner : public rclcpp::Node {
         ForwardHybridAStar::ProjectionDiagnostics * start_projection = nullptr,
         ForwardHybridAStar::ProjectionDiagnostics * goal_projection = nullptr,
         const ForwardHybridAStar::ProgressCallback & progress_callback =
-          ForwardHybridAStar::ProgressCallback());
+          ForwardHybridAStar::ProgressCallback(),
+        const std::string & route_backend_override = "");
+      nav_msgs::msg::Path makeGraphRouteLocked(
+        const geometry_msgs::msg::PoseStamped & start,
+        const geometry_msgs::msg::PoseStamped & goal,
+        const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
+        bool * was_canceled = nullptr,
+        ForwardHybridAStar::SearchDiagnostics * search_diagnostics = nullptr,
+        ForwardHybridAStar::ProjectionDiagnostics * start_projection = nullptr,
+        ForwardHybridAStar::ProjectionDiagnostics * goal_projection = nullptr);
+      nav_msgs::msg::Path makeHybridRefinedRouteLocked(
+        const geometry_msgs::msg::PoseStamped & start,
+        const geometry_msgs::msg::PoseStamped & goal,
+        const nav_msgs::msg::Path & graph_route,
+        const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
+        bool * was_canceled = nullptr,
+        const std::string & debug_label = "");
       bool buildFrozenRouteLocked(
         const geometry_msgs::msg::PoseStamped & start,
         const geometry_msgs::msg::PoseStamped & goal,

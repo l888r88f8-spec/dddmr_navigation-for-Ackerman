@@ -76,6 +76,10 @@ void Perception3D_ROS::initial(){
   this->get_parameter("sensors_collected_frequency", sensors_collected_frequency_);
   RCLCPP_INFO(this->get_logger(), "sensors_collected_frequency: %.2f", sensors_collected_frequency_);//5.0
 
+  declare_parameter("enable_detail_log", rclcpp::ParameterValue(false));
+  this->get_parameter("enable_detail_log", enable_detail_log_);
+  RCLCPP_INFO(this->get_logger(), "enable_detail_log: %d", enable_detail_log_ ? 1 : 0);
+
   declare_parameter("dgraph_publish_frequency", rclcpp::ParameterValue(0.0));
   this->get_parameter("dgraph_publish_frequency", dgraph_publish_frequency_);
   RCLCPP_INFO(this->get_logger(), "dgraph_publish_frequency: %.2f", dgraph_publish_frequency_);//5.0
@@ -244,7 +248,7 @@ void Perception3D_ROS::sensorsUpdateLoop()
 
   // make sure to sleep for the remainder of our cycle time
   auto time_diff = (clock_->now() - mark_and_clear_start_time_).seconds();
-  if(time_diff > 1./sensors_collected_frequency_+0.01){
+  if(enable_detail_log_ && time_diff > 1./sensors_collected_frequency_+0.01){
     RCLCPP_WARN_THROTTLE(this->get_logger(), *clock_, 1.0, "Map update loop missed its desired rate of %.4fHz... the loop actually took %.4f seconds", sensors_collected_frequency_,
               time_diff);  
   }

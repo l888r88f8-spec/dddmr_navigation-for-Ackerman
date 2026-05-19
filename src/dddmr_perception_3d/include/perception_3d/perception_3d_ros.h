@@ -66,6 +66,7 @@ class Perception3D_ROS : public rclcpp::Node {
 
     double sensors_collected_frequency_;
     double dgraph_publish_frequency_;
+    bool enable_detail_log_;
     void sensorsUpdateLoop();
     void dGraphPublishLoop();
     
