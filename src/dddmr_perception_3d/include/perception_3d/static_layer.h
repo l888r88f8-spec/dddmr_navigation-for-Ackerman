@@ -31,6 +31,7 @@
 #ifndef PERCEPTION_3D_STATIC_LAYER_H_
 #define PERCEPTION_3D_STATIC_LAYER_H_
 
+#include <perception_3d/ground_surface_filter.h>
 #include <perception_3d/sensor.h>
 
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -123,6 +124,11 @@ class StaticLayer: public Sensor{
     bool merge_ground_layers_;
     double merge_ground_xy_resolution_;
     double merge_ground_z_tolerance_;
+    bool force_single_ground_surface_;
+    double single_surface_max_slope_deg_;
+    double single_surface_z_margin_;
+    double single_surface_max_xy_shift_;
+    std::string single_surface_select_policy_;
 };
 
 }//end of name space

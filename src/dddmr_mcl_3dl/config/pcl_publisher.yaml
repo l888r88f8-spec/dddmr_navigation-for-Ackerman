@@ -13,6 +13,6 @@ pcl_publisher:
     ground_translate_x: 0.0
     ground_translate_y: 0.0
     ground_translate_z: 0.0
-    map_down_sample: 0.2
+    map_down_sample: 0.3
     ground_down_sample: 0.3
 

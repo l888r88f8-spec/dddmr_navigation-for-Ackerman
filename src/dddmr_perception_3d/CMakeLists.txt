@@ -27,6 +27,9 @@ find_package(pluginlib REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_geometry REQUIRED)
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+endif()
 
 find_package(PCL REQUIRED)
 find_package(OpenCV REQUIRED)
@@ -126,6 +129,17 @@ ament_target_dependencies(cluster_marking
   ${dependencies}
 )
 
+# ground surface filtering
+add_library(ground_surface_filter SHARED
+  src/ground_surface_filter.cpp
+)
+target_link_libraries(ground_surface_filter
+  ${PCL_LIBRARIES}
+)
+ament_target_dependencies(ground_surface_filter
+  ${dependencies}
+)
+
 #depth_camera_lib
 add_library(depth_camera_buffer SHARED
   plugins/depth_camera/depth_camera_observation.cpp
@@ -150,7 +164,7 @@ add_library(layers SHARED
   plugins/depth_camera/depth_camera_layer.cpp
 )
 target_link_libraries(layers
-  cluster_marking depth_camera_buffer stacked_perception_ros
+  cluster_marking depth_camera_buffer ground_surface_filter stacked_perception_ros
 )
 ament_target_dependencies(layers
   ${dependencies}
@@ -181,6 +195,7 @@ install(TARGETS
   stacked_perception_ros
   depth_camera_buffer
   cluster_marking
+  ground_surface_filter
   layers
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -211,7 +226,21 @@ install(FILES perception_3d_plugins.xml
 )
 
 ament_export_include_directories(include)
-ament_export_libraries(shared_data_sensor perception_sensor stacked_perception stacked_perception_ros cluster_marking depth_camera_buffer layers)
+ament_export_libraries(shared_data_sensor perception_sensor stacked_perception stacked_perception_ros cluster_marking ground_surface_filter depth_camera_buffer layers)
 ament_export_dependencies(${dependencies})
 pluginlib_export_plugin_description_file(perception_3d perception_3d_plugins.xml)
+
+if(BUILD_TESTING)
+  ament_add_gtest(test_ground_surface_filter
+    test/test_ground_surface_filter.cpp
+  )
+  target_link_libraries(test_ground_surface_filter
+    ground_surface_filter
+    ${PCL_LIBRARIES}
+  )
+  ament_target_dependencies(test_ground_surface_filter
+    ${dependencies}
+  )
+endif()
+
 ament_package()

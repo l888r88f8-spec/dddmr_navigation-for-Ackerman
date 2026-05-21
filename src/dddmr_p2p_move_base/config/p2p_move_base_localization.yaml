@@ -104,8 +104,13 @@ perception_3d_global:
         enable_edge_detection: true                              # 是否启用边缘检测
         generate_static_graph: false                              # 是否生成静态图缓存
         merge_ground_layers: true                                # 是否合并多层地面点
-        merge_ground_xy_resolution: 0.1                          # 合并地面 XY 分辨率（m）
-        merge_ground_z_tolerance: 0.15                           # 合并地面 Z 容差（m）
+        merge_ground_xy_resolution: 0.3                          # 合并地面 XY 分辨率（m）
+        merge_ground_z_tolerance: 0.1                            # 合并地面 Z 容差（m）
+        force_single_ground_surface: false                        # 是否强制输出单层连续地面
+        single_surface_max_slope_deg: 30.0                       # 连续坡面允许的最大坡度（deg）
+        single_surface_z_margin: 0.08                            # 连续坡面判定的 Z 余量（m）
+        single_surface_max_xy_shift: 0.05                        # 合并后允许的最大 XY 偏移（m）
+        single_surface_select_policy: "largest_connected"        # 单层地面选择策略 largest_connected/lowest/highest
 
     lidar:
       plugin: "perception_3d::MultiLayerSpinningLidar"           # 多线雷达插件

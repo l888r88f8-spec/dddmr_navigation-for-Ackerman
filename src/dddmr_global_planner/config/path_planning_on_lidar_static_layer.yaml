@@ -43,6 +43,14 @@ perception_3d_global:
           #if mapping mode is true, edge detection is automatically disabled
         enable_edge_detection: true
         generate_static_graph: false
+        merge_ground_layers: true
+        merge_ground_xy_resolution: 0.3
+        merge_ground_z_tolerance: 0.12
+        force_single_ground_surface: true
+        single_surface_max_slope_deg: 30.0
+        single_surface_z_margin: 0.08
+        single_surface_max_xy_shift: 0.05
+        single_surface_select_policy: "largest_connected"
           #the connection radius will be used
           #enable this value when using super dense ground say ground voxel size<=10 cm
 
