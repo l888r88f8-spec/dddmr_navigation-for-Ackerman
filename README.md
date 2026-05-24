@@ -48,9 +48,8 @@
 
 ```text
 map
-└── odom
-    └── base_link
-        └── lidar_link / laser_link / hesai_link
+└── base_link
+    └── lidar_link / laser_link / hesai_link
 ```
 
 ## 外部话题要求
@@ -104,19 +103,57 @@ ros2 launch p2p_move_base p2p_move_base_localization.launch.py \
   use_sim:=true
 ```
 
-## 下发目标
+## Web 控制台
 
-RViz 中可以使用两种方式下发目标：
+新增 `dddmr_web_control` 网页控制台，可在浏览器中查看 3D 地图、建图状态、系统资源占用，并下发初始位姿和导航目标点。
 
-- 发布 `geometry_msgs/msg/PoseStamped` 到 `/goal_pose_3d`，适合需要目标朝向的 Ackermann 车辆。
-- 使用 Publish Point 发布 `geometry_msgs/msg/PointStamped` 到 `/clicked_point`，脚本会自动转换成 `/p2p_move_base` action，目标朝向默认 `w=1.0`。
-
-也可以直接调用 action：
+启动网页控制台：
 
 ```bash
-ros2 action send_goal /p2p_move_base dddmr_sys_core/action/PToPMoveBase \
-"{target_pose: {header: {frame_id: map}, pose: {position: {x: 2.0, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}}"
+ros2 launch dddmr_web_control web_control.launch.py use_sim:=false
 ```
+
+仿真或 rosbag 环境可以统一：
+
+```bash
+ros2 launch dddmr_web_control web_control.launch.py use_sim:=true
+```
+
+启动后在浏览器访问：
+
+```text
+http://<机器人IP>:8080
+```
+
+### Web 控制台话题
+
+导航页面默认订阅：
+
+| 话题 | 类型 | 用途 |
+| --- | --- | --- |
+| `/lio_sam/localization/global_map` | `sensor_msgs/msg/PointCloud2` | 定位全局地图 |
+| `mapcloud` | `sensor_msgs/msg/PointCloud2` | 导航点云层 |
+| `/weighted_ground` | `sensor_msgs/msg/PointCloud2` | 可选目标点的地面点云 |
+| `/lio_sam/localization/odometry` | `nav_msgs/msg/Odometry` | 小车实时位姿 |
+| `/global_path` | `nav_msgs/msg/Path` | 规划路径，默认由 `path_topics` 指定 |
+| `/p2p_move_base/_action/status` | `action_msgs/msg/GoalStatusArray` | 导航状态，用于到达目标后自动清除目标箭头和路径 |
+
+建图页面默认订阅：
+
+| 话题 | 类型 | 用途 |
+| --- | --- | --- |
+| `/lio_sam/mapping/map_global` | `sensor_msgs/msg/PointCloud2` | 建图全局地图 |
+| `/lio_sam/mapping/ground_cloud_global` | `sensor_msgs/msg/PointCloud2` | 建图地面点 |
+| `/lio_sam/mapping/path` | `nav_msgs/msg/Path` | 建图路径 |
+| `/lio_sam/mapping/odometry` | `nav_msgs/msg/Odometry` | 建图里程计位姿 |
+
+网页中的 `Start` / `Stop` 按钮会由 `dddmr_web_control` 节点统一管理以下 launch：
+
+| 目标 | 启动命令 |
+| --- | --- |
+| Localization | `ros2 launch lio_sam_hesai localization_with_nonground.launch.py use_sim:=<use_sim> use_rviz:=false` |
+| Navigation | `ros2 launch p2p_move_base p2p_move_base_localization.launch.py use_sim:=<use_sim>` |
+| Mapping | `ros2 launch lio_sam_hesai mapping.launch.py use_sim:=<use_sim> use_rviz:=false` |
 
 ## Ackermann 相关参数
 
@@ -159,6 +196,7 @@ src/dddmr_perception_3d/                         # 3D 静态/动态感知层
 src/dddmr_local_planner/                         # 局部规划、轨迹生成、critics、恢复行为
 src/dddmr_mcl_3dl/                               # 地图 PCD 发布及 MCL 相关工具
 src/dddmr_sys_core/                              # 自定义 action 和状态定义
+src/dddmr_web_control/                           # 浏览器 3D 地图、导航/建图控制台和系统监控
 ```
 
 ## 致谢
