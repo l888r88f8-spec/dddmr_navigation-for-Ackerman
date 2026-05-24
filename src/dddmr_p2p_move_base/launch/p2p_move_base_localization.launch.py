@@ -37,18 +37,17 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'use_sim',
-            default_value='true', # set true only when replaying with /clock
+            default_value='false', # set true only when replaying with /clock
             description='Set use_sim_time for launched nodes.',
         ),
         DeclareLaunchArgument(
             'map_dir',
-            default_value='/home/robot/map/hesai_sim/GlobalMap.pcd', # change this to your global map pcd file path
+            default_value='/home/robot/map/hesai_sim2/GlobalMap.pcd', # change this to your global map pcd file path
             description='Path to the global map PCD file.',
         ),
         DeclareLaunchArgument(
             'ground_dir',
-            default_value='/home/robot/map/hesai_sim/GroundMap.pcd', # change this to your ground map pcd file path
-
+            default_value='/home/robot/map/hesai_sim2/GroundMap.pcd', # change this to your ground map pcd file path
             description='Path to the ground map PCD file.',
         ),
         DeclareLaunchArgument(

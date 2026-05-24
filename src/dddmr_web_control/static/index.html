@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DDDMR Web Control</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="app">
+      <section class="stage">
+        <div id="viewTabs" class="tabs sliding-tabs" data-active="3d">
+          <button id="tab3dMap" class="tab active" type="button">Navigation</button>
+          <button id="tabMapping" class="tab" type="button">Mapping</button>
+          <button id="tabSystem" class="tab" type="button">System</button>
+        </div>
+        <div id="view3d" class="viewport active">
+          <canvas id="mapCanvas3d"></canvas>
+          <div class="hud" id="hud">3D map ready</div>
+        </div>
+        <div id="viewSystem" class="viewport system-viewport">
+          <div class="system-board">
+            <section class="system-summary">
+              <article class="system-card cpu-card">
+                <div class="system-card-top">
+                  <span>CPU</span>
+                  <em id="systemCpuStatus" class="system-card-status">waiting</em>
+                </div>
+                <strong id="systemCpuTotal">--</strong>
+                <div class="system-meter"><div id="systemCpuMeter" class="system-meter-fill"></div></div>
+              </article>
+              <article class="system-card memory-card">
+                <div class="system-card-top">
+                  <span>Memory</span>
+                  <em id="systemMemoryStatus" class="system-card-status">waiting</em>
+                </div>
+                <strong id="systemMemory">--</strong>
+                <div class="system-meter"><div id="systemMemoryMeter" class="system-meter-fill"></div></div>
+              </article>
+              <article class="system-card swap-card">
+                <div class="system-card-top">
+                  <span>Swap</span>
+                  <em id="systemSwapStatus" class="system-card-status">waiting</em>
+                </div>
+                <strong id="systemSwap">--</strong>
+                <div class="system-meter"><div id="systemSwapMeter" class="system-meter-fill"></div></div>
+              </article>
+            </section>
+            <section class="cpu-core-panel">
+              <h2>CPU Cores</h2>
+              <div id="systemCpuCores" class="cpu-core-list"></div>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <header>
+          <h1>Web Control</h1>
+          <div class="header-status">
+            <div id="viewerCount" class="pill viewers">0 watching</div>
+            <div id="serverState" class="pill waiting">waiting</div>
+          </div>
+        </header>
+
+        <div id="navigationSidebar" class="panel-view active" data-panel="navigation">
+        <section>
+          <h2>Mode</h2>
+          <div id="modeSegment" class="segmented" data-active="view">
+            <button class="mode active" data-mode="view" type="button">View</button>
+            <button class="mode" data-mode="initial" type="button">Initial Pose</button>
+            <button class="mode" data-mode="goal" type="button">Goal</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>Navigation Readiness</h2>
+          <div id="navigationReady" class="readiness waiting">waiting for relocalization</div>
+        </section>
+
+        <section>
+          <h2>Current Pose</h2>
+          <dl class="metrics">
+            <dt>x</dt><dd id="poseX">--</dd>
+            <dt>y</dt><dd id="poseY">--</dd>
+            <dt>z</dt><dd id="poseZ">--</dd>
+            <dt>yaw</dt><dd id="poseYaw">--</dd>
+            <dt>odom age</dt><dd id="odomAge">--</dd>
+          </dl>
+        </section>
+
+        <section>
+          <h2>Target Pose</h2>
+          <dl class="metrics">
+            <dt>x</dt><dd id="goalX">--</dd>
+            <dt>y</dt><dd id="goalY">--</dd>
+            <dt>z</dt><dd id="goalZ">--</dd>
+            <dt>yaw</dt><dd id="goalYaw">--</dd>
+          </dl>
+        </section>
+
+        <section>
+          <h2>Selection</h2>
+          <dl class="metrics">
+            <dt>x</dt><dd id="selX">--</dd>
+            <dt>y</dt><dd id="selY">--</dd>
+            <dt>z</dt><dd id="selZ">--</dd>
+            <dt>yaw</dt><dd id="selYaw">--</dd>
+          </dl>
+          <div class="actions">
+            <button id="publishPose" type="button" disabled>Publish Pose</button>
+          </div>
+          <p id="publishResult" class="result">No command published.</p>
+        </section>
+
+        <section>
+          <h2>Terminal Logs</h2>
+          <div class="terminal-list">
+            <article class="terminal">
+              <div class="terminal-header">
+                <span>Localization</span>
+                <span id="localizationLogState" class="pill waiting">disabled</span>
+              </div>
+              <div class="terminal-actions">
+                <button class="start-log" data-start-target="localization" type="button">Start</button>
+                <button class="stop-log" data-stop-target="localization" type="button">Stop</button>
+              </div>
+              <pre id="localizationLogs"></pre>
+            </article>
+            <article class="terminal">
+              <div class="terminal-header">
+                <span>Navigation</span>
+                <span id="navigationLogState" class="pill waiting">disabled</span>
+              </div>
+              <div class="terminal-actions">
+                <button class="start-log" data-start-target="navigation" type="button">Start</button>
+                <button class="stop-log" data-stop-target="navigation" type="button">Stop</button>
+              </div>
+              <pre id="navigationLogs"></pre>
+            </article>
+          </div>
+        </section>
+
+        <section>
+          <h2>Layers</h2>
+          <label><input type="checkbox" data-layer="global_map" checked> localization global_map</label>
+          <label><input type="checkbox" data-layer="mapcloud"> navigation mapcloud</label>
+          <label><input type="checkbox" data-layer="mapground" checked> ground mapground</label>
+          <label><input type="checkbox" id="pathLayer" checked> planning paths</label>
+          <label><input type="checkbox" id="vehicleLayer" checked> vehicle</label>
+        </section>
+
+        <section>
+          <h2>Sources</h2>
+          <div id="sources" class="sources"></div>
+        </section>
+        </div>
+
+        <div id="mappingSidebar" class="panel-view" data-panel="mapping">
+        <section>
+          <h2>Mapping Logs</h2>
+          <div class="terminal-list">
+            <article class="terminal">
+              <div class="terminal-header">
+                <span>Mapping</span>
+                <span id="mappingLogState" class="pill waiting">disabled</span>
+              </div>
+              <div class="terminal-actions">
+                <button class="start-log" data-start-target="mapping" type="button">Start</button>
+                <button class="stop-log" data-stop-target="mapping" type="button">Stop</button>
+              </div>
+              <pre id="mappingLogs"></pre>
+            </article>
+          </div>
+        </section>
+
+        <section>
+          <h2>Mapping Pose</h2>
+          <dl class="metrics">
+            <dt>x</dt><dd id="mappingPoseX">--</dd>
+            <dt>y</dt><dd id="mappingPoseY">--</dd>
+            <dt>z</dt><dd id="mappingPoseZ">--</dd>
+            <dt>yaw</dt><dd id="mappingPoseYaw">--</dd>
+            <dt>odom age</dt><dd id="mappingOdomAge">--</dd>
+          </dl>
+        </section>
+
+        <section>
+          <h2>Mapping Layers</h2>
+          <label><input type="checkbox" data-mapping-layer="global_map" checked> mapping global map</label>
+          <label><input type="checkbox" data-mapping-layer="ground" checked> mapping ground</label>
+          <label><input type="checkbox" id="mappingPathLayer" checked> mapping path</label>
+          <label><input type="checkbox" id="mappingVehicleLayer" checked> mapping pose</label>
+        </section>
+
+        <section>
+          <h2>Mapping Sources</h2>
+          <div id="mappingSources" class="sources"></div>
+        </section>
+        </div>
+      </aside>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
