@@ -20,8 +20,8 @@
 
 推荐环境：
 
-- Ubuntu 22.04
-- ROS 2 Humble
+- Ubuntu 22.04/24.04
+- ROS 2 Humble/Jazzy
 - C++17 编译器
 - `colcon`、`ament_cmake`
 - PCL、OpenCV、Eigen
