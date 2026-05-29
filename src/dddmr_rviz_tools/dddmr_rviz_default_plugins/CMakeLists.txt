@@ -26,11 +26,23 @@ find_package(rviz_common REQUIRED)
 find_package(rviz_rendering REQUIRED)
 find_package(rviz_ogre_vendor REQUIRED)
 
+find_package(gz_math_vendor QUIET)
+find_package(gz-math7 QUIET)
+if(gz-math7_FOUND)
+  set(DDDMR_MATH_TARGET gz-math7::gz-math7)
+else()
+  find_package(ignition_math6_vendor QUIET)
+  find_package(ignition-math6 REQUIRED)
+  if(TARGET ignition-math6::ignition-math6)
+    set(DDDMR_MATH_TARGET ignition-math6::ignition-math6)
+  else()
+    set(DDDMR_MATH_TARGET ignition-math6)
+  endif()
+endif()
+
 find_package(Qt5 REQUIRED COMPONENTS Widgets Test)
 
 find_package(geometry_msgs REQUIRED)
-
-find_package(ignition-math6 REQUIRED)
 
 find_package(image_transport REQUIRED)
 find_package(interactive_markers REQUIRED)
@@ -110,7 +122,7 @@ target_link_libraries(dddmr_rviz_default_plugins PUBLIC
 )
 
 target_link_libraries(dddmr_rviz_default_plugins PRIVATE
-  ignition-math6
+  ${DDDMR_MATH_TARGET}
 )
 
 # Causes the visibility macros to use dllexport rather than dllimport,
@@ -187,4 +199,3 @@ install(
 ament_package(
   CONFIG_EXTRAS "dddmr_rviz_default_plugins-extras.cmake"
 )
-

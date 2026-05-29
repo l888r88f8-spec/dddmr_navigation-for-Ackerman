@@ -112,14 +112,14 @@ def generate_launch_description():
                 {'use_sim_time': use_sim},
             ],
         ),
-        # Node(
-        #     package='rviz2',
-        #     executable='rviz2',
-        #     name='rviz2',
-        #     arguments=['-d', rviz_config],
-        #     emulate_tty=True,
-        #     parameters=[
-        #         {'use_sim_time': use_sim},
-        #     ],
-        # ),
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            arguments=['-d', rviz_config],
+            emulate_tty=True,
+            parameters=[
+                {'use_sim_time': use_sim},
+            ],
+        ),
     ])

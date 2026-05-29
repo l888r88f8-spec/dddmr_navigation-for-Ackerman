@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.5)
 
-project(map_editor_panel LANGUAGES CXX)
+project(map_editor_panel LANGUAGES C CXX)
 
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
@@ -26,6 +26,7 @@ find_package(rviz_rendering REQUIRED)
 find_package(rviz_common REQUIRED)
 
 find_package(sensor_msgs REQUIRED)
+find_package(MPI REQUIRED COMPONENTS C)
 find_package(pcl_conversions REQUIRED)
 
 find_package(PCL REQUIRED COMPONENTS filters common io)

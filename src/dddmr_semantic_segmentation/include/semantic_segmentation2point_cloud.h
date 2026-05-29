@@ -14,8 +14,17 @@
 #include <pcl/filters/voxel_grid.h>
 
 // ros
+#if __has_include(<cv_bridge/cv_bridge.hpp>)
+#include <cv_bridge/cv_bridge.hpp>
+#else
 #include <cv_bridge/cv_bridge.h>
+#endif
+
+#if __has_include(<image_geometry/pinhole_camera_model.hpp>)
+#include <image_geometry/pinhole_camera_model.hpp>
+#else
 #include <image_geometry/pinhole_camera_model.h>
+#endif
 
 #include <opencv2/core/core.hpp>
 #include <opencv2/imgproc/imgproc.hpp>

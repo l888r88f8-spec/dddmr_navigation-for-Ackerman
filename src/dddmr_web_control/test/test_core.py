@@ -292,18 +292,20 @@ def test_web_control_uses_compatible_qos_profiles_for_visualization_topics():
         / "web_control_node.py"
     ).read_text(encoding="utf-8")
 
+    assert "static_pointcloud_qos = QoSProfile(" in web_control_node
+    assert "durability=QoSDurabilityPolicy.TRANSIENT_LOCAL" in web_control_node
     assert "pointcloud_qos = QoSProfile(" in web_control_node
     assert "reliability=QoSReliabilityPolicy.BEST_EFFORT" in web_control_node
     assert "durability=QoSDurabilityPolicy.VOLATILE" in web_control_node
     assert "state_qos = QoSProfile(" in web_control_node
     assert "reliability=QoSReliabilityPolicy.RELIABLE" in web_control_node
     assert "PointCloud2," in web_control_node
+    assert "static_pointcloud_qos," in web_control_node
     assert "pointcloud_qos," in web_control_node
     assert "Odometry," in web_control_node
     assert "PathMsg," in web_control_node
     assert "GoalStatusArray," in web_control_node
     assert "state_qos," in web_control_node
-    assert "TRANSIENT_LOCAL" not in web_control_node
 
 
 def test_3d_target_selection_uses_shared_map_coordinate_frame():
@@ -480,6 +482,39 @@ def test_web_launch_exposes_single_use_sim_parameter_for_managed_launches():
     assert 'self.managed_launch_args(str(self.get_parameter("mapping_launch_args").value))' in web_control_node
 
 
+def test_web_launch_loads_default_parameters_from_config_yaml():
+    package_root = Path(__file__).resolve().parents[1]
+    launch_py = (package_root / "launch" / "web_control.launch.py").read_text(
+        encoding="utf-8"
+    )
+    setup_py = (package_root / "setup.py").read_text(encoding="utf-8")
+    config_yaml = (package_root / "config" / "web_control.yaml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "FindPackageShare" in launch_py
+    assert "PathJoinSubstitution" in launch_py
+    assert "DeclareLaunchArgument(" in launch_py
+    assert '"config_file"' in launch_py
+    assert '"web_control.yaml"' in launch_py
+    assert "config_file" in launch_py
+    assert "glob(\"config/*.yaml\")" in setup_py
+    assert "share/{package_name}/config" in setup_py
+
+    assert "dddmr_web_control:" in config_yaml
+    assert "ros__parameters:" in config_yaml
+    assert 'host: "0.0.0.0"                      # HTTP listen address' in config_yaml
+    assert 'port: 8080                           # HTTP listen port' in config_yaml
+    assert 'mapping_odom_topic: "/lio_sam/mapping/odometry"' in config_yaml
+    assert 'localization_launch_package: "lio_sam_hesai"' in config_yaml
+    assert 'localization_launch_file: "localization_with_nonground.launch.py"' in config_yaml
+    assert 'navigation_launch_package: "p2p_move_base"' in config_yaml
+    assert 'navigation_launch_file: "p2p_move_base_localization.launch.py"' in config_yaml
+    assert 'mapping_launch_package: "lio_sam_hesai"' in config_yaml
+    assert 'mapping_launch_file: "mapping.launch.py"' in config_yaml
+    assert 'managed_log_lines: 400               # Terminal log lines kept per process' in config_yaml
+
+
 def test_terminal_log_buffer_keeps_recent_lines_and_metadata():
     logs = TerminalLogBuffer("localization", max_lines=2)
     logs.append("first")
@@ -537,10 +572,13 @@ def test_web_control_manages_mapping_launch_and_clears_mapping_runtime_state():
         / "web_control_node.py"
     ).read_text(encoding="utf-8")
 
+    assert 'self.declare_parameter("mapping_launch_package", "lio_sam_hesai")' in web_control_node
+    assert 'self.declare_parameter("mapping_launch_file", "mapping.launch.py")' in web_control_node
     assert 'self.declare_parameter("mapping_launch_args", "use_rviz:=false")' in web_control_node
     assert '"mapping": TerminalLogBuffer(' in web_control_node
     assert "mapping_command = build_managed_launch_command(" in web_control_node
-    assert '"mapping.launch.py"' in web_control_node
+    assert 'str(self.get_parameter("mapping_launch_package").value)' in web_control_node
+    assert 'str(self.get_parameter("mapping_launch_file").value)' in web_control_node
     assert 'self.managed_processes["mapping"] = ManagedLaunchProcess(' in web_control_node
     assert "def clear_mapping_runtime_state(self)" in web_control_node
     assert "for cache in self.mapping_layers.values()" in web_control_node

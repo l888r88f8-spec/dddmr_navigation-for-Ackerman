@@ -1,0 +1,36 @@
+dddmr_web_control:
+  ros__parameters:
+    host: "0.0.0.0"                      # HTTP listen address
+    port: 8080                           # HTTP listen port
+    map_frame: "map"                     # Frame used for published poses
+
+    global_map_topic: "/lio_sam/localization/global_map"  # Localization global map
+    mapcloud_topic: "mapcloud"                         # Navigation point cloud
+    mapground_topic: "/weighted_ground"                 # Goal selection ground cloud
+    odom_topic: "/lio_sam/localization/odometry"        # Navigation odometry
+
+    mapping_global_map_topic: "/lio_sam/mapping/map_global"          # Mapping global map
+    mapping_ground_topic: "/lio_sam/mapping/ground_cloud_global"     # Mapping ground cloud
+    mapping_path_topic: "/lio_sam/mapping/path"                      # Mapping path
+    mapping_odom_topic: "/lio_sam/mapping/odometry"                  # Mapping odometry
+
+    initialpose_topic: "/initialpose"           # Initial pose output
+    goal_topic: "goal_pose_3d"                  # Goal pose output
+    action_status_topic: "/p2p_move_base/_action/status"  # Navigation action status
+    path_topics: "/global_path"                 # Comma-separated path topics
+
+    max_2d_points_per_layer: 60000        # Max 2D points sent per layer
+    max_3d_points_per_layer: 40000        # Max 3D points sent per layer
+    stale_timeout_sec: 2.0                # Source stale timeout seconds
+
+    localization_launch_package: "lio_sam_hesai"                  # Localization launch package
+    localization_launch_file: "localization_with_nonground.launch.py"  # Localization launch file
+    localization_launch_args: ""                                  # Extra localization launch args
+    navigation_launch_package: "p2p_move_base"                    # Navigation launch package
+    navigation_launch_file: "p2p_move_base_localization.launch.py" # Navigation launch file
+    navigation_launch_args: ""                                    # Extra navigation launch args
+    mapping_launch_package: "lio_sam_hesai"                       # Mapping launch package
+    mapping_launch_file: "mapping.launch.py"                      # Mapping launch file
+    mapping_launch_args: ""                                       # Extra mapping launch args
+    managed_log_lines: 400               # Terminal log lines kept per process
+    viewer_timeout_sec: 10.0             # Viewer heartbeat timeout seconds

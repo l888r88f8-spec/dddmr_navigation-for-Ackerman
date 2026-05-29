@@ -387,8 +387,18 @@ class WebControlNode(Node):
         self.declare_parameter("max_3d_points_per_layer", 40000)
         self.declare_parameter("stale_timeout_sec", 2.0)
         self.declare_parameter("use_sim", False)
+        self.declare_parameter("localization_launch_package", "lio_sam_hesai")
+        self.declare_parameter(
+            "localization_launch_file", "localization_with_nonground.launch.py"
+        )
         self.declare_parameter("localization_launch_args", "use_rviz:=false")
+        self.declare_parameter("navigation_launch_package", "p2p_move_base")
+        self.declare_parameter(
+            "navigation_launch_file", "p2p_move_base_localization.launch.py"
+        )
         self.declare_parameter("navigation_launch_args", "")
+        self.declare_parameter("mapping_launch_package", "lio_sam_hesai")
+        self.declare_parameter("mapping_launch_file", "mapping.launch.py")
         self.declare_parameter("mapping_launch_args", "use_rviz:=false")
         self.declare_parameter("managed_log_lines", 400)
         self.declare_parameter("viewer_timeout_sec", 10.0)
@@ -450,6 +460,12 @@ class WebControlNode(Node):
             "mapcloud": str(self.get_parameter("mapcloud_topic").value),
             "mapground": str(self.get_parameter("mapground_topic").value),
         }
+        static_pointcloud_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
         pointcloud_qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=1,
@@ -467,7 +483,7 @@ class WebControlNode(Node):
                 PointCloud2,
                 topic,
                 partial(self.pointcloud_callback, layer_name),
-                pointcloud_qos,
+                static_pointcloud_qos,
             )
 
         mapping_layer_topics = {
@@ -544,18 +560,18 @@ class WebControlNode(Node):
         )
 
         localization_command = build_managed_launch_command(
-            "lio_sam_hesai",
-            "localization_with_nonground.launch.py",
+            str(self.get_parameter("localization_launch_package").value),
+            str(self.get_parameter("localization_launch_file").value),
             self.managed_launch_args(str(self.get_parameter("localization_launch_args").value)),
         )
         navigation_command = build_managed_launch_command(
-            "p2p_move_base",
-            "p2p_move_base_localization.launch.py",
+            str(self.get_parameter("navigation_launch_package").value),
+            str(self.get_parameter("navigation_launch_file").value),
             self.managed_launch_args(str(self.get_parameter("navigation_launch_args").value)),
         )
         mapping_command = build_managed_launch_command(
-            "lio_sam_hesai",
-            "mapping.launch.py",
+            str(self.get_parameter("mapping_launch_package").value),
+            str(self.get_parameter("mapping_launch_file").value),
             self.managed_launch_args(str(self.get_parameter("mapping_launch_args").value)),
         )
         self.managed_processes["localization"] = ManagedLaunchProcess(

@@ -116,32 +116,6 @@ void StaticLayer::onInitialize()
   node_->get_parameter(name_ + ".support.merge_ground_z_tolerance", merge_ground_z_tolerance_);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "merge_ground_z_tolerance: %.2f", merge_ground_z_tolerance_);
 
-  node_->declare_parameter(name_ + ".support.force_single_ground_surface", rclcpp::ParameterValue(false));
-  node_->get_parameter(name_ + ".support.force_single_ground_surface", force_single_ground_surface_);
-  RCLCPP_INFO(node_->get_logger().get_child(name_), "force_single_ground_surface: %d", force_single_ground_surface_);
-
-  node_->declare_parameter(name_ + ".support.single_surface_max_slope_deg", rclcpp::ParameterValue(20.0));
-  node_->get_parameter(name_ + ".support.single_surface_max_slope_deg", single_surface_max_slope_deg_);
-  RCLCPP_INFO(node_->get_logger().get_child(name_), "single_surface_max_slope_deg: %.2f", single_surface_max_slope_deg_);
-
-  node_->declare_parameter(name_ + ".support.single_surface_z_margin", rclcpp::ParameterValue(0.05));
-  node_->get_parameter(name_ + ".support.single_surface_z_margin", single_surface_z_margin_);
-  RCLCPP_INFO(node_->get_logger().get_child(name_), "single_surface_z_margin: %.2f", single_surface_z_margin_);
-
-  node_->declare_parameter(name_ + ".support.single_surface_max_xy_shift", rclcpp::ParameterValue(0.05));
-  node_->get_parameter(name_ + ".support.single_surface_max_xy_shift", single_surface_max_xy_shift_);
-  RCLCPP_INFO(node_->get_logger().get_child(name_), "single_surface_max_xy_shift: %.2f", single_surface_max_xy_shift_);
-
-  node_->declare_parameter(
-    name_ + ".support.single_surface_select_policy",
-    rclcpp::ParameterValue(std::string("largest_connected")));
-  node_->get_parameter(name_ + ".support.single_surface_select_policy", single_surface_select_policy_);
-  RCLCPP_INFO(
-    node_->get_logger().get_child(name_),
-    "single_surface_select_policy: %s",
-    single_surface_select_policy_.c_str());
-
-  
   shared_data_->mapping_mode_ = mapping_mode_;
   
   pub_dGraph_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>(name_ + "/dGraph", 2);
@@ -187,11 +161,6 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr StaticLayer::mergeGroundLayers(
   config.merge_ground_layers = merge_ground_layers_;
   config.merge_ground_xy_resolution = merge_ground_xy_resolution_;
   config.merge_ground_z_tolerance = merge_ground_z_tolerance_;
-  config.force_single_ground_surface = force_single_ground_surface_;
-  config.single_surface_max_slope_deg = single_surface_max_slope_deg_;
-  config.single_surface_z_margin = single_surface_z_margin_;
-  config.single_surface_max_xy_shift = single_surface_max_xy_shift_;
-  config.single_surface_select_policy = single_surface_select_policy_;
   return FilterGroundSurface(input_cloud, config);
 }
 
