@@ -2,7 +2,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
+from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable, TimerAction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -36,17 +36,17 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'use_sim',
-            default_value='true',
-            description='Set use_sim_time for launched nodes.',
+            default_value='false',
+            description='Set use_sim_time for launched nodes. Use true only when replaying with /clock.',
         ),
         DeclareLaunchArgument(
             'map_dir',
-            default_value='/home/robot/map/hesai_sim2/GlobalMap.pcd',
+            default_value='/home/clab/map/hesai_sim/GlobalMap.pcd',
             description='Path to the global map PCD file.',
         ),
         DeclareLaunchArgument(
             'ground_dir',
-            default_value='/home/robot/map/hesai_sim2/GroundMap.pcd',
+            default_value='/home/clab/map/hesai_sim/GroundMap.pcd',
             description='Path to the ground map PCD file.',
         ),
         DeclareLaunchArgument(
@@ -71,32 +71,37 @@ def generate_launch_description():
             ],
         ),
         Node(
-            package='global_planner',
-            executable='global_planner_node',
-            output='screen',
-            respawn=False,
-            emulate_tty=True,
-            parameters=[
-                localization_config,
-                {'use_sim_time': use_sim},
-            ],
-        ),
-        Node(
             package='tf2_ros',
             executable='static_transform_publisher',
             name='map2baselink',
             arguments=[
-                '-3.73',
-                '3.18',
-                '-0.5',
-                '0.0',
-                '0.0',
-                '0.0',
-                'map',
-                'base_link',
+                '--x', '-3.73',
+                '--y', '-3.18',
+                '--z', '-0.5',
+                '--roll', '0.0',
+                '--pitch', '0.0',
+                '--yaw', '0.0',
+                '--frame-id', 'map',
+                '--child-frame-id', 'base_link',
             ],
             parameters=[
                 {'use_sim_time': use_sim},
+            ],
+        ),
+        TimerAction(
+            period=2.0,
+            actions=[
+                Node(
+                    package='global_planner',
+                    executable='global_planner_node',
+                    output='screen',
+                    respawn=False,
+                    emulate_tty=True,
+                    parameters=[
+                        localization_config,
+                        {'use_sim_time': use_sim},
+                    ],
+                ),
             ],
         ),
         Node(
