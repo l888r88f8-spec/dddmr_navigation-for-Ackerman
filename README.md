@@ -18,7 +18,8 @@
 ```text
 map
 └── base_link
-    └── lidar_link / laser_link / hesai_link
+    └── lidar_link
+    └── imu_link
 ```
 
 ## 外部话题要求
