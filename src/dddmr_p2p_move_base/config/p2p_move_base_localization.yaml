@@ -35,16 +35,16 @@ global_plan_manager:
 # 全局规划器
 global_planner:
   ros__parameters:
-    enable_detail_log: false                                     # 是否开启详细日志
+    enable_detail_log: true                                     # 是否开启详细日志
     # use_pre_graph: true
     raw_route_backend: "hybrid_a_star"                           # graph_a_star/hybrid_a_star
 
     # graph_a_star 参数
     graph_a_star:
-      turning_weight: 0.1                                        # 转折惩罚，越大越偏向平滑
+      turning_weight: 0.5                                        # 转折惩罚，越大越偏向平滑
       a_star_expanding_radius: 0.5                               # 图搜索扩张半径（m）
       graph_path_smoothing:
-        enable: true                                              # 是否开启 graph 路径后处理平滑
+        enable: false                                              # 是否开启 graph 路径后处理平滑
         iterations: 16                                            # 平滑迭代次数
         weight: 0.35                                              # 单次平滑强度
         max_shift: 0.25                                           # 单点相对原路径最大偏移（m）

@@ -1,1 +1,25 @@
 docs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+*.egg
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+
+# C++
+*.o
+*.obj

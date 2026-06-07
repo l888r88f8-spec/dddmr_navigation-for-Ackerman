@@ -1170,6 +1170,8 @@ bool GlobalPlanner::buildFrozenRouteLocked(
     return false;
   }
 
+  const auto total_started_at = std::chrono::steady_clock::now();
+
   if(was_canceled != nullptr){
     *was_canceled = false;
   }
@@ -1267,6 +1269,13 @@ bool GlobalPlanner::buildFrozenRouteLocked(
     if(request_result_class != nullptr){
       *request_result_class = "planner_canceled";
     }
+    if(enable_detail_log_){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "global_planner total timing: backend=%s, result=planner_canceled, total_time=%.3f ms",
+        raw_route_backend_.c_str(),
+        elapsed_seconds(total_started_at) * 1000.0);
+    }
     frozen_route->poses.clear();
     return false;
   }
@@ -1318,6 +1327,16 @@ bool GlobalPlanner::buildFrozenRouteLocked(
 
   *frozen_route = *raw_route;
   if(raw_route->poses.empty()){
+    if(enable_detail_log_){
+      const std::string result_class =
+        request_result_class ? *request_result_class : "failed_raw_route";
+      RCLCPP_WARN(
+        this->get_logger(),
+        "global_planner total timing: backend=%s, result=%s, total_time=%.3f ms",
+        raw_route_backend_.c_str(),
+        result_class.c_str(),
+        elapsed_seconds(total_started_at) * 1000.0);
+    }
     return false;
   }
 
@@ -1327,6 +1346,13 @@ bool GlobalPlanner::buildFrozenRouteLocked(
     }
     if(request_result_class != nullptr){
       *request_result_class = "planner_canceled";
+    }
+    if(enable_detail_log_){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "global_planner total timing: backend=%s, result=planner_canceled, total_time=%.3f ms",
+        raw_route_backend_.c_str(),
+        elapsed_seconds(total_started_at) * 1000.0);
     }
     frozen_route->poses.clear();
     return false;
@@ -1355,12 +1381,28 @@ bool GlobalPlanner::buildFrozenRouteLocked(
       if(request_result_class != nullptr){
         *request_result_class = "planner_canceled";
       }
+      if(enable_detail_log_){
+        RCLCPP_WARN(
+          this->get_logger(),
+          "global_planner total timing: backend=%s, result=hybrid_refine_canceled, total_time=%.3f ms",
+          raw_route_backend_.c_str(),
+          elapsed_seconds(total_started_at) * 1000.0);
+      }
       frozen_route->poses.clear();
       return false;
     }
   }
   if(request_result_class != nullptr){
     *request_result_class = "succeeded";
+  }
+  if(enable_detail_log_){
+    RCLCPP_INFO(
+      this->get_logger(),
+      "global_planner total timing: backend=%s, result=succeeded, total_time=%.3f ms, raw_route_poses=%zu, frozen_route_poses=%zu",
+      raw_route_backend_.c_str(),
+      elapsed_seconds(total_started_at) * 1000.0,
+      raw_route->poses.size(),
+      frozen_route->poses.size());
   }
   return true;
 }
