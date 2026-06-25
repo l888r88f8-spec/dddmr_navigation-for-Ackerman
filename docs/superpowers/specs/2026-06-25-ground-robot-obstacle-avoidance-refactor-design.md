@@ -48,8 +48,48 @@ LIO-SAM / localization odometry
 4. 动态障碍短时出现时，优先局部处理或等待 1-3 秒。
 5. 全局快速规划目标耗时：常规场景小于 1-2 秒。
 6. 精细全局规划可以较慢，但不能阻塞局部控制循环。
+7. 必须能在 Jetson Orin NX 上与重定位、雷达驱动、IMU 驱动同时运行。
+8. 避障模块不能独占 CPU、内存带宽或 ROS executor，必须提供可配置预算和降级策略。
 
-### 2.3 安全目标
+### 2.3 平台预算目标
+
+目标部署平台为 Jetson Orin NX。避障重构不能假设有桌面级 CPU/GPU 资源，必须为共机运行预留预算：
+
+```text
+同机常驻模块：
+  - 雷达驱动
+  - IMU 驱动
+  - LIO-SAM / 重定位
+  - TF / robot_state_publisher
+  - p2p_move_base
+  - global_planner
+  - local_planner / obstacle layer
+  - RViz 可选，实车长期运行时不作为必需模块
+```
+
+建议预算起点：
+
+```yaml
+orin_nx_budget:
+  local_obstacle_layer_cpu_percent_target: 15
+  local_planner_cpu_percent_target: 20
+  navigation_supervisor_cpu_percent_target: 5
+  global_planner_cpu_percent_target_when_active: 35
+  navigation_memory_target_mb: 700
+  navigation_memory_hard_limit_mb: 1200
+  max_local_planning_time_ms: 50
+  max_obstacle_update_time_ms: 50
+  max_end_to_end_local_cycle_ms: 80
+```
+
+预算解释：
+
+1. 以上预算是导航新增模块的目标，不包含重定位和驱动。
+2. 全局规划允许短时高 CPU，但必须低频触发，且不能阻塞局部安全停车。
+3. RViz、全量候选轨迹发布、全分辨率 debug 点云不应在实车常态运行中开启。
+4. 如果 Orin NX 电源模式、散热或频率限制导致性能下降，系统必须自动降级采样和 debug，而不是继续超时运行。
+
+### 2.4 安全目标
 
 1. 硬碰撞检查必须保留，任何候选轨迹与车体 footprint 冲突时直接拒绝。
 2. 近障碍区域使用连续代价，而不是只有碰撞/不碰撞二值判断。
@@ -566,27 +606,30 @@ local_obstacle_layer:
   update_frequency: 15.0
   frame_id: "map"
   robot_base_frame: "base_link"
-  forward_range: 10.0
-  backward_range: 3.0
-  lateral_range: 5.0
-  resolution: 0.05
+  forward_range: 8.0
+  backward_range: 2.0
+  lateral_range: 4.0
+  resolution: 0.10
   obstacle_persistence_sec: 0.8
   dynamic_prediction_horizon_sec: 2.0
   min_cluster_points: 5
   dynamic_velocity_threshold: 0.2
   unknown_obstacle_confidence_threshold: 0.4
+  max_points_per_snapshot: 120000
+  voxel_leaf_size: 0.08
 
 ackermann_local_planner:
   controller_frequency: 15.0
-  horizon_sec: 3.0
-  horizon_distance: 5.0
+  horizon_sec: 2.5
+  horizon_distance: 4.0
   velocity_samples: [0.0, 0.08, 0.2, 0.3]
-  curvature_samples: [-1.0, -0.65, -0.35, 0.0, 0.35, 0.65, 1.0]
+  curvature_samples: [-1.0, -0.5, 0.0, 0.5, 1.0]
   min_clearance: 0.25
   comfort_clearance: 0.8
   max_lateral_accel: 1.5
   max_steer: 0.238
   wheelbase: 0.46
+  max_candidate_trajectories: 80
 
 trajectory_costs:
   obstacle_distance_weight: 3.0
@@ -612,6 +655,19 @@ global_planner_manager:
   allow_background_refine: true
   planner_timeout_sec: 5.0
   min_request_interval_sec: 3.0
+
+runtime_limits:
+  target_platform: "jetson_orin_nx"
+  max_local_planning_time_ms: 50
+  max_obstacle_update_time_ms: 50
+  max_end_to_end_local_cycle_ms: 80
+  max_candidate_trajectories: 80
+  max_dynamic_obstacles: 48
+  max_points_per_snapshot: 120000
+  max_costmap_cells: 120000
+  max_navigation_memory_mb: 1200
+  debug_publish_default: false
+  max_debug_publish_rate: 2.0
 ```
 
 具体数值需要通过实车或 rosbag 调试确认，以上是设计起点。
@@ -785,6 +841,8 @@ if (!std::isfinite(cost)) {
 5. RViz debug 发布必须可关闭，且不得阻塞控制循环。
 6. 全局规划 action 必须有超时和取消机制。
 7. 日志必须 throttle，避免高频刷屏拖慢控制。
+8. Jetson Orin NX 共机运行时，避障模块必须限制点云规模、栅格规模、候选轨迹数量和 debug 发布频率。
+9. 全局规划不得与局部规划在同一高优先级 executor 中长时间争抢线程。
 
 建议控制周期预算：
 
@@ -792,9 +850,13 @@ if (!std::isfinite(cost)) {
 runtime_limits:
   max_local_planning_time_ms: 50
   max_obstacle_update_time_ms: 50
-  max_candidate_trajectories: 128
-  max_dynamic_obstacles: 64
-  max_debug_publish_rate: 5.0
+  max_end_to_end_local_cycle_ms: 80
+  max_candidate_trajectories: 80
+  max_dynamic_obstacles: 48
+  max_points_per_snapshot: 120000
+  max_costmap_cells: 120000
+  max_navigation_memory_mb: 1200
+  max_debug_publish_rate: 2.0
 ```
 
 超过预算时：
@@ -804,7 +866,136 @@ runtime_limits:
 3. 降低候选轨迹采样密度。
 4. 必要时进入安全停车状态。
 
-### 8.6 故障隔离与降级
+### 8.6 Jetson Orin NX 共机运行约束
+
+Orin NX 上同时运行重定位、雷达驱动、IMU 驱动和导航时，避障设计必须采用“预算驱动”的实现方式。
+
+#### 8.6.1 线程与 executor
+
+建议：
+
+1. 雷达/IMU 驱动和重定位优先级高于 debug 和后台精细规划。
+2. 局部规划循环使用固定频率 timer，不允许被全局规划 action 长时间阻塞。
+3. `LocalObstacleLayer` 更新和 `AckermannLocalPlanner` 控制循环可以分离 executor，但通过 snapshot 交换数据。
+4. 后台 `hybrid_a_star` 精修使用低优先级线程或独立 callback group。
+5. RViz debug 发布使用低频 timer，不在控制循环内直接构建大消息。
+
+建议线程模型：
+
+```text
+executor_high_priority:
+  - odom callback
+  - TF update
+  - local planner timer
+  - safety stop timer
+
+executor_normal:
+  - local obstacle update
+  - obstacle tracker
+  - global planner action client
+
+executor_low_priority:
+  - debug publish
+  - background hybrid refine
+```
+
+#### 8.6.2 点云与栅格预算
+
+点云处理必须在进入避障层前做空间裁剪和体素降采样：
+
+```text
+先裁剪 ROI：
+  x: [-2 m, +8 m]
+  y: [-4 m, +4 m]
+  z: 按车辆可碰撞高度范围
+
+再体素降采样：
+  leaf_size: 0.08-0.12 m
+
+最后限制点数：
+  max_points_per_snapshot: 120000
+```
+
+局部 costmap 不应超过固定栅格预算。例如：
+
+```text
+ROI: 10 m x 8 m
+resolution: 0.10 m
+cells: 100 x 80 = 8000
+```
+
+只有在确实需要更精细近场碰撞时，才对车体附近小范围使用 0.05 m 局部分辨率。禁止全局大范围使用高分辨率 costmap。
+
+#### 8.6.3 候选轨迹预算
+
+候选轨迹数量必须受限，并按场景自适应：
+
+```text
+正常跟踪：
+  15-25 条候选轨迹
+
+检测到近障碍：
+  40-80 条候选轨迹
+
+计算超时或 CPU 压力高：
+  降回 15-25 条，并保留停车轨迹
+```
+
+禁止每周期生成数百条轨迹再全量做高精度碰撞检查。轨迹评价应分级：
+
+1. 粗检查：快速 footprint / 栅格碰撞。
+2. 中检查：distance map clearance。
+3. 精检查：只对候选前几名做更密集采样。
+
+#### 8.6.4 Debug 与日志预算
+
+实车默认：
+
+1. 不发布所有候选轨迹。
+2. 不发布全量 rejected trajectories。
+3. 不发布全量 costmap 点云。
+4. 只发布 selected trajectory、状态、关键 reason code。
+5. debug topic 有订阅者且显式开启时才构建消息。
+
+日志必须 throttle。高频循环中禁止每周期输出 warning。
+
+#### 8.6.5 运行时预算监控
+
+建议增加轻量预算监控：
+
+```cpp
+struct RuntimeBudgetStats {
+  double obstacle_update_ms;
+  double local_planning_ms;
+  double local_cycle_ms;
+  std::size_t snapshot_points;
+  std::size_t costmap_cells;
+  std::size_t candidate_count;
+  std::size_t dynamic_obstacle_count;
+  double process_rss_mb;
+  bool budget_exceeded;
+};
+```
+
+当连续超预算时：
+
+```text
+level 1:
+  降低 debug 发布频率
+
+level 2:
+  降低候选轨迹数量
+  降低动态障碍预测频率
+
+level 3:
+  降低 obstacle layer 更新频率
+  只保留硬碰撞与低速轨迹
+
+level 4:
+  安全停车并报告 resource_budget_exceeded
+```
+
+### 8.7 故障隔离与降级
 
 任何单一模块异常不应导致车辆继续危险行驶。
 
@@ -816,8 +1007,9 @@ runtime_limits:
 4. State Lattice 无可行轨迹：停车并交给 Supervisor 判断等待或重规划。
 5. 快速全局规划失败：保持停车或尝试恢复，不直接清空当前安全路线。
 6. 后台精细规划失败：不影响当前已可执行路线。
+7. Orin NX 资源预算连续超限：降低采样和 debug；仍超限则安全停车。
 
-### 8.7 安全验收标准
+### 8.8 安全验收标准
 
 进入实车测试前必须满足：
 
@@ -828,6 +1020,8 @@ runtime_limits:
 5. 全局规划超时不会阻塞局部安全停车。
 6. 后台规划旧结果不会覆盖新路线。
 7. debug topic 无订阅者时不做昂贵序列化。
+8. 在 Jetson Orin NX 上与重定位、雷达驱动、IMU 驱动同时运行时，局部规划周期不持续超预算。
+9. 长时间运行时 RSS 内存稳定，不能出现持续增长。
 
 ## 9. 日志与可视化
 
@@ -912,6 +1106,7 @@ global replan requested:
 4. 将单次 collision 改为短时 blocked wait 或 local avoidance candidate。
 5. 增加 `min_replan_interval`。
 6. 增加日志字段。
+7. 增加 runtime budget 统计字段。
 
 验收：
 
@@ -920,6 +1115,7 @@ global replan requested:
 3. 全局规划请求频率明显下降。
 4. 所有重规划入口都有结构化 reason code。
 5. 空路径、空点云、TF stale 不会导致崩溃或继续危险行驶。
+6. Orin NX 上与重定位和驱动共机运行时能输出局部周期耗时、点数和内存统计。
 
 ### 阶段 2：LocalObstacleLayer
 
@@ -935,6 +1131,7 @@ global replan requested:
 6. 提供 RViz 可视化。
 7. 实现固定容量缓存和输入裁剪。
 8. 实现不可变 snapshot 输出。
+9. 实现 ROI 裁剪、体素降采样和最大点数限制。
 
 验收：
 
@@ -943,6 +1140,7 @@ global replan requested:
 3. distance map 能正确表达窄通道障碍距离。
 4. 高频 rosbag 回放时内存不持续增长。
 5. 并发读取 snapshot 时无数据竞争。
+6. 输入大点云时不会超过 `max_points_per_snapshot` 和内存预算。
 
 ### 阶段 3：Ackermann State Lattice 局部规划
 
@@ -958,6 +1156,7 @@ global replan requested:
 6. 与现有 RPP 保持可切换。
 7. 对所有候选轨迹做 NaN/Inf 和边界检查。
 8. 增加每周期最大计算预算。
+9. 实现候选轨迹数量自适应降级。
 
 验收：
 
@@ -967,6 +1166,7 @@ global replan requested:
 4. 不再依赖单条 RPP 轨迹决定是否全局重规划。
 5. 任意异常轨迹输入只会被拒绝，不会导致崩溃。
 6. 超过计算预算时能降级到安全停车或低速轨迹。
+7. Orin NX 共机运行时，局部规划周期在目标预算内，无持续超时。
 
 ### 阶段 4：NavigationSupervisor 重构
 
@@ -999,6 +1199,7 @@ global replan requested:
 3. 初始规划或后台精修使用 `hybrid_a_star`。
 4. 增加规划超时和取消策略。
 5. 处理后台精修结果的安全切换。
+6. 后台精修使用低优先级执行，不抢占局部控制循环。
 
 验收：
 
@@ -1006,6 +1207,7 @@ global replan requested:
 2. 慢速 hybrid 规划不会阻塞局部控制。
 3. stale planner result 不会覆盖当前路径。
 4. 全局规划超时和取消不会泄漏 action handle 或残留活动请求。
+5. Orin NX 上触发全局规划时，局部安全停车仍按周期运行。
 
 ### 阶段 6：动态障碍跟踪与预测
 
@@ -1054,7 +1256,36 @@ global replan requested:
 4. 长时间 rosbag 回放：检查 RSS 内存是否稳定。
 5. 高频 debug 开关测试：确认无订阅者时不做昂贵发布。
 
-### 11.3 仿真测试
+### 11.3 Orin NX 共机预算测试
+
+必须在 Jetson Orin NX 上做共机测试：
+
+运行模块：
+
+1. 雷达驱动。
+2. IMU 驱动。
+3. 重定位或 LIO-SAM localization。
+4. p2p_move_base。
+5. global_planner。
+6. LocalObstacleLayer。
+7. AckermannLocalPlanner。
+
+测试要求：
+
+1. 连续运行不少于 30 分钟。
+2. 记录 CPU、RSS 内存、局部规划周期耗时、障碍层更新时间、点云 snapshot 点数。
+3. 开启一次全局快速规划，确认局部安全停车不被阻塞。
+4. 开启和关闭 debug topic 各测试一次。
+5. 触发预算降级，确认系统能降低候选轨迹数或 debug 频率。
+
+验收指标：
+
+1. 局部规划周期不持续超过 `max_end_to_end_local_cycle_ms`。
+2. RSS 内存无持续线性增长。
+3. 雷达/IMU/重定位 topic 频率不因导航 debug 明显掉频。
+4. 预算超限时系统降级，不崩溃、不继续危险行驶。
+
+### 11.4 仿真测试
 
 场景：
 
@@ -1078,8 +1309,9 @@ global replan requested:
 8. 局部规划周期耗时。
 9. 内存占用曲线。
 10. stale data 丢弃次数。
+11. 预算降级触发次数。
 
-### 11.4 实车测试
+### 11.5 实车测试
 
 建议按风险从低到高：
 
