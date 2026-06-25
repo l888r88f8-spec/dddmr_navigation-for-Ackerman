@@ -651,11 +651,189 @@ local_planner:
 
 这样可以在调试期随时回退。
 
-## 8. 日志与可视化
+## 8. 逻辑完整性、内存与资源安全
+
+本重构会引入局部地图、候选轨迹、动态障碍跟踪和多线程 ROS callback。设计上必须把安全性作为一等约束，避免出现越界访问、悬空引用、数据竞争、内存膨胀、旧数据误用和异常状态下继续行驶等问题。
+
+### 8.1 逻辑完整性原则
+
+所有模块必须遵守以下原则：
+
+1. 单一职责：`LocalObstacleLayer` 只负责环境表达，`AckermannLocalPlanner` 只负责局部轨迹选择，`NavigationSupervisor` 只负责行为决策，`GlobalPlannerManager` 只负责全局规划请求管理。
+2. 结构化状态：模块之间传递结构化结果，不使用字符串判断核心逻辑。
+3. 显式时间戳：所有感知快照、轨迹、TF、odom、全局路径都必须携带时间戳。
+4. 旧数据拒绝：超过时效的数据不得参与避障决策。
+5. 失败优先安全：任何无法判断的状态默认停车或降级，不默认继续加速。
+6. 重规划防抖：全局重规划必须经过连续确认，不能由单帧输入触发。
+7. 决策可解释：每次停车、等待、绕障、重规划都必须有明确 reason code。
+
+建议定义统一 reason code：
+
+```cpp
+enum class NavigationReason {
+  None,
+  LocalObstacleDetected,
+  DynamicObstacleYield,
+  StaticBlockageConfirmed,
+  NoFeasibleLocalTrajectory,
+  RouteDeviationConfirmed,
+  TfStale,
+  OdomJumpDetected,
+  PerceptionStale,
+  GlobalPlannerTimeout,
+  GlobalPlannerFailed,
+  RecoveryExceeded
+};
+```
+
+禁止用日志字符串作为状态机输入。
+
+### 8.2 内存安全原则
+
+C++ 实现必须采用 RAII 和明确所有权，不允许裸指针表达对象生命周期。
+
+要求：
+
+1. 长生命周期对象使用值语义、`std::unique_ptr` 或 `std::shared_ptr`，所有权必须清晰。
+2. callback 捕获 `this` 时必须保证对象生命周期，异步 callback 中优先使用 `std::weak_ptr` 锁定。
+3. 不把局部变量地址传给异步任务、timer、action callback 或长期缓存。
+4. 点云、栅格、轨迹数组访问必须做边界检查。
+5. 所有 `size_t` 与 `int` 转换必须显式检查，避免负数转为巨大无符号数。
+6. 对空指针、空点云、空路径、空轨迹集合必须有明确处理分支。
+7. 不允许无界增长的历史缓存。所有缓存必须有最大时长和最大容量。
+8. `pcl::PointCloud`、KD-tree、distance map snapshot 对外发布时使用不可变快照，避免读写同时发生。
+
+示例约束：
+
+```cpp
+struct ObstacleHistoryConfig {
+  double max_age_sec = 1.0;
+  std::size_t max_clusters = 256;
+  std::size_t max_points_per_snapshot = 200000;
+};
+```
+
+当输入超过限制时，系统应降采样、裁剪或拒绝当前帧，并输出诊断，而不是继续分配无限内存。
+
+### 8.3 并发与线程安全
+
+ROS2 中点云 callback、odom callback、TF 查询、timer、action result 可能并发运行。重构后必须明确数据交换模型。
+
+建议采用 snapshot 模型：
+
+```text
+writer callback
+  -> 构建新 LocalObstacleSnapshot
+  -> 原子替换 shared_ptr<const Snapshot>
+
+planner loop
+  -> 拷贝 shared_ptr<const Snapshot>
+  -> 在整个控制周期只读该 snapshot
+```
+
+要求：
+
+1. 高频规划循环不得长时间持有感知层写锁。
+2. 不允许在持有多个 mutex 时调用外部 callback、ROS publish、action send。
+3. mutex 加锁顺序必须固定，避免死锁。
+4. 动态障碍 tracker 写入和局部规划读取必须通过快照隔离。
+5. 全局规划结果回调只能请求状态切换，不能直接覆盖当前正在使用的局部规划数据。
+6. 后台 hybrid refine 的结果必须带 `request_id`、`goal_seq`、`route_version`，过期结果必须丢弃。
+
+建议统一锁顺序：
+
+```text
+route_mutex
+  -> obstacle_snapshot_mutex
+  -> planner_state_mutex
+```
+
+如果无法遵守固定顺序，应改为快照拷贝，避免嵌套锁。
+
+### 8.4 边界与数值安全
+
+轨迹评价和距离场计算必须处理异常数值。
+
+要求：
+
+1. 所有输入位姿、速度、曲率、距离必须检查 `std::isfinite`。
+2. yaw、曲率、速度上限必须 clamp 到物理限制。
+3. distance map 坐标转换必须检查栅格索引范围。
+4. footprint 多边形顶点数量不足时拒绝轨迹。
+5. 轨迹 horizon 为 0 或采样点为空时返回安全失败。
+6. 代价函数不得产生 NaN/Inf；任何 NaN/Inf 代价直接视为不可行轨迹。
+7. 时间差为负或过大时视为时钟异常，停车并输出诊断。
+
+代价计算建议：
+
+```cpp
+if (!std::isfinite(cost)) {
+  return TrajectoryScore::Rejected(RejectReason::InvalidNumericCost);
+}
+```
+
+### 8.5 资源安全与实时性
+
+避障不能因为输入异常或全局规划慢导致资源耗尽。
+
+要求：
+
+1. 局部 costmap 尺寸固定，不随障碍数量动态扩大。
+2. 候选轨迹数量有上限。
+3. 每个控制周期有最大计算预算。
+4. 动态障碍数量有上限，低置信度障碍可合并或裁剪。
+5. RViz debug 发布必须可关闭，且不得阻塞控制循环。
+6. 全局规划 action 必须有超时和取消机制。
+7. 日志必须 throttle，避免高频刷屏拖慢控制。
+
+建议控制周期预算：
+
+```yaml
+runtime_limits:
+  max_local_planning_time_ms: 50
+  max_obstacle_update_time_ms: 50
+  max_candidate_trajectories: 128
+  max_dynamic_obstacles: 64
+  max_debug_publish_rate: 5.0
+```
+
+超过预算时：
+
+1. 优先保留低速停车轨迹。
+2. 跳过非关键 debug。
+3. 降低候选轨迹采样密度。
+4. 必要时进入安全停车状态。
+
+### 8.6 故障隔离与降级
+
+任何单一模块异常不应导致车辆继续危险行驶。
+
+降级策略：
+
+1. `LocalObstacleLayer` 过期：局部规划器只能输出减速或停车。
+2. `ObstacleTracker` 失败：退化为静态障碍 costmap，不做动态预测。
+3. distance map 生成失败：保留 footprint 硬碰撞检查。
+4. State Lattice 无可行轨迹：停车并交给 Supervisor 判断等待或重规划。
+5. 快速全局规划失败：保持停车或尝试恢复，不直接清空当前安全路线。
+6. 后台精细规划失败：不影响当前已可执行路线。
+
+### 8.7 安全验收标准
+
+进入实车测试前必须满足：
+
+1. ASan/UBSan 或等价工具下核心单元测试无内存错误。
+2. ThreadSanitizer 或人工并发审查覆盖关键 snapshot/lock 路径。
+3. 空点云、空路径、空轨迹、TF stale、NaN odom 输入均不会崩溃。
+4. rosbag 高频点云回放不会导致内存持续增长。
+5. 全局规划超时不会阻塞局部安全停车。
+6. 后台规划旧结果不会覆盖新路线。
+7. debug topic 无订阅者时不做昂贵序列化。
+
+## 9. 日志与可视化
 
 必须增加高质量诊断，否则避障调参会非常困难。
 
-### 8.1 日志
+### 9.1 日志
 
 建议每次状态切换输出：
 
@@ -690,8 +868,12 @@ global replan requested:
 6. 动态风险拒绝数量。
 7. 是否 TF/odom 异常。
 8. 是否 route deviation。
+9. reason code。
+10. snapshot age。
+11. local planning time。
+12. memory/resource limit 是否触发。
 
-### 8.2 RViz Topic
+### 9.2 RViz Topic
 
 建议发布：
 
@@ -716,7 +898,7 @@ global replan requested:
 4. 黄色：动态风险高。
 5. 灰色：路径偏差过大。
 
-## 9. 分阶段实施计划
+## 10. 分阶段实施计划
 
 ### 阶段 1：诊断与防抖
 
@@ -736,6 +918,8 @@ global replan requested:
 1. 单次点云误检不触发全局规划。
 2. 日志能明确区分 collision、route_deviation、oscillation、TF stale。
 3. 全局规划请求频率明显下降。
+4. 所有重规划入口都有结构化 reason code。
+5. 空路径、空点云、TF stale 不会导致崩溃或继续危险行驶。
 
 ### 阶段 2：LocalObstacleLayer
 
@@ -749,12 +933,16 @@ global replan requested:
 4. 实现 footprint collision query。
 5. 实现 distance map。
 6. 提供 RViz 可视化。
+7. 实现固定容量缓存和输入裁剪。
+8. 实现不可变 snapshot 输出。
 
 验收：
 
 1. 点云闪烁不会导致障碍状态剧烈跳变。
 2. 车体 footprint 碰撞检测结果与 RViz 可视化一致。
 3. distance map 能正确表达窄通道障碍距离。
+4. 高频 rosbag 回放时内存不持续增长。
+5. 并发读取 snapshot 时无数据竞争。
 
 ### 阶段 3：Ackermann State Lattice 局部规划
 
@@ -768,6 +956,8 @@ global replan requested:
 4. 实现代价函数。
 5. 输出最优轨迹和 cmd_vel。
 6. 与现有 RPP 保持可切换。
+7. 对所有候选轨迹做 NaN/Inf 和边界检查。
+8. 增加每周期最大计算预算。
 
 验收：
 
@@ -775,6 +965,8 @@ global replan requested:
 2. 窄通道中能选择中间安全轨迹。
 3. 无可行轨迹时能稳定停车。
 4. 不再依赖单条 RPP 轨迹决定是否全局重规划。
+5. 任意异常轨迹输入只会被拒绝，不会导致崩溃。
+6. 超过计算预算时能降级到安全停车或低速轨迹。
 
 ### 阶段 4：NavigationSupervisor 重构
 
@@ -793,6 +985,8 @@ global replan requested:
 1. 临时障碍不会立即全局重规划。
 2. 静态障碍持续阻塞后会全局重规划。
 3. 定位/TF 异常不被误报为障碍阻塞。
+4. 所有状态切换都有合法来源和目标。
+5. 旧全局规划结果不会覆盖当前路线。
 
 ### 阶段 5：全局规划两级化
 
@@ -811,6 +1005,7 @@ global replan requested:
 1. 避障失败后的快速重规划时间明显下降。
 2. 慢速 hybrid 规划不会阻塞局部控制。
 3. stale planner result 不会覆盖当前路径。
+4. 全局规划超时和取消不会泄漏 action handle 或残留活动请求。
 
 ### 阶段 6：动态障碍跟踪与预测
 
@@ -829,10 +1024,12 @@ global replan requested:
 1. 横穿障碍优先等待。
 2. 静止障碍持续存在时触发重规划。
 3. 车辆不朝预测碰撞区域加速。
+4. tracker 丢失目标时能安全退化为静态/未知障碍。
+5. 动态障碍缓存数量受限，不会无限增长。
 
-## 10. 测试方案
+## 11. 测试方案
 
-### 10.1 单元测试
+### 11.1 单元测试
 
 1. footprint collision query。
 2. distance map 生成。
@@ -840,8 +1037,24 @@ global replan requested:
 4. trajectory cost 计算。
 5. NavigationSupervisor 状态切换。
 6. replan throttle。
+7. 空点云、空路径、空轨迹输入。
+8. NaN/Inf 位姿、速度、代价输入。
+9. 栅格坐标越界访问保护。
+10. snapshot 生命周期与不可变读取。
+11. request_id / route_version 过期结果丢弃。
+12. 缓存容量和时间裁剪。
 
-### 10.2 仿真测试
+### 11.2 安全工具测试
+
+建议在实现后加入：
+
+1. AddressSanitizer：检查越界、use-after-free、double free。
+2. UndefinedBehaviorSanitizer：检查未定义行为、整数溢出等。
+3. ThreadSanitizer 或并发压力测试：检查 snapshot、callback、planner loop 数据竞争。
+4. 长时间 rosbag 回放：检查 RSS 内存是否稳定。
+5. 高频 debug 开关测试：确认无订阅者时不做昂贵发布。
+
+### 11.3 仿真测试
 
 场景：
 
@@ -862,8 +1075,11 @@ global replan requested:
 5. 到达时间。
 6. 停车次数。
 7. 重规划次数。
+8. 局部规划周期耗时。
+9. 内存占用曲线。
+10. stale data 丢弃次数。
 
-### 10.3 实车测试
+### 11.4 实车测试
 
 建议按风险从低到高：
 
@@ -876,9 +1092,9 @@ global replan requested:
 
 每次测试必须保存 rosbag 和日志，用于回放调参。
 
-## 11. 风险与应对
+## 12. 风险与应对
 
-### 11.1 计算量增加
+### 12.1 计算量增加
 
 风险：State Lattice + distance map 增加 CPU 开销。
 
@@ -889,7 +1105,7 @@ global replan requested:
 3. 缓存 distance map。
 4. 分离高频碰撞检查和低频动态跟踪。
 
-### 11.2 轨迹抖动
+### 12.2 轨迹抖动
 
 风险：左右绕行代价接近时，轨迹可能来回切换。
 
@@ -899,7 +1115,7 @@ global replan requested:
 2. 对上一周期选择轨迹加连续性奖励。
 3. 对频繁换边加惩罚。
 
-### 11.3 过度保守
+### 12.3 过度保守
 
 风险：安全距离和障碍膨胀过大导致窄通道无法通过。
 
@@ -909,7 +1125,7 @@ global replan requested:
 2. 窄通道中允许较低速度通过较小 comfort clearance。
 3. 用 footprint 精确碰撞替代过度圆形膨胀。
 
-### 11.4 动态障碍误分类
+### 12.4 动态障碍误分类
 
 风险：静态障碍被误判为动态，导致等待过久。
 
@@ -919,7 +1135,7 @@ global replan requested:
 2. 静止时间超过阈值转为静态阻塞。
 3. 保留人工可调参数。
 
-### 11.5 全局快速路径不满足 Ackermann
+### 12.5 全局快速路径不满足 Ackermann
 
 风险：`graph_a_star` 路径几何可达，但不满足车辆转弯半径。
 
@@ -930,19 +1146,52 @@ global replan requested:
 3. 必要时后台 hybrid refine。
 4. 快速路径不可跟踪时再请求精细规划。
 
-## 12. 推荐落地顺序
+### 12.6 内存或资源泄漏
+
+风险：点云历史、障碍 tracker、debug 消息、action 请求长期积累，导致内存持续增长。
+
+应对：
+
+1. 所有缓存设置最大容量和最大时间窗口。
+2. action 请求完成、取消、超时后必须释放 handle。
+3. debug 消息只在有订阅者或启用诊断时构建。
+4. 长时间 rosbag 回放作为验收项。
+
+### 12.7 数据竞争或死锁
+
+风险：感知 callback、规划循环、action result 同时访问路线、障碍和状态。
+
+应对：
+
+1. 采用不可变 snapshot 模型。
+2. 固定 mutex 加锁顺序。
+3. 不在持锁状态下调用 ROS publish 或 action send。
+4. 对关键路径做 ThreadSanitizer 或并发压力测试。
+
+### 12.8 异常输入导致危险输出
+
+风险：NaN 位姿、空路径、TF 时间跳变、栅格索引越界导致错误速度输出。
+
+应对：
+
+1. 所有输入先验证再进入规划。
+2. 非法输入统一返回安全失败状态。
+3. Supervisor 对非法输入默认停车并记录 reason code。
+
+## 13. 推荐落地顺序
 
 推荐不要一次性全量替换。更稳妥的顺序：
 
 1. 先实现诊断和重规划防抖。
-2. 再实现 LocalObstacleLayer。
-3. 再实现 State Lattice 局部规划器。
-4. 再重构 NavigationSupervisor。
-5. 最后做全局规划两级化和动态障碍预测。
+2. 同时建立内存、并发、边界输入的测试框架。
+3. 再实现 LocalObstacleLayer。
+4. 再实现 State Lattice 局部规划器。
+5. 再重构 NavigationSupervisor。
+6. 最后做全局规划两级化和动态障碍预测。
 
 这样每一步都可以单独验证，不会一次性引入太多不确定性。
 
-## 13. 最终结论
+## 14. 最终结论
 
 最适合该 Ackermann 地面机器人的避障重构方案是：
 
