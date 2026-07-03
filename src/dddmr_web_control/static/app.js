@@ -288,6 +288,17 @@ function clearNavigationSceneState() {
   updateTargetMarkers();
 }
 
+// mapcloud/mapground are published by the navigation process; clear their
+// cached point clouds immediately on navigation stop instead of waiting for
+// the throttled pollMaps3d to pull the now-empty backend cache.
+function clearNavigationLayers() {
+  ["mapcloud", "mapground"].forEach((name) => {
+    LAYERS[name].points3d = [];
+    LAYERS[name].lastFetch3d = 0;
+    updateLayerObject(name);
+  });
+}
+
 function clearMapSceneState() {
   if (state.mapSceneCleared) return;
   Object.keys(LAYERS).forEach((name) => {
@@ -399,7 +410,8 @@ async function pollState() {
 
 async function pollLogs() {
   try {
-    const data = await getJson("/api/logs");
+    const url = `/api/logs?localization=${lastLogSeq.localization}&navigation=${lastLogSeq.navigation}&mapping=${lastLogSeq.mapping}`;
+    const data = await getJson(url);
     updateTerminalLog("localization", data.logs && data.logs.localization);
     updateTerminalLog("navigation", data.logs && data.logs.navigation);
     updateTerminalLog("mapping", data.logs && data.logs.mapping);
@@ -562,7 +574,7 @@ function sourceRow(name, summary) {
   row.className = "source";
   const label = document.createElement("div");
   label.className = "name";
-  label.textContent = name;
+  label.textContent = String(name).replace(/^\/+/, "");
   const pill = document.createElement("div");
   pill.className = `pill ${summary.status}`;
   pill.textContent = summary.status;
@@ -581,6 +593,12 @@ function updateNavigationReadiness(readiness) {
   element.className = `readiness ${ready ? "ready" : "waiting"}`;
 }
 
+// Per-target cursor: the max line seq we have already rendered. The server
+// only returns lines with seq > this, so polling is incremental. 0 means
+// "nothing yet" and makes the server return the current full buffer, which we
+// replace into the element (first render / reconnect).
+const lastLogSeq = { localization: 0, navigation: 0, mapping: 0 };
+
 function updateTerminalLog(target, summary) {
   const stateElement = document.getElementById(`${target}LogState`);
   const outputElement = document.getElementById(`${target}Logs`);
@@ -589,10 +607,39 @@ function updateTerminalLog(target, summary) {
     stateElement.className = "pill error";
     return;
   }
-  const lines = summary.lines || [];
-  const atBottom = outputElement.scrollTop + outputElement.clientHeight >= outputElement.scrollHeight - 8;
-  outputElement.textContent = lines.length ? lines.join("\n") : "No output.";
-  if (atBottom) outputElement.scrollTop = outputElement.scrollHeight;
+  const lines = Array.isArray(summary.lines) ? summary.lines : [];
+  const seq = typeof summary.seq === "number" ? summary.seq : undefined;
+  const isInitial = lastLogSeq[target] === 0;
+
+  // A full textContent rewrite would wipe an active text selection in this
+  // log; only that case needs to defer. Incremental append adds a text node
+  // at the end and does not perturb offsets in existing text, so a selection
+  // there survives even while new lines keep arriving — no need to freeze.
+  const selection = window.getSelection();
+  const selectingHere =
+    selection &&
+    selection.rangeCount > 0 &&
+    outputElement.contains(selection.anchorNode) &&
+    selection.toString().length > 0;
+
+  const atBottom =
+    outputElement.scrollTop + outputElement.clientHeight >= outputElement.scrollHeight - 8;
+  if (seq === undefined || isInitial) {
+    // First render, reconnect, or legacy server without seq: replace contents.
+    if (!selectingHere) {
+      outputElement.textContent = lines.length ? lines.join("\n") : "No output.";
+      if (seq !== undefined) lastLogSeq[target] = seq;
+      if (atBottom) outputElement.scrollTop = outputElement.scrollHeight;
+    }
+  } else if (lines.length) {
+    // Incremental: append only the new lines, even while the user is selecting
+    // — appending a text node preserves any selection in earlier text.
+    outputElement.appendChild(document.createTextNode("\n" + lines.join("\n")));
+    lastLogSeq[target] = seq;
+    if (atBottom) outputElement.scrollTop = outputElement.scrollHeight;
+  } else if (seq !== undefined) {
+    lastLogSeq[target] = seq;
+  }
   if (!summary.enabled) {
     stateElement.textContent = "disabled";
     stateElement.className = "pill waiting";
@@ -832,6 +879,7 @@ async function stopManagedTarget(target) {
       pollMaps3d(true);
     } else if (target === "navigation") {
       clearNavigationSceneState();
+      clearNavigationLayers();
     }
     pollState();
     pollLogs();

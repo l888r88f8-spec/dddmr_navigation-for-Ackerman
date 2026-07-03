@@ -601,6 +601,12 @@ class WebControlNode(Node):
             self.action_status.clear()
             for cache in self.paths.values():
                 cache.clear()
+            # mapcloud/mapground are published by the navigation process; drop
+            # their last cached clouds so the viewer stops showing them after
+            # navigation stops. global_map is localization-owned, leave it.
+            for name in ("mapcloud", "mapground"):
+                if name in self.layers:
+                    self.layers[name].clear()
 
     def clear_map_runtime_state(self) -> None:
         with self.lock:
@@ -902,10 +908,11 @@ class WebControlNode(Node):
                 "points": data.get("points", []),
             }
 
-    def terminal_logs_payload(self) -> dict[str, Any]:
+    def terminal_logs_payload(self, cursors: dict[str, int] | None = None) -> dict[str, Any]:
+        cursors = cursors or {}
         return {
             "logs": {
-                target: log_buffer.snapshot()
+                target: log_buffer.delta(int(cursors.get(target, 0)))
                 for target, log_buffer in self.managed_logs.items()
             }
         }
@@ -1006,7 +1013,14 @@ class WebControlNode(Node):
                         topic = query.get("topic", [""])[0]
                         self.send_json(node.path_payload(topic))
                     elif parsed.path == "/api/logs":
-                        self.send_json(node.terminal_logs_payload())
+                        cursors: dict[str, int] = {}
+                        for target in node.managed_logs:
+                            raw = query.get(target, ["0"])[0]
+                            try:
+                                cursors[target] = max(0, int(raw))
+                            except (TypeError, ValueError):
+                                cursors[target] = 0
+                        self.send_json(node.terminal_logs_payload(cursors))
                     elif parsed.path == "/api/system":
                         self.send_json(node.system_payload())
                     elif parsed.path == "/api/mapping/state":

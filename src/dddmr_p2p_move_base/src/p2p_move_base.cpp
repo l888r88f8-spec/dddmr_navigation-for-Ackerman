@@ -30,8 +30,45 @@
 */
 #include <p2p_move_base/p2p_move_base.h>
 
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <vector>
+
+#include <p2p_move_base/local_obstacle_layer_ros.h>
+#include <tf2/LinearMath/Transform.h>
+
 namespace p2p_move_base
 {
+namespace
+{
+void transformLocalPoints(
+  std::vector<LocalPoint> * points,
+  const geometry_msgs::msg::TransformStamped & transform_msg)
+{
+  if (points == nullptr) {
+    return;
+  }
+
+  const auto & rotation_msg = transform_msg.transform.rotation;
+  const auto & translation_msg = transform_msg.transform.translation;
+  const tf2::Quaternion rotation(
+    rotation_msg.x,
+    rotation_msg.y,
+    rotation_msg.z,
+    rotation_msg.w);
+  const tf2::Transform transform(
+    rotation,
+    tf2::Vector3(translation_msg.x, translation_msg.y, translation_msg.z));
+
+  for (auto & point : *points) {
+    const tf2::Vector3 transformed = transform * tf2::Vector3(point.x, point.y, point.z);
+    point.x = transformed.x();
+    point.y = transformed.y();
+    point.z = transformed.z();
+  }
+}
+}  // namespace
 
 P2PMoveBase::P2PMoveBase(std::string name): Node(name)
 {
@@ -41,6 +78,11 @@ P2PMoveBase::P2PMoveBase(std::string name): Node(name)
   is_recoverying_succeed_ = false;
   terminal_goal_reason_ = "goal failed";
   current_route_result_class_ = "unknown";
+  min_replan_interval_sec_ = 3.0;
+  runtime_budget_safety_stop_enabled_ = false;
+  local_obstacle_layer_enabled_ = false;
+  local_obstacle_debug_cloud_enabled_ = false;
+  local_obstacle_base_frame_ = "base_link";
 }
 
 rclcpp_action::GoalResponse P2PMoveBase::handle_goal(
@@ -160,6 +202,45 @@ void P2PMoveBase::initial(
     RCLCPP_DEBUG(this->get_logger(), "recovery_action_name: %s", recovery_action_name_.c_str());
   }
 
+  this->declare_parameter("collision_confirm_cycles", rclcpp::ParameterValue(5));
+  this->declare_parameter("blocked_confirm_time", rclcpp::ParameterValue(1.0));
+  this->declare_parameter("min_replan_interval", rclcpp::ParameterValue(3.0));
+  this->declare_parameter("route_deviation_confirm_cycles", rclcpp::ParameterValue(10));
+  this->declare_parameter("route_deviation_confirm_time", rclcpp::ParameterValue(1.0));
+  this->declare_parameter("runtime_budget_safety_stop_enabled", rclcpp::ParameterValue(false));
+  this->declare_parameter("max_local_planning_time_ms", rclcpp::ParameterValue(50.0));
+  this->declare_parameter("max_end_to_end_local_cycle_ms", rclcpp::ParameterValue(80.0));
+  this->declare_parameter("budget_warn_after_consecutive_overruns", rclcpp::ParameterValue(2));
+  this->declare_parameter("budget_stop_after_consecutive_overruns", rclcpp::ParameterValue(10));
+
+  NavigationFaultPolicy::Config fault_config;
+  fault_config.collision_confirm_cycles = static_cast<std::size_t>(
+    std::max<int64_t>(1, this->get_parameter("collision_confirm_cycles").as_int()));
+  fault_config.blocked_confirm_time_sec = this->get_parameter("blocked_confirm_time").as_double();
+  fault_config.min_replan_interval_sec = this->get_parameter("min_replan_interval").as_double();
+  fault_config.route_deviation_confirm_cycles = static_cast<std::size_t>(
+    std::max<int64_t>(1, this->get_parameter("route_deviation_confirm_cycles").as_int()));
+  fault_config.route_deviation_confirm_time_sec =
+    this->get_parameter("route_deviation_confirm_time").as_double();
+  fault_config.control_failure_patience_sec = FSM_->controller_patience_;
+  navigation_fault_policy_.setConfig(fault_config);
+  min_replan_interval_sec_ = fault_config.min_replan_interval_sec;
+
+  RuntimeBudgetMonitor::Config budget_config;
+  budget_config.max_local_planning_time_ms =
+    this->get_parameter("max_local_planning_time_ms").as_double();
+  budget_config.max_end_to_end_local_cycle_ms =
+    this->get_parameter("max_end_to_end_local_cycle_ms").as_double();
+  budget_config.warn_after_consecutive_overruns = static_cast<std::size_t>(
+    std::max<int64_t>(1, this->get_parameter("budget_warn_after_consecutive_overruns").as_int()));
+  budget_config.stop_after_consecutive_overruns = static_cast<std::size_t>(
+    std::max<int64_t>(1, this->get_parameter("budget_stop_after_consecutive_overruns").as_int()));
+  runtime_budget_monitor_.setConfig(budget_config);
+  runtime_budget_safety_stop_enabled_ =
+    this->get_parameter("runtime_budget_safety_stop_enabled").as_bool();
+
+  initializeLocalObstacleLayer();
+
   //@Create action server
   action_server_p2p_move_base_ = rclcpp_action::create_server<dddmr_sys_core::action::PToPMoveBase>(
     this,
@@ -172,6 +253,158 @@ void P2PMoveBase::initial(
 
   RCLCPP_DEBUG(this->get_logger(), "\033[1;32m---->\033[0m P2P move base launched.");
 
+}
+
+void P2PMoveBase::initializeLocalObstacleLayer()
+{
+  this->declare_parameter("local_obstacle_layer.enabled", rclcpp::ParameterValue(false));
+  this->declare_parameter(
+    "local_obstacle_layer.input_cloud_topic",
+    rclcpp::ParameterValue("lio_sam/cloud_nonground"));
+  this->declare_parameter("local_obstacle_layer.base_frame", rclcpp::ParameterValue("base_link"));
+  this->declare_parameter("local_obstacle_layer.status_topic", rclcpp::ParameterValue("local_obstacle_layer/status"));
+  this->declare_parameter("local_obstacle_layer.debug_cloud_topic", rclcpp::ParameterValue("local_obstacle_layer/cloud"));
+  this->declare_parameter("local_obstacle_layer.roi_forward", rclcpp::ParameterValue(6.0));
+  this->declare_parameter("local_obstacle_layer.roi_backward", rclcpp::ParameterValue(1.0));
+  this->declare_parameter("local_obstacle_layer.roi_left", rclcpp::ParameterValue(3.0));
+  this->declare_parameter("local_obstacle_layer.roi_right", rclcpp::ParameterValue(3.0));
+  this->declare_parameter("local_obstacle_layer.min_z", rclcpp::ParameterValue(-0.15));
+  this->declare_parameter("local_obstacle_layer.max_z", rclcpp::ParameterValue(2.0));
+  this->declare_parameter("local_obstacle_layer.voxel_leaf_size", rclcpp::ParameterValue(0.08));
+  this->declare_parameter("local_obstacle_layer.max_snapshot_points", rclcpp::ParameterValue(30000));
+  this->declare_parameter("local_obstacle_layer.max_update_time_ms", rclcpp::ParameterValue(20.0));
+  this->declare_parameter("local_obstacle_layer.stale_timeout_sec", rclcpp::ParameterValue(0.3));
+  this->declare_parameter("local_obstacle_layer.publish_debug_cloud", rclcpp::ParameterValue(false));
+  this->declare_parameter("local_obstacle_layer.footprint_front", rclcpp::ParameterValue(0.50));
+  this->declare_parameter("local_obstacle_layer.footprint_back", rclcpp::ParameterValue(0.38));
+  this->declare_parameter("local_obstacle_layer.footprint_left", rclcpp::ParameterValue(0.32));
+  this->declare_parameter("local_obstacle_layer.footprint_right", rclcpp::ParameterValue(0.32));
+
+  LocalObstacleLayerConfig config;
+  config.roi_forward = this->get_parameter("local_obstacle_layer.roi_forward").as_double();
+  config.roi_backward = this->get_parameter("local_obstacle_layer.roi_backward").as_double();
+  config.roi_left = this->get_parameter("local_obstacle_layer.roi_left").as_double();
+  config.roi_right = this->get_parameter("local_obstacle_layer.roi_right").as_double();
+  config.min_z = this->get_parameter("local_obstacle_layer.min_z").as_double();
+  config.max_z = this->get_parameter("local_obstacle_layer.max_z").as_double();
+  config.voxel_leaf_size = this->get_parameter("local_obstacle_layer.voxel_leaf_size").as_double();
+  config.max_snapshot_points = static_cast<std::size_t>(
+    std::max<int64_t>(1, this->get_parameter("local_obstacle_layer.max_snapshot_points").as_int()));
+  config.max_update_time_ms =
+    this->get_parameter("local_obstacle_layer.max_update_time_ms").as_double();
+  config.stale_timeout_sec = this->get_parameter("local_obstacle_layer.stale_timeout_sec").as_double();
+  config.publish_debug_cloud =
+    this->get_parameter("local_obstacle_layer.publish_debug_cloud").as_bool();
+  config.footprint_front = this->get_parameter("local_obstacle_layer.footprint_front").as_double();
+  config.footprint_back = this->get_parameter("local_obstacle_layer.footprint_back").as_double();
+  config.footprint_left = this->get_parameter("local_obstacle_layer.footprint_left").as_double();
+  config.footprint_right = this->get_parameter("local_obstacle_layer.footprint_right").as_double();
+  local_obstacle_layer_.setConfig(config);
+
+  local_obstacle_layer_enabled_ =
+    this->get_parameter("local_obstacle_layer.enabled").as_bool();
+  local_obstacle_debug_cloud_enabled_ = config.publish_debug_cloud;
+  local_obstacle_base_frame_ =
+    this->get_parameter("local_obstacle_layer.base_frame").as_string();
+  if (!local_obstacle_layer_enabled_) {
+    RCLCPP_INFO(this->get_logger(), "local_obstacle_layer disabled; diagnostics subscription not created");
+    return;
+  }
+
+  const std::string input_cloud_topic =
+    this->get_parameter("local_obstacle_layer.input_cloud_topic").as_string();
+  const std::string status_topic =
+    this->get_parameter("local_obstacle_layer.status_topic").as_string();
+  const std::string debug_cloud_topic =
+    this->get_parameter("local_obstacle_layer.debug_cloud_topic").as_string();
+
+  local_obstacle_layer_group_ =
+    this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+  rclcpp::SubscriptionOptions subscription_options;
+  subscription_options.callback_group = local_obstacle_layer_group_;
+  local_obstacle_status_pub_ =
+    this->create_publisher<std_msgs::msg::String>(status_topic, 1);
+  if (local_obstacle_debug_cloud_enabled_) {
+    local_obstacle_debug_cloud_pub_ =
+      this->create_publisher<sensor_msgs::msg::PointCloud2>(debug_cloud_topic, 1);
+  }
+  local_obstacle_cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+    input_cloud_topic,
+    rclcpp::SensorDataQoS(),
+    std::bind(&P2PMoveBase::localObstacleCloudCallback, this, std::placeholders::_1),
+    subscription_options);
+
+  RCLCPP_INFO(
+    this->get_logger(),
+    "local_obstacle_layer enabled: input=%s, base_frame=%s, status=%s, debug_cloud=%s",
+    input_cloud_topic.c_str(),
+    local_obstacle_base_frame_.c_str(),
+    status_topic.c_str(),
+    local_obstacle_debug_cloud_enabled_ ? debug_cloud_topic.c_str() : "disabled");
+}
+
+void P2PMoveBase::localObstacleCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
+{
+  if (!msg || !local_obstacle_layer_enabled_) {
+    return;
+  }
+
+  std::vector<LocalPoint> points = pointCloud2ToLocalPoints(*msg);
+  const std::string source_frame =
+    msg->header.frame_id.empty() ? local_obstacle_base_frame_ : msg->header.frame_id;
+  if (source_frame != local_obstacle_base_frame_) {
+    try {
+      const auto transform = tf2Buffer_->lookupTransform(
+        local_obstacle_base_frame_,
+        source_frame,
+        msg->header.stamp,
+        rclcpp::Duration::from_seconds(0.05));
+      transformLocalPoints(&points, transform);
+    } catch (const tf2::TransformException & ex) {
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *clock_, 2000,
+        "local_obstacle_layer skipped cloud: transform %s -> %s unavailable: %s",
+        source_frame.c_str(),
+        local_obstacle_base_frame_.c_str(),
+        ex.what());
+      return;
+    }
+  }
+
+  const double now_sec = clock_->now().seconds();
+  const rclcpp::Time cloud_stamp(msg->header.stamp);
+  const double stamp_sec = cloud_stamp.nanoseconds() == 0 ? now_sec : cloud_stamp.seconds();
+  const auto snapshot = local_obstacle_layer_.buildSnapshot(
+    points,
+    stamp_sec,
+    now_sec,
+    local_obstacle_base_frame_);
+
+  {
+    std::lock_guard<std::mutex> lock(local_obstacle_snapshot_mutex_);
+    latest_local_obstacle_snapshot_ = snapshot;
+  }
+
+  if (local_obstacle_status_pub_) {
+    local_obstacle_status_pub_->publish(snapshotToStatusMessage(*snapshot));
+  }
+
+  if (local_obstacle_debug_cloud_enabled_ && local_obstacle_debug_cloud_pub_) {
+    std_msgs::msg::Header debug_header = msg->header;
+    debug_header.frame_id = local_obstacle_base_frame_;
+    local_obstacle_debug_cloud_pub_->publish(snapshotToPointCloud2(*snapshot, debug_header));
+  }
+
+  if (snapshot->perception_stale || snapshot->over_budget) {
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger(), *clock_, 2000,
+      "local_obstacle_layer status: stale=%d, over_budget=%d, raw=%zu, filtered=%zu, update_ms=%.3f",
+      snapshot->perception_stale,
+      snapshot->over_budget,
+      snapshot->raw_points,
+      snapshot->filtered_points,
+      snapshot->update_time_ms);
+  }
 }
 
 P2PMoveBase::~P2PMoveBase(){
@@ -368,7 +601,34 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
 }
 
 bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> goal_handle){
+  const auto cycle_started_at = std::chrono::steady_clock::now();
   FSM_->global_pose_ = route_controller_->getGlobalPose();
+
+  const auto record_cycle_budget =
+    [&]() {
+      RuntimeBudgetSample sample;
+      sample.local_cycle_time_ms =
+        std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - cycle_started_at).count();
+      const auto status = runtime_budget_monitor_.update(sample);
+      if(status.budget_exceeded){
+        RCLCPP_WARN_THROTTLE(
+          this->get_logger(), *clock_, 2000,
+          "runtime budget: level=%s, consecutive_overruns=%zu, reason=%s",
+          p2p_move_base::toString(status.level),
+          status.consecutive_overruns,
+          status.reason.c_str());
+      }
+      if(runtime_budget_safety_stop_enabled_ && status.level == BudgetLevel::SafetyStop){
+        publishZeroVelocity();
+      }
+    };
+
+  const auto continue_cycle =
+    [&]() -> bool {
+      record_cycle_budget();
+      return false;
+    };
 
   const auto abort_goal_with_reason =
     [&](const std::string & reason) -> bool {
@@ -390,7 +650,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
         FSM_->last_valid_plan_ = clock_->now();
         FSM_->setPhase(FSM::NavigationPhase::kRouteRequest, reason + ", fallback to route refresh");
       }
-      return false;
+      return continue_cycle();
     };
 
   const auto route_refresh =
@@ -398,7 +658,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       publishZeroVelocity();
       FSM_->last_valid_plan_ = clock_->now();
       FSM_->setPhase(FSM::NavigationPhase::kRouteRequest, reason);
-      return false;
+      return continue_cycle();
     };
 
   const auto start_recovery_or_abort =
@@ -406,7 +666,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       publishZeroVelocity();
       if(startRecoveryAction(reason)){
         FSM_->setPhase(FSM::NavigationPhase::kRecoveryAction, reason);
-        return false;
+        return continue_cycle();
       }
       return abort_goal_with_reason(reason);
     };
@@ -416,7 +676,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       publishZeroVelocity();
       FSM_->waiting_time_ = clock_->now();
       FSM_->setPhase(FSM::NavigationPhase::kBlockedWait, reason);
-      return false;
+      return continue_cycle();
     };
 
   const auto reset_oscillation_watchdog =
@@ -446,7 +706,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
           "%s paused because perception data is out of date",
           phase_label.c_str());
         publishZeroVelocity();
-        return false;
+        return continue_cycle();
       }
       if(planner_state == dddmr_sys_core::PlannerState::TF_FAIL){
         RCLCPP_WARN_THROTTLE(
@@ -454,35 +714,48 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
           "%s paused because TF is out of date",
           phase_label.c_str());
         publishZeroVelocity();
-        return false;
+        return continue_cycle();
       }
-      if(planner_state == dddmr_sys_core::PlannerState::PRUNE_PLAN_FAIL){
-        return route_refresh("route_deviation: local reference prune failed");
-      }
-      if(planner_state == dddmr_sys_core::PlannerState::ALL_TRAJECTORIES_FAIL){
-        if((clock_->now() - FSM_->last_valid_control_).seconds() > FSM_->controller_patience_){
-          return start_recovery_or_route_refresh(
-            "tracking_controller_stalled: controller stalled");
-        }
-        RCLCPP_WARN_THROTTLE(
-          this->get_logger(), *clock_, 2000,
-          "%s: controller temporarily failed, keep current frozen route",
-          phase_label.c_str());
+
+      const double now_sec = clock_->now().seconds();
+      const double last_replan_sec = FSM_->last_valid_plan_.seconds();
+      const double controller_failure_elapsed =
+        (clock_->now() - FSM_->last_valid_control_).seconds();
+      const auto decision = navigation_fault_policy_.update(
+        planner_state,
+        allow_blocked_wait,
+        now_sec,
+        last_replan_sec,
+        controller_failure_elapsed);
+
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *clock_, 2000,
+        "%s fault policy: action=%s, reason=%s, cycles=%zu, duration=%.2f, message=%s",
+        phase_label.c_str(),
+        p2p_move_base::toString(decision.action),
+        p2p_move_base::toString(decision.reason),
+        decision.consecutive_cycles,
+        decision.duration_sec,
+        decision.message.c_str());
+
+      if(decision.action == FaultAction::TemporaryStop){
         publishZeroVelocity();
-        return false;
+        return continue_cycle();
       }
-      if(planner_state == dddmr_sys_core::PlannerState::PATH_BLOCKED_REPLANNING){
-        return route_refresh("route_blocked: route blocked, refresh route");
+      if(decision.action == FaultAction::WaitForClearance){
+        return wait_for_clearance(decision.message);
       }
-      if(planner_state == dddmr_sys_core::PlannerState::PATH_BLOCKED_WAIT && allow_blocked_wait){
-        return wait_for_clearance("route_blocked: route blocked, waiting");
+      if(decision.action == FaultAction::RouteRefresh){
+        return route_refresh(decision.message);
       }
-      if(planner_state == dddmr_sys_core::PlannerState::PATH_BLOCKED_WAIT){
-        return route_refresh("route_blocked: route blocked, refresh route");
+      if(decision.action == FaultAction::RecoveryOrRouteRefresh){
+        return start_recovery_or_route_refresh(decision.message);
       }
-      RCLCPP_FATAL(this->get_logger(), "unhandled PlannerState in %s", phase_label.c_str());
+      if(decision.action == FaultAction::FatalAbort){
+        return abort_goal_with_reason(decision.message);
+      }
       publishZeroVelocity();
-      return false;
+      return continue_cycle();
     };
 
   const auto handle_goal_alignment_control_fault =
@@ -492,14 +765,14 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
           this->get_logger(), *clock_, 2000,
           "goal_alignment paused because perception data is out of date");
         publishZeroVelocity();
-        return false;
+        return continue_cycle();
       }
       if(planner_state == dddmr_sys_core::PlannerState::TF_FAIL){
         RCLCPP_WARN_THROTTLE(
           this->get_logger(), *clock_, 2000,
           "goal_alignment paused because TF is out of date");
         publishZeroVelocity();
-        return false;
+        return continue_cycle();
       }
       if(planner_state == dddmr_sys_core::PlannerState::ALL_TRAJECTORIES_FAIL ||
          planner_state == dddmr_sys_core::PlannerState::PATH_BLOCKED_WAIT ||
@@ -510,22 +783,22 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
           return start_recovery_or_abort("goal_alignment_unsatisfied: controller stalled");
         }
         publishZeroVelocity();
-        return false;
+        return continue_cycle();
       }
       RCLCPP_FATAL(this->get_logger(), "unhandled PlannerState in goal_alignment");
       publishZeroVelocity();
-      return false;
+      return continue_cycle();
     };
 
   if(FSM_->isPhase(FSM::NavigationPhase::kIdle)){
     FSM_->setPhase(FSM::NavigationPhase::kRouteRequest, "start goal orchestration");
-    return false;
+    return continue_cycle();
   }
 
   if(FSM_->isPhase(FSM::NavigationPhase::kRouteRequest)){
     route_manager_->queryThread();
     FSM_->setPhase(FSM::NavigationPhase::kRoutePending, "route request sent");
-    return false;
+    return continue_cycle();
   }
 
   if(FSM_->isPhase(FSM::NavigationPhase::kRoutePending)){
@@ -534,7 +807,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       FSM_->last_valid_control_ = clock_->now();
       reset_oscillation_watchdog();
       FSM_->setPhase(FSM::NavigationPhase::kRouteTracking, "route received");
-      return false;
+      return continue_cycle();
     }
 
     if((clock_->now() - FSM_->last_valid_plan_).seconds() > FSM_->route_request_patience_){
@@ -547,7 +820,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       route_manager_->cancelActiveRouteRequest("planner request timed out on client side");
       return start_recovery_or_abort("route_request_failed: route request timeout");
     }
-    return false;
+    return continue_cycle();
   }
 
   if(FSM_->isPhase(FSM::NavigationPhase::kGoalAlignment)){
@@ -578,7 +851,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
     if(planner_state == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
       FSM_->last_valid_control_ = clock_->now();
       publishVelocity(cmd_vel);
-      return false;
+      return continue_cycle();
     }
     return handle_goal_alignment_control_fault(planner_state);
   }
@@ -589,7 +862,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       RCLCPP_DEBUG(this->get_logger(), "goal position tolerance reached, entering goal alignment");
       reset_oscillation_watchdog();
       FSM_->setPhase(FSM::NavigationPhase::kGoalAlignment, "goal position reached");
-      return false;
+      return continue_cycle();
     }
 
     if(!syncRouteReferenceFromManager("route_tracking") && !route_manager_->hasRoute()){
@@ -614,14 +887,14 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
     if(planner_state == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
       FSM_->last_valid_control_ = clock_->now();
       publishVelocity(cmd_vel);
-      return false;
+      return continue_cycle();
     }
     return handle_tracking_control_fault(planner_state, "route tracking", true);
   }
 
   if(FSM_->isPhase(FSM::NavigationPhase::kRecoveryAction)){
     if(is_recoverying_){
-      return false;
+      return continue_cycle();
     }
 
     if(FSM_->recovery_attempt_count_ >= FSM_->max_recovery_attempts_){
@@ -641,7 +914,7 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       FSM_->recovery_attempt_count_++;
       FSM_->last_valid_plan_ = clock_->now();
       FSM_->setPhase(FSM::NavigationPhase::kRouteRequest, "recovery action completed");
-      return false;
+      return continue_cycle();
     }
 
     terminal_goal_reason_ = "recovery failed";
@@ -673,19 +946,19 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       reset_oscillation_watchdog();
       FSM_->setPhase(FSM::NavigationPhase::kRouteTracking, "blocked wait cleared");
       publishVelocity(cmd_vel);
-      return false;
+      return continue_cycle();
     }
     if(planner_state == dddmr_sys_core::PlannerState::PATH_BLOCKED_WAIT){
       publishZeroVelocity();
       RCLCPP_WARN_THROTTLE(
         this->get_logger(), *clock_, 5000,
         "route remains blocked, keep waiting");
-      return false;
+      return continue_cycle();
     }
     return handle_tracking_control_fault(planner_state, "blocked wait", false);
   }
 
-  return false;
+  return continue_cycle();
 }
 
 bool P2PMoveBase::startRecoveryAction(const std::string & trigger_reason){

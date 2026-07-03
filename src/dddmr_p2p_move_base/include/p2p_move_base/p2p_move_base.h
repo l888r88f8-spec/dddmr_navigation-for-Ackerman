@@ -30,6 +30,7 @@
 */
 /*Debug*/
 #include <chrono>
+#include <mutex>
 #include <p2p_move_base/p2p_fsm.h>
 
 //@in enum state, the p_to_p_move_base is included
@@ -38,10 +39,15 @@
 
 //@for call global planner action
 #include "dddmr_sys_core/action/get_plan.hpp"
+#include "p2p_move_base/local_obstacle_layer.h"
+#include "p2p_move_base/navigation_fault_policy.h"
+#include "p2p_move_base/runtime_budget_monitor.h"
 #include "p2p_move_base/p2p_global_plan_manager.h"
 //@for call recovery action
 #include "dddmr_sys_core/action/recovery_behaviors.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
+#include "sensor_msgs/msg/point_cloud2.hpp"
+#include "std_msgs/msg/string.hpp"
 
 
 namespace p2p_move_base
@@ -75,6 +81,7 @@ class P2PMoveBase : public rclcpp::Node {
     rclcpp::CallbackGroup::SharedPtr tf_listener_group_;
     rclcpp::CallbackGroup::SharedPtr action_server_group_;
     rclcpp::CallbackGroup::SharedPtr recovery_behaviors_client_group_;
+    rclcpp::CallbackGroup::SharedPtr local_obstacle_layer_group_;
 
     rclcpp::Clock::SharedPtr clock_;
     
@@ -86,6 +93,9 @@ class P2PMoveBase : public rclcpp::Node {
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr stamped_cmd_vel_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mb_state_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr local_obstacle_status_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr local_obstacle_debug_cloud_pub_;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr local_obstacle_cloud_sub_;
 
     bool isQuaternionValid(const geometry_msgs::msg::Quaternion& q);
 
@@ -118,7 +128,19 @@ class P2PMoveBase : public rclcpp::Node {
     bool is_recoverying_;
     bool is_recoverying_succeed_;
     std::string recovery_action_name_;
+    p2p_move_base::NavigationFaultPolicy navigation_fault_policy_;
+    p2p_move_base::RuntimeBudgetMonitor runtime_budget_monitor_;
+    p2p_move_base::LocalObstacleLayer local_obstacle_layer_;
+    double min_replan_interval_sec_;
+    bool runtime_budget_safety_stop_enabled_;
+    bool local_obstacle_layer_enabled_;
+    bool local_obstacle_debug_cloud_enabled_;
+    std::string local_obstacle_base_frame_;
+    std::mutex local_obstacle_snapshot_mutex_;
+    std::shared_ptr<const p2p_move_base::LocalObstacleSnapshot> latest_local_obstacle_snapshot_;
     bool startRecoveryAction(const std::string & trigger_reason);
+    void initializeLocalObstacleLayer();
+    void localObstacleCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
 
 
 };

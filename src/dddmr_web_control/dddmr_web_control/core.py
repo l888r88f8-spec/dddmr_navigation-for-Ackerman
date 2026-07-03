@@ -243,7 +243,11 @@ class SourceCache:
 class TerminalLogBuffer:
     def __init__(self, target: str, max_lines: int = 400) -> None:
         self.target = target
-        self.lines: deque[str] = deque(maxlen=max_lines)
+        # Each entry is (seq, text) where seq is a monotonically increasing id
+        # assigned at append time. seq is never reused, so dropping old lines
+        # from the front (rotation) cannot confuse a delta consumer.
+        self.lines: deque[tuple[int, str]] = deque(maxlen=max_lines)
+        self._seq = 0
         self.enabled = False
         self.running = False
         self.returncode: int | None = None
@@ -253,7 +257,10 @@ class TerminalLogBuffer:
         clean_lines = line.splitlines() or [line]
         with self.lock:
             for clean_line in clean_lines:
-                self.lines.append(ANSI_ESCAPE_RE.sub("", clean_line).rstrip("\r\n"))
+                self._seq += 1
+                self.lines.append(
+                    (self._seq, ANSI_ESCAPE_RE.sub("", clean_line).rstrip("\r\n"))
+                )
 
     def set_process_state(
         self, enabled: bool, running: bool, returncode: int | None
@@ -263,6 +270,12 @@ class TerminalLogBuffer:
             self.running = running
             self.returncode = returncode
 
+    def lines_since(self, since: int) -> tuple[list[str], int]:
+        """Return (texts_with_seq_gt_since, current_max_seq) under the lock."""
+        with self.lock:
+            texts = [text for seq, text in self.lines if seq > since]
+            return texts, self._seq
+
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             return {
@@ -270,7 +283,21 @@ class TerminalLogBuffer:
                 "enabled": self.enabled,
                 "running": self.running,
                 "returncode": self.returncode,
-                "lines": list(self.lines),
+                "lines": [text for _seq, text in self.lines],
+            }
+
+    def delta(self, since: int) -> dict[str, Any]:
+        """Like snapshot() but returns only lines with seq > since plus the
+        current max seq, so clients can poll incrementally."""
+        with self.lock:
+            texts = [text for seq, text in self.lines if seq > since]
+            return {
+                "target": self.target,
+                "enabled": self.enabled,
+                "running": self.running,
+                "returncode": self.returncode,
+                "lines": texts,
+                "seq": self._seq,
             }
 
 

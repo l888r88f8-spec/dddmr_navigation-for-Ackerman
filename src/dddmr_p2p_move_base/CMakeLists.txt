@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.5)
 project(p2p_move_base)
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_gtest REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
@@ -80,6 +81,42 @@ ament_target_dependencies(p2p_global_plan_manager
   ${dependencies}
 )
 
+add_library(p2p_navigation_fault_policy SHARED
+  src/navigation_fault_policy.cpp
+)
+ament_target_dependencies(p2p_navigation_fault_policy
+  ${dependencies}
+)
+
+add_library(p2p_runtime_budget_monitor SHARED
+  src/runtime_budget_monitor.cpp
+)
+ament_target_dependencies(p2p_runtime_budget_monitor
+  rclcpp
+)
+
+add_library(p2p_local_obstacle_layer SHARED
+  src/local_obstacle_layer.cpp
+)
+
+add_library(p2p_local_avoidance_policy SHARED
+  src/local_avoidance_policy.cpp
+)
+target_link_libraries(p2p_local_avoidance_policy
+  p2p_local_obstacle_layer
+)
+
+add_library(p2p_local_obstacle_layer_ros SHARED
+  src/local_obstacle_layer_ros.cpp
+)
+target_link_libraries(p2p_local_obstacle_layer_ros
+  p2p_local_obstacle_layer
+)
+ament_target_dependencies(p2p_local_obstacle_layer_ros
+  sensor_msgs
+  std_msgs
+)
+
 # p2p_mov2_base
 add_library(p2p_mov2_base SHARED
   src/p2p_move_base.cpp
@@ -87,6 +124,9 @@ add_library(p2p_mov2_base SHARED
 target_link_libraries(p2p_mov2_base
   p2p_fsm
   p2p_global_plan_manager
+  p2p_navigation_fault_policy
+  p2p_runtime_budget_monitor
+  p2p_local_obstacle_layer_ros
 )
 ament_target_dependencies(p2p_mov2_base
   ${dependencies}
@@ -107,6 +147,11 @@ install(TARGETS
   p2p_fsm
   p2p_mov2_base
   p2p_global_plan_manager
+  p2p_navigation_fault_policy
+  p2p_runtime_budget_monitor
+  p2p_local_obstacle_layer
+  p2p_local_avoidance_policy
+  p2p_local_obstacle_layer_ros
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
@@ -137,6 +182,70 @@ install(PROGRAMS
 
 
 ament_export_include_directories(include)
-ament_export_libraries(p2p_fsm p2p_mov2_base p2p_global_plan_manager)
+ament_export_libraries(
+  p2p_fsm
+  p2p_mov2_base
+  p2p_global_plan_manager
+  p2p_navigation_fault_policy
+  p2p_runtime_budget_monitor
+  p2p_local_obstacle_layer
+  p2p_local_avoidance_policy
+  p2p_local_obstacle_layer_ros
+)
 ament_export_dependencies(${dependencies})
+
+if(BUILD_TESTING)
+  ament_add_gtest(test_navigation_fault_policy
+    test/test_navigation_fault_policy.cpp
+  )
+  target_link_libraries(test_navigation_fault_policy
+    p2p_navigation_fault_policy
+  )
+  ament_target_dependencies(test_navigation_fault_policy
+    ${dependencies}
+  )
+
+  ament_add_gtest(test_runtime_budget_monitor
+    test/test_runtime_budget_monitor.cpp
+  )
+  target_link_libraries(test_runtime_budget_monitor
+    p2p_runtime_budget_monitor
+  )
+  ament_target_dependencies(test_runtime_budget_monitor
+    rclcpp
+  )
+
+  ament_add_gtest(test_local_obstacle_layer
+    test/test_local_obstacle_layer.cpp
+  )
+  target_link_libraries(test_local_obstacle_layer
+    p2p_local_obstacle_layer
+  )
+
+  ament_add_gtest(test_local_avoidance_policy
+    test/test_local_avoidance_policy.cpp
+  )
+  target_link_libraries(test_local_avoidance_policy
+    p2p_local_avoidance_policy
+  )
+
+  ament_add_gtest(test_local_obstacle_layer_ros
+    test/test_local_obstacle_layer_ros.cpp
+  )
+  target_link_libraries(test_local_obstacle_layer_ros
+    p2p_local_obstacle_layer_ros
+  )
+  ament_target_dependencies(test_local_obstacle_layer_ros
+    sensor_msgs
+    std_msgs
+  )
+
+  ament_add_gtest(test_p2p_move_base_config
+    test/test_p2p_move_base_config.cpp
+  )
+  target_compile_definitions(test_p2p_move_base_config PRIVATE
+    P2P_MOVE_BASE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+  )
+endif()
+
 ament_package()

@@ -41,12 +41,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'map_dir',
-            default_value='/home/robot/map/hesai_sim/GlobalMap.pcd',
+            default_value='/home/robot/map/hesai_sim2/GlobalMap.pcd',
             description='Path to the global map PCD file.',
         ),
         DeclareLaunchArgument(
             'ground_dir',
-            default_value='/home/robot/map/hesai_sim/GroundMap.pcd',
+            default_value='/home/robot/map/hesai_sim2/GroundMap.pcd',
             description='Path to the ground map PCD file.',
         ),
         DeclareLaunchArgument(

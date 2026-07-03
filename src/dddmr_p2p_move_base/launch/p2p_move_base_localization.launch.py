@@ -1,12 +1,9 @@
 import os
-
 from ament_index_python.packages import get_package_share_directory
-
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-
 
 def generate_launch_description():
     p2p_share_dir = get_package_share_directory('p2p_move_base')
@@ -42,12 +39,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'map_dir',
-            default_value='/home/robot/map/hesai_sim/GlobalMap.pcd', # change this to your global map pcd file path
+            default_value='/home/robot/map/hesai_sim2/GlobalMap.pcd', # change this to your global map pcd file path
             description='Path to the global map PCD file.',
         ),
         DeclareLaunchArgument(
             'ground_dir',
-            default_value='/home/robot/map/hesai_sim/GroundMap.pcd', # change this to your ground map pcd file path
+            default_value='/home/robot/map/hesai_sim2/GroundMap.pcd', # change this to your ground map pcd file path
             description='Path to the ground map PCD file.',
         ),
         DeclareLaunchArgument(

@@ -15,7 +15,38 @@ p2p_move_base:
   ros__parameters:
     orchestrator_frequency: 15.0                                 # 任务编排循环频率，越高状态切换和控制消费越及时
     route_request_patience: 90.0                                 # 等待全局路径请求返回的最大时长（s）
-    blocked_wait_patience: 0.5                                   # blocked wait 状态最长持续时间（s），局部全撞时尽快刷新路线
+    blocked_wait_patience: 2.0                                   # blocked wait 状态最长持续时间（s），先给局部障碍清除窗口
+    collision_confirm_cycles: 5                                  # 连续碰撞确认周期，避免单帧点云误触发全局重规划
+    blocked_confirm_time: 1.0                                    # 阻塞持续确认时间（s）
+    min_replan_interval: 3.0                                     # 两次全局重规划之间的最小间隔（s）
+    route_deviation_confirm_cycles: 10                           # 路径偏离连续确认周期
+    route_deviation_confirm_time: 1.0                            # 路径偏离持续确认时间（s）
+    runtime_budget_safety_stop_enabled: false                    # 初期只告警不因预算超限停车
+    max_local_planning_time_ms: 50.0                             # Orin NX 局部规划预算（ms）
+    max_end_to_end_local_cycle_ms: 80.0                          # Orin NX 单周期端到端预算（ms）
+    budget_warn_after_consecutive_overruns: 2                    # 连续超预算告警阈值
+    budget_stop_after_consecutive_overruns: 10                   # 连续超预算安全停车阈值
+    local_obstacle_layer:
+      enabled: true                                              # Phase 2.1 默认只预留，置 true 后订阅点云并发布诊断，不参与控制
+      input_cloud_topic: "lio_sam/cloud_nonground"               # 建议使用去地点云；若不是 base_frame，节点会尝试 TF 转换
+      base_frame: "base_link"                                    # 局部 ROI 和 footprint 查询坐标系
+      status_topic: "local_obstacle_layer/status"                # std_msgs/String，发布 raw/filtered/stale/budget 状态
+      debug_cloud_topic: "local_obstacle_layer/cloud"            # sensor_msgs/PointCloud2，发布过滤后的局部障碍点
+      roi_forward: 6.0                                           # 前向 ROI（m）
+      roi_backward: 1.0                                          # 后向 ROI（m）
+      roi_left: 3.0                                              # 左侧 ROI（m）
+      roi_right: 3.0                                             # 右侧 ROI（m）
+      min_z: -0.15                                               # 障碍高度下限（m）
+      max_z: 2.0                                                 # 障碍高度上限（m）
+      voxel_leaf_size: 0.08                                      # 体素降采样分辨率（m），控制 Orin NX CPU/内存预算
+      max_snapshot_points: 30000                                 # 单帧最多保留点数，超过会截断并标记 over_budget
+      max_update_time_ms: 20.0                                   # 单次局部障碍层更新时间预算（ms）
+      stale_timeout_sec: 0.6                                     # 点云时间戳过期阈值（s）
+      publish_debug_cloud: false                                 # 初期建议 false，调参/RViz 验证时再开启
+      footprint_front: 0.50                                      # 与 cuboid 保持一致
+      footprint_back: 0.38
+      footprint_left: 0.32
+      footprint_right: 0.32
     control_failure_patience: 10.0                               # 控制连续失败容忍时间（s）
     max_recovery_attempts: 10                                    # 恢复行为最大尝试次数
     oscillation_distance: 0.5                                    # 位移超过该值视为脱离振荡（m），Ackermann 低速跟踪不宜过大
@@ -67,7 +98,7 @@ global_planner:
       edge_weight_penalty_weight: 6.0                             # 地面边缘权重惩罚
       edge_weight_safe_threshold: 1.2                             # 边缘权重安全阈值
       edge_weight_soft_cap: 12.0                                  # 边缘权重软上限
-      edge_weight_hard_reject_threshold: 0.0                      # 边缘权重硬拒绝阈值（0 表示关闭）
+      edge_weight_hard_reject_threshold: 0.0                      # 边缘权重硬拒绝阈值（0表示关闭）
       heuristic_heading_weight: 0.35                              # 启发式中航向项权重
       max_projected_pitch: 0.55                                   # 投影点最大坡度（rad）
       max_projected_vertical_jump: 0.12                           # 投影点最大垂向跳变（m）
@@ -132,7 +163,7 @@ perception_3d_global:
 local_planner:
   ros__parameters:
     odom_topic: /lio_sam/localization/odometry                  # 局部规划里程计输入
-    controller_backend: "regulated_pure_pursuit"                # 控制后端：legacy_rollout / regulated_pure_pursuit
+    controller_backend: "regulated_pure_pursuit"                # 控制后端 legacy_rollout / regulated_pure_pursuit
     controller_frequency: 15.0                                  # 控制循环频率（Hz）
 
     # 局部参考路径窗口
