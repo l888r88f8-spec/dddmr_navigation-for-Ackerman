@@ -97,6 +97,58 @@ local_planner::MppiResult latchLeftStructured(MppiController & controller)
     []() {return true;});
 }
 
+void expectLatchedStructuredSCurveCompletes(
+  const MppiBypassSide selected_side,
+  const std::size_t initial_s_candidate)
+{
+  const auto config = makeStructuredPhaseConfig();
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.2, 0.0});
+  const MppiBypassSide opposite_side =
+    selected_side == MppiBypassSide::Left ?
+    MppiBypassSide::Right : MppiBypassSide::Left;
+  const double side_sign = static_cast<double>(selected_side);
+
+  for(std::size_t cycle = 0; cycle < config.time_steps + 2; ++cycle){
+    SCOPED_TRACE(cycle);
+    const auto result = controller.optimizeBatch(
+      MppiControl{0.2, 0.0},
+      [cycle, initial_s_candidate, selected_side, opposite_side](
+        const std::vector<MppiCandidate> & candidates)
+      {
+        std::vector<MppiCandidateScore> scores(
+          candidates.size(),
+          MppiCandidateScore{true, 100.0, selected_side, true});
+        const std::size_t winning_candidate = cycle == 0 ? initial_s_candidate : 0u;
+        scores[winning_candidate].cost = 0.0;
+        if(cycle == 0){
+          for(std::size_t sample = 0; sample < scores.size(); ++sample){
+            if(sample != initial_s_candidate){
+              scores[sample].bypass_side = opposite_side;
+            }
+          }
+        }
+        return scores;
+      },
+      []() {return true;});
+
+    ASSERT_TRUE(result.has_valid_control);
+    EXPECT_EQ(result.selected_bypass_side, selected_side);
+    EXPECT_EQ(
+      result.structured_phase_step,
+      std::min(cycle + 1, config.time_steps));
+    if(cycle < config.time_steps / 2){
+      EXPECT_GT(side_sign * result.command.wz, 0.0);
+    }
+    else if(cycle < config.time_steps){
+      EXPECT_LT(side_sign * result.command.wz, 0.0);
+    }
+    else{
+      EXPECT_NEAR(result.command.wz, 0.0, 1e-12);
+    }
+  }
+}
+
 }  // namespace
 
 TEST(MppiControllerTest, SeededGaussianNoiseIsRepeatable)
@@ -278,44 +330,12 @@ TEST(MppiControllerTest, StructuredCandidatesProvideMirroredArcsAndSCurves)
 
 TEST(MppiControllerTest, LatchedStructuredSCurveAdvancesToCountersteerAndStraightTail)
 {
-  const auto config = makeStructuredPhaseConfig();
-  MppiController controller(config);
-  controller.resetControlSequence(MppiControl{0.2, 0.0});
+  expectLatchedStructuredSCurveCompletes(MppiBypassSide::Left, 4u);
+}
 
-  for(std::size_t cycle = 0; cycle < config.time_steps + 2; ++cycle){
-    const auto result = controller.optimizeBatch(
-      MppiControl{0.2, 0.0},
-      [cycle](const std::vector<MppiCandidate> & candidates) {
-        std::vector<MppiCandidateScore> scores(
-          candidates.size(),
-          MppiCandidateScore{true, 100.0, MppiBypassSide::Left, true});
-        scores[cycle == 0 ? 4u : 0u].cost = 0.0;
-        if(cycle == 0){
-          for(std::size_t sample = 0; sample < scores.size(); ++sample){
-            if(sample != 4u){
-              scores[sample].bypass_side = MppiBypassSide::Right;
-            }
-          }
-        }
-        return scores;
-      },
-      []() {return true;});
-
-    ASSERT_TRUE(result.has_valid_control) << "cycle " << cycle;
-    EXPECT_EQ(result.selected_bypass_side, MppiBypassSide::Left);
-    EXPECT_EQ(
-      result.structured_phase_step,
-      std::min(cycle + 1, config.time_steps));
-    if(cycle < config.time_steps / 2){
-      EXPECT_GT(result.command.wz, 0.0) << "cycle " << cycle;
-    }
-    else if(cycle < config.time_steps){
-      EXPECT_LT(result.command.wz, 0.0) << "cycle " << cycle;
-    }
-    else{
-      EXPECT_NEAR(result.command.wz, 0.0, 1e-12) << "cycle " << cycle;
-    }
-  }
+TEST(MppiControllerTest, LatchedRightStructuredSCurveMirrorsPersistentManeuver)
+{
+  expectLatchedStructuredSCurveCompletes(MppiBypassSide::Right, 5u);
 }
 
 TEST(MppiControllerTest, MultiIterationAdvancesStructuredPhaseOncePerBatch)
