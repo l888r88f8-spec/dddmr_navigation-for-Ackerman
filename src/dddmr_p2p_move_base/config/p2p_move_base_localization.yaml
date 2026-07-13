@@ -214,6 +214,7 @@ local_planner:
       model_dt: 0.0666667                                       # 与 15Hz controller_period 对齐以启用控制序列 shift
       batch_size: 96                                            # 采样批量；点云 KDTree 查询较重，优先保证实时预算
       structured_candidate_count: 8                             # 成对连续圆弧/S弯候选，保证小批量中存在完整绕障控制形状
+      structured_min_vx: 0.20                                  # 结构化绕障模板最低目标速度，静止启动时仍可产生可分类的横向位移
       iteration_count: 1                                        # 与 Nav2 默认一致，通常 1 次迭代即可
       temperature: 0.1                                          # MPPI softmax 温度；降低后更跟随低代价绕障样本，减少左右平均抵消
       gamma: 0.015                                              # 控制能量项权重

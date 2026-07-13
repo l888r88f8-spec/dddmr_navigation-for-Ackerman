@@ -413,6 +413,7 @@ void Local_Planner::initial(
   declare_parameter("mppi.model_dt", rclcpp::ParameterValue(0.1));
   declare_parameter("mppi.batch_size", rclcpp::ParameterValue(384));
   declare_parameter("mppi.structured_candidate_count", rclcpp::ParameterValue(8));
+  declare_parameter("mppi.structured_min_vx", rclcpp::ParameterValue(0.20));
   declare_parameter("mppi.iteration_count", rclcpp::ParameterValue(1));
   declare_parameter("mppi.temperature", rclcpp::ParameterValue(0.3));
   declare_parameter("mppi.gamma", rclcpp::ParameterValue(0.015));
@@ -453,6 +454,8 @@ void Local_Planner::initial(
     std::max<int64_t>(1, this->get_parameter("mppi.batch_size").as_int()));
   mppi_config.structured_candidate_count = static_cast<std::size_t>(
     std::max<int64_t>(0, this->get_parameter("mppi.structured_candidate_count").as_int()));
+  mppi_config.structured_min_vx =
+    this->get_parameter("mppi.structured_min_vx").as_double();
   mppi_config.iteration_count = static_cast<std::size_t>(
     std::max<int64_t>(1, this->get_parameter("mppi.iteration_count").as_int()));
   mppi_config.temperature = this->get_parameter("mppi.temperature").as_double();
@@ -2698,7 +2701,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
       std::min(mppi_command_index, result.best_sample_sequence.size() - 1)];
   RCLCPP_INFO_THROTTLE(
     this->get_logger().get_child(name_), *clock_, 2000,
-    "MPPI debug: controller=%s, obstacle_points=%zu, trajectories=%zu, trajectory_points=%zu, finite_clearances=%zu, min_clearance=%.3f, path_occupancy=%.3f, collision_trajectories=%zu, valid_scores=%zu, critic_fail=%d, rejected=%zu, best_cost=%.3f, best_vx=%.3f, best_wz=%.3f, prefilter_wz=%.3f, cmd_vx=%.3f, cmd_wz=%.3f, effective_samples=%.2f, weight_pos=%.3f, weight_neg=%.3f, weight_neutral=%.3f, structured=%zu, selected_side=%s, best_side=%s, feasible_left=%zu, feasible_right=%zu, feasible_neutral=%zu, side_failures=%zu, structured_phase=%zu, best_sample=%zu, best_critic_cost=%.3f, best_energy=%.3f, optimal_valid=%d, attempts=%zu, allowed_max_speed=%.3f",
+    "MPPI debug: controller=%s, obstacle_points=%zu, trajectories=%zu, trajectory_points=%zu, finite_clearances=%zu, min_clearance=%.3f, path_occupancy=%.3f, collision_trajectories=%zu, valid_scores=%zu, critic_fail=%d, rejected=%zu, best_cost=%.3f, best_vx=%.3f, best_wz=%.3f, prefilter_wz=%.3f, cmd_vx=%.3f, cmd_wz=%.3f, effective_samples=%.2f, weight_pos=%.3f, weight_neg=%.3f, weight_neutral=%.3f, structured=%zu, structured_weight=%.3f, selected_side=%s, best_side=%s, feasible_left=%zu, feasible_right=%zu, feasible_neutral=%zu, side_failures=%zu, structured_phase=%zu, best_sample=%zu, best_critic_cost=%.3f, best_energy=%.3f, optimal_valid=%d, attempts=%zu, allowed_max_speed=%.3f",
     controller_name.c_str(),
     mppi_obstacle_points,
     mppi_scored_trajectories,
@@ -2721,6 +2724,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     result.negative_weight_mass,
     result.neutral_weight_mass,
     result.structured_candidates,
+    result.structured_weight_mass,
     toString(result.selected_bypass_side),
     toString(result.best_sample_side),
     result.feasible_left_candidates,

@@ -32,6 +32,7 @@ struct MppiConfig
   double wz_std = 0.25;
   double vx_min = 0.05;
   double vx_max = 0.8;
+  double structured_min_vx = 0.20;
   double wz_max = 1.2;
   double ax_min = -0.8;
   double ax_max = 0.8;
@@ -87,6 +88,7 @@ struct MppiResult
   double positive_weight_mass = 0.0;
   double negative_weight_mass = 0.0;
   double neutral_weight_mass = 0.0;
+  double structured_weight_mass = 0.0;
   MppiControl prefilter_command;
   std::size_t structured_candidates = 0;
   MppiBypassSide selected_bypass_side = MppiBypassSide::Neutral;
@@ -140,6 +142,7 @@ private:
     double positive_weight_mass = 0.0;
     double negative_weight_mass = 0.0;
     double neutral_weight_mass = 0.0;
+    double structured_weight_mass = 0.0;
     MppiControl prefilter_command;
   };
 
@@ -178,6 +181,7 @@ private:
     const std::vector<double> & valid_costs,
     const std::vector<MppiBypassSide> & valid_sides,
     const std::vector<bool> & collision_free,
+    const std::vector<bool> & valid_structured,
     bool select_directional_mode,
     MppiBypassSide & bypass_side,
     std::size_t & side_infeasible_cycles);

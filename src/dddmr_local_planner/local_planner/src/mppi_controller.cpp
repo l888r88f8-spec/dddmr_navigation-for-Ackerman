@@ -183,6 +183,7 @@ MppiResult MppiController::optimizeBatch(
     std::vector<double> valid_costs;
     std::vector<MppiBypassSide> valid_sides;
     std::vector<bool> collision_free;
+    std::vector<bool> valid_structured;
     result.rejected_samples = 0;
     result.best_cost = std::numeric_limits<double>::infinity();
     result.best_sample_index = 0;
@@ -276,6 +277,7 @@ MppiResult MppiController::optimizeBatch(
       valid_costs.push_back(total_cost);
       valid_sides.push_back(score.bypass_side);
       collision_free.push_back(score.collision_free);
+      valid_structured.push_back(sampled_sequence.structured);
     }
 
     const MppiBypassSide side_before_update = provisional_bypass_side;
@@ -286,6 +288,7 @@ MppiResult MppiController::optimizeBatch(
       valid_costs,
       valid_sides,
       collision_free,
+      valid_structured,
       select_directional_mode,
       provisional_bypass_side,
       provisional_infeasible_cycles);
@@ -304,6 +307,7 @@ MppiResult MppiController::optimizeBatch(
     result.positive_weight_mass = statistics.positive_weight_mass;
     result.negative_weight_mass = statistics.negative_weight_mass;
     result.neutral_weight_mass = statistics.neutral_weight_mass;
+    result.structured_weight_mass = statistics.structured_weight_mass;
     result.prefilter_command = statistics.prefilter_command;
     result.selected_bypass_side = provisional_bypass_side;
     result.side_infeasible_cycles = provisional_infeasible_cycles;
@@ -329,12 +333,17 @@ MppiResult MppiController::optimizeBatch(
   result.command = control_sequence_[command_index];
   updateControlHistory(result.command);
   shiftControlSequence();
+  // A structured maneuver materially contributed only when it owns at least
+  // half of the final selected-set weight after stable renormalization.
+  constexpr double kMaterialStructuredContributionThreshold = 0.5;
   if(select_directional_mode && latched_bypass_side_ != MppiBypassSide::Neutral){
     reset_structured_phase_for_side_change(latched_bypass_side_);
-    const std::size_t first_control_step = config_.shift_control_sequence ? 1u : 0u;
-    const std::size_t controlled_steps = config_.time_steps - first_control_step;
-    if(structured_phase_step_ < controlled_steps){
-      ++structured_phase_step_;
+    if(result.structured_weight_mass >= kMaterialStructuredContributionThreshold){
+      const std::size_t first_control_step = config_.shift_control_sequence ? 1u : 0u;
+      const std::size_t controlled_steps = config_.time_steps - first_control_step;
+      if(structured_phase_step_ < controlled_steps){
+        ++structured_phase_step_;
+      }
     }
   }
   result.structured_phase_step = structured_phase_step_;
@@ -356,6 +365,8 @@ void MppiController::normalizeConfig()
   config_.wheelbase = std::max(1e-6, config_.wheelbase);
   config_.max_steer = std::max(1e-6, std::fabs(config_.max_steer));
   config_.vx_max = std::max(config_.vx_min, config_.vx_max);
+  config_.structured_min_vx = clamp(
+    config_.structured_min_vx, config_.vx_min, config_.vx_max);
   config_.wz_max = std::max(0.0, config_.wz_max);
   config_.ax_max = std::fabs(config_.ax_max);
   config_.ax_min = config_.ax_min > 0.0 ? -config_.ax_min : config_.ax_min;
@@ -504,9 +515,11 @@ MppiController::SampledSequence MppiController::buildStructuredSequence(
 
   for(std::size_t step = first_control_step; step < config_.time_steps; ++step){
     const double dt = step == 0 ? config_.controller_period : config_.model_dt;
+    const double requested_vx = std::max(
+      control_sequence_[step].vx, config_.structured_min_vx);
     const MppiControl vx_only = constrainControl(
       previous,
-      MppiControl{control_sequence_[step].vx, previous.wz},
+      MppiControl{requested_vx, previous.wz},
       dt);
     const std::size_t phase_step = step - first_control_step;
     std::size_t absolute_phase = phase_step;
@@ -523,7 +536,7 @@ MppiController::SampledSequence MppiController::buildStructuredSequence(
       phase_direction = 0.0;
     }
     const MppiControl requested{
-      control_sequence_[step].vx,
+      requested_vx,
       phase_direction * intensity * ackermannWzLimit(vx_only.vx)};
     sequence[step] = constrainControl(previous, requested, dt);
     previous = sequence[step];
@@ -536,6 +549,7 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
   const std::vector<double> & valid_costs,
   const std::vector<MppiBypassSide> & valid_sides,
   const std::vector<bool> & collision_free,
+  const std::vector<bool> & valid_structured,
   const bool select_directional_mode,
   MppiBypassSide & bypass_side,
   std::size_t & side_infeasible_cycles)
@@ -548,7 +562,8 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
 
   if(valid_sequences.empty() || valid_sequences.size() != valid_costs.size() ||
     valid_sequences.size() != valid_sides.size() ||
-    valid_sequences.size() != collision_free.size())
+    valid_sequences.size() != collision_free.size() ||
+    valid_sequences.size() != valid_structured.size())
   {
     if(select_directional_mode && bypass_side != MppiBypassSide::Neutral){
       side_infeasible_cycles = std::min(
@@ -704,6 +719,9 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
   for(std::size_t sample = 0; sample < valid_sequences.size(); ++sample){
     const double normalized_weight =
       selected_weights[sample] / selected_weight_sum;
+    if(valid_structured[sample]){
+      statistics.structured_weight_mass += normalized_weight;
+    }
     for(std::size_t step = 0; step < config_.time_steps; ++step){
       updated[step].vx += normalized_weight * valid_sequences[sample][step].vx;
       updated[step].wz += normalized_weight * valid_sequences[sample][step].wz;

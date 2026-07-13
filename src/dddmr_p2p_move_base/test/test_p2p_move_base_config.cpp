@@ -81,6 +81,7 @@ TEST(P2PMoveBaseConfigTest, LocalizationConfigContainsMppiBackendParameters)
   EXPECT_NE(config.find("wz_std: 0.08"), std::string::npos);
   EXPECT_NE(config.find("regenerate_noises: false"), std::string::npos);
   EXPECT_NE(config.find("structured_candidate_count: 8"), std::string::npos);
+  EXPECT_NE(config.find("structured_min_vx: 0.20"), std::string::npos);
   EXPECT_NE(config.find("inflation_radius: 2.2"), std::string::npos);
   EXPECT_NE(config.find("use_perception_blocked_preemption: false"), std::string::npos);
   EXPECT_EQ(config.find("trajectory_generator: mppi"), std::string::npos);
