@@ -147,6 +147,15 @@ MppiResult MppiController::optimizeBatch(
   bool select_directional_mode = false;
   MppiBypassSide generation_bypass_side = entry_bypass_side;
   std::size_t generation_structured_phase_step = structured_phase_step_;
+  const auto reset_structured_phase_for_side_change =
+    [&](const MppiBypassSide committed_bypass_side) {
+      if(entry_bypass_side != MppiBypassSide::Neutral &&
+        committed_bypass_side != MppiBypassSide::Neutral &&
+        entry_bypass_side != committed_bypass_side)
+      {
+        structured_phase_step_ = 0;
+      }
+    };
   result.structured_candidates = use_debug_noise_for_test_ ? 0 :
     activeStructuredCandidateCount(generation_bypass_side);
 
@@ -274,8 +283,10 @@ MppiResult MppiController::optimizeBatch(
       control_sequence_ = entry_control_sequence;
       latched_bypass_side_ = provisional_bypass_side;
       latched_side_infeasible_cycles_ = provisional_infeasible_cycles;
+      reset_structured_phase_for_side_change(latched_bypass_side_);
       result.has_valid_control = false;
       result.optimal_sequence = control_sequence_;
+      result.structured_phase_step = structured_phase_step_;
       return result;
     }
   }
@@ -291,11 +302,7 @@ MppiResult MppiController::optimizeBatch(
   updateControlHistory(result.command);
   shiftControlSequence();
   if(select_directional_mode && latched_bypass_side_ != MppiBypassSide::Neutral){
-    if(entry_bypass_side != MppiBypassSide::Neutral &&
-      entry_bypass_side != latched_bypass_side_)
-    {
-      structured_phase_step_ = 0;
-    }
+    reset_structured_phase_for_side_change(latched_bypass_side_);
     const std::size_t first_control_step = config_.shift_control_sequence ? 1u : 0u;
     const std::size_t controlled_steps = config_.time_steps - first_control_step;
     if(structured_phase_step_ < controlled_steps){
