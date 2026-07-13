@@ -85,6 +85,8 @@ struct MppiResult
   double positive_weight_mass = 0.0;
   double negative_weight_mass = 0.0;
   double neutral_weight_mass = 0.0;
+  MppiBypassSide selected_bypass_side = MppiBypassSide::Neutral;
+  std::size_t side_infeasible_cycles = 0;
   MppiControl prefilter_command;
   std::size_t structured_candidates = 0;
 };
@@ -117,6 +119,7 @@ public:
 private:
   struct UpdateStatistics
   {
+    bool valid = false;
     double effective_sample_size = 0.0;
     double positive_weight_mass = 0.0;
     double negative_weight_mass = 0.0;
@@ -130,6 +133,9 @@ private:
   std::vector<std::vector<MppiControl>> noise_;
   std::mt19937 generator_;
   bool use_debug_noise_for_test_ = false;
+  MppiBypassSide latched_bypass_side_ = MppiBypassSide::Neutral;
+  std::size_t latched_side_infeasible_cycles_ = 0;
+  static constexpr std::size_t kSideSwitchConfirmCycles = 3;
 
   void normalizeConfig();
   void regenerateNoise();
@@ -148,6 +154,8 @@ private:
   UpdateStatistics applySoftmaxUpdate(
     const std::vector<std::vector<MppiControl>> & valid_sequences,
     const std::vector<double> & valid_costs,
+    const std::vector<MppiBypassSide> & valid_sides,
+    const std::vector<bool> & collision_free,
     bool select_directional_mode);
   void smoothControlSequence(const MppiControl & measured_speed);
   void updateControlHistory(const MppiControl & command);
