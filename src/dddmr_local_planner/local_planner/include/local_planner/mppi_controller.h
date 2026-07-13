@@ -90,6 +90,8 @@ struct MppiResult
   MppiBypassSide selected_bypass_side = MppiBypassSide::Neutral;
   std::size_t side_infeasible_cycles = 0;
   std::size_t structured_phase_step = 0;
+  double best_critic_cost = std::numeric_limits<double>::infinity();
+  double best_control_energy = 0.0;
 };
 
 class MppiController
@@ -118,6 +120,13 @@ public:
     const ModeSelectionFunction & mode_selection_function = {});
 
 private:
+  struct SampledSequence
+  {
+    std::vector<MppiControl> controls;
+    double control_energy = 0.0;
+    bool structured = false;
+  };
+
   struct UpdateStatistics
   {
     bool valid = false;
@@ -148,12 +157,12 @@ private:
     const MppiControl & previous,
     const MppiControl & requested,
     double dt) const;
-  std::vector<MppiControl> buildNoisedSequence(
+  SampledSequence buildNoisedSequence(
     const MppiControl & measured_speed,
     std::size_t sample_index,
     MppiBypassSide bypass_side,
     std::size_t structured_phase_step) const;
-  std::vector<MppiControl> buildStructuredSequence(
+  SampledSequence buildStructuredSequence(
     const MppiControl & measured_speed,
     std::size_t sample_index,
     MppiBypassSide bypass_side,

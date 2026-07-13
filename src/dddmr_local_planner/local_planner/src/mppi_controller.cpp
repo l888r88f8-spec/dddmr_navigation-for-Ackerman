@@ -174,8 +174,10 @@ MppiResult MppiController::optimizeBatch(
     result.best_cost = std::numeric_limits<double>::infinity();
     result.best_sample_index = 0;
     result.best_sample_sequence.clear();
+    result.best_critic_cost = std::numeric_limits<double>::infinity();
+    result.best_control_energy = 0.0;
 
-    std::vector<std::vector<MppiControl>> sampled_sequences;
+    std::vector<SampledSequence> sampled_sequences;
     std::vector<MppiCandidate> candidates;
     const auto generate_candidates = [&]() {
         sampled_sequences.clear();
@@ -188,7 +190,7 @@ MppiResult MppiController::optimizeBatch(
               sample,
               generation_bypass_side,
               generation_structured_phase_step));
-          candidates.push_back(MppiCandidate{sampled_sequences.back()});
+          candidates.push_back(MppiCandidate{sampled_sequences.back().controls});
         }
       };
     generate_candidates();
@@ -213,7 +215,8 @@ MppiResult MppiController::optimizeBatch(
     }
 
     for(std::size_t sample = 0; sample < config_.batch_size; ++sample){
-      const auto & sequence = sampled_sequences[sample];
+      const auto & sampled_sequence = sampled_sequences[sample];
+      const auto & sequence = sampled_sequence.controls;
       const auto score =
         sample < scores.size() ? scores[sample] : MppiCandidateScore{false, -1.0};
       if(!score.valid || !std::isfinite(score.cost) || score.cost < 0.0){
@@ -221,25 +224,18 @@ MppiResult MppiController::optimizeBatch(
         continue;
       }
 
-      double control_energy = 0.0;
-      for(std::size_t step = 0; step < sequence.size(); ++step){
-        if(config_.vx_std > 1e-9){
-          const double bounded_noise_vx = sequence[step].vx - control_sequence_[step].vx;
-          control_energy +=
-            config_.gamma / (config_.vx_std * config_.vx_std) *
-            control_sequence_[step].vx * bounded_noise_vx;
-        }
-        if(config_.wz_std > 1e-9){
-          const double bounded_noise_wz = sequence[step].wz - control_sequence_[step].wz;
-          control_energy +=
-            config_.gamma / (config_.wz_std * config_.wz_std) *
-            control_sequence_[step].wz * bounded_noise_wz;
-        }
-      }
+      const double control_energy =
+        sampled_sequence.structured ? 0.0 : sampled_sequence.control_energy;
       const double total_cost = score.cost + control_energy;
+      if(!std::isfinite(total_cost)){
+        ++result.rejected_samples;
+        continue;
+      }
 
       if(total_cost < result.best_cost){
         result.best_cost = total_cost;
+        result.best_critic_cost = score.cost;
+        result.best_control_energy = control_energy;
         result.best_sample_index = sample;
         result.best_sample_sequence = sequence;
       }
@@ -390,7 +386,7 @@ MppiControl MppiController::constrainControl(
   return constrained;
 }
 
-std::vector<MppiControl> MppiController::buildNoisedSequence(
+MppiController::SampledSequence MppiController::buildNoisedSequence(
   const MppiControl & measured_speed,
   const std::size_t sample_index,
   const MppiBypassSide bypass_side,
@@ -403,7 +399,9 @@ std::vector<MppiControl> MppiController::buildNoisedSequence(
       measured_speed, sample_index, bypass_side, structured_phase_step);
   }
 
-  std::vector<MppiControl> sequence(config_.time_steps);
+  SampledSequence sampled_sequence;
+  auto & sequence = sampled_sequence.controls;
+  sequence.resize(config_.time_steps);
   MppiControl previous = measured_speed;
   std::size_t first_noised_step = 0;
   if(config_.shift_control_sequence && !sequence.empty()){
@@ -424,19 +422,32 @@ std::vector<MppiControl> MppiController::buildNoisedSequence(
       (config_.wz_std > 1e-9 ?
       std::min(1.0, ackermannWzLimit(vx_only.vx) / config_.wz_std) : 0.0);
     requested.wz = control_sequence_[step].wz + noise.wz * angular_noise_scale;
+    if(config_.vx_std > 1e-9){
+      sampled_sequence.control_energy +=
+        config_.gamma / (config_.vx_std * config_.vx_std) *
+        control_sequence_[step].vx * noise.vx;
+    }
+    if(config_.wz_std > 1e-9){
+      sampled_sequence.control_energy +=
+        config_.gamma / (config_.wz_std * config_.wz_std) *
+        control_sequence_[step].wz * (noise.wz * angular_noise_scale);
+    }
     sequence[step] = constrainControl(previous, requested, dt);
     previous = sequence[step];
   }
-  return sequence;
+  return sampled_sequence;
 }
 
-std::vector<MppiControl> MppiController::buildStructuredSequence(
+MppiController::SampledSequence MppiController::buildStructuredSequence(
   const MppiControl & measured_speed,
   const std::size_t sample_index,
   const MppiBypassSide bypass_side,
   const std::size_t structured_phase_step) const
 {
-  std::vector<MppiControl> sequence(config_.time_steps);
+  SampledSequence sampled_sequence;
+  sampled_sequence.structured = true;
+  auto & sequence = sampled_sequence.controls;
+  sequence.resize(config_.time_steps);
   MppiControl previous = measured_speed;
   std::size_t first_control_step = 0;
   if(config_.shift_control_sequence && !sequence.empty()){
@@ -481,7 +492,7 @@ std::vector<MppiControl> MppiController::buildStructuredSequence(
     sequence[step] = constrainControl(previous, requested, dt);
     previous = sequence[step];
   }
-  return sequence;
+  return sampled_sequence;
 }
 
 MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(

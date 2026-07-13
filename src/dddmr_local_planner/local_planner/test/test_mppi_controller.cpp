@@ -83,6 +83,29 @@ MppiConfig makeStructuredPhaseConfig()
   return config;
 }
 
+MppiConfig makeControlEnergyConfig()
+{
+  MppiConfig config;
+  config.batch_size = 1;
+  config.structured_candidate_count = 0;
+  config.time_steps = 1;
+  config.iteration_count = 1;
+  config.shift_control_sequence = false;
+  config.temperature = 1.0;
+  config.gamma = 0.5;
+  config.vx_std = 0.2;
+  config.wz_std = 0.5;
+  config.vx_min = 0.0;
+  config.vx_max = 2.0;
+  config.wz_max = 2.0;
+  config.ax_min = -100.0;
+  config.ax_max = 100.0;
+  config.az_max = 100.0;
+  config.wheelbase = 0.1;
+  config.max_steer = 1.0;
+  return config;
+}
+
 local_planner::MppiResult latchLeftStructured(MppiController & controller)
 {
   return controller.optimizeBatch(
@@ -1454,6 +1477,239 @@ TEST(MppiControllerTest, ControlEnergyScalesWithSamplingVariance)
     };
 
   EXPECT_LT(optimized_vx(0.2), optimized_vx(0.4));
+}
+
+TEST(MppiControllerTest, StructuredCandidatesHaveZeroControlEnergy)
+{
+  auto config = makeControlEnergyConfig();
+  config.batch_size = 4;
+  config.structured_candidate_count = 4;
+  config.time_steps = 3;
+
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.4, 0.2});
+
+  const auto result = controller.optimize(
+    MppiControl{0.4, 0.2},
+    [](const MppiCandidate &) {return MppiCandidateScore{true, 5.0};});
+
+  ASSERT_TRUE(result.has_valid_control);
+  EXPECT_EQ(result.structured_candidates, config.structured_candidate_count);
+  EXPECT_DOUBLE_EQ(result.best_critic_cost, 5.0);
+  EXPECT_DOUBLE_EQ(result.best_control_energy, 0.0);
+  EXPECT_DOUBLE_EQ(result.best_cost, 5.0);
+}
+
+TEST(MppiControllerTest, DebugRandomCandidateReportsRawControlEnergy)
+{
+  auto config = makeControlEnergyConfig();
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.4, 0.2});
+  controller.setDebugNoiseForTest({{MppiControl{-0.2, -0.1}}});
+
+  const auto result = controller.optimize(
+    MppiControl{0.4, 0.2},
+    [](const MppiCandidate &) {return MppiCandidateScore{true, 0.5};});
+
+  const double expected_energy =
+    config.gamma / (config.vx_std * config.vx_std) * 0.4 * -0.2 +
+    config.gamma / (config.wz_std * config.wz_std) * 0.2 * -0.1;
+  ASSERT_TRUE(result.has_valid_control);
+  EXPECT_EQ(result.structured_candidates, 0u);
+  EXPECT_DOUBLE_EQ(result.best_critic_cost, 0.5);
+  EXPECT_NEAR(result.best_control_energy, expected_energy, 1e-12);
+  EXPECT_NEAR(result.best_cost, 0.5 + expected_energy, 1e-12);
+  EXPECT_LT(result.best_cost, 0.0);
+}
+
+TEST(MppiControllerTest, ControlEnergyUsesRawNoiseWhenControlsAreClipped)
+{
+  auto config = makeControlEnergyConfig();
+  config.gamma = 0.2;
+  config.vx_std = 0.5;
+  config.wz_std = 0.25;
+  config.vx_max = 0.6;
+  config.wz_max = 0.3;
+  config.ax_min = -1.0;
+  config.ax_max = 1.0;
+  config.az_max = 1.0;
+  config.controller_period = 0.1;
+
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.5, 0.2});
+  controller.setDebugNoiseForTest({{MppiControl{2.0, 1.0}}});
+
+  const auto result = controller.optimize(
+    MppiControl{0.5, 0.2},
+    [](const MppiCandidate &) {return MppiCandidateScore{true, 2.0};});
+
+  const double expected_energy =
+    config.gamma / (config.vx_std * config.vx_std) * 0.5 * 2.0 +
+    config.gamma / (config.wz_std * config.wz_std) * 0.2 * 1.0;
+  ASSERT_TRUE(result.has_valid_control);
+  ASSERT_EQ(result.best_sample_sequence.size(), 1u);
+  EXPECT_NEAR(result.best_sample_sequence.front().vx, 0.6, 1e-12);
+  EXPECT_NEAR(result.best_sample_sequence.front().wz, 0.3, 1e-12);
+  EXPECT_NEAR(result.best_control_energy, expected_energy, 1e-12);
+  EXPECT_NEAR(result.best_cost, 2.0 + expected_energy, 1e-12);
+}
+
+TEST(MppiControllerTest, ShiftedMeasuredStepDoesNotContributeControlEnergy)
+{
+  auto config = makeControlEnergyConfig();
+  config.time_steps = 3;
+  config.shift_control_sequence = true;
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.4, 0.2});
+  controller.setDebugNoiseForTest({{
+    MppiControl{100.0, 100.0},
+    MppiControl{0.1, -0.05},
+    MppiControl{-0.2, 0.1}
+  }});
+
+  const auto result = controller.optimize(
+    MppiControl{0.4, 0.2},
+    [](const MppiCandidate &) {return MppiCandidateScore{true, 1.0};});
+
+  const double expected_energy =
+    config.gamma / (config.vx_std * config.vx_std) * 0.4 * (0.1 - 0.2) +
+    config.gamma / (config.wz_std * config.wz_std) * 0.2 * (-0.05 + 0.1);
+  ASSERT_TRUE(result.has_valid_control);
+  EXPECT_NEAR(result.best_control_energy, expected_energy, 1e-12);
+  EXPECT_NEAR(result.best_cost, 1.0 + expected_energy, 1e-12);
+}
+
+TEST(MppiControllerTest, LatchedStructuredAndRandomCandidatesKeepDistinctEnergy)
+{
+  auto config = makeStructuredPhaseConfig();
+  config.batch_size = 4;
+  config.structured_candidate_count = 4;
+  config.time_steps = 4;
+  config.gamma = 0.2;
+  config.vx_std = 0.1;
+  config.wz_std = 0.2;
+  config.seed = 19;
+  config.temperature = 0.01;
+  config.vx_min = 0.2;
+  config.vx_max = 0.6;
+  config.wheelbase = 0.1;
+  config.max_steer = 1.0;
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.3, 0.1});
+
+  const auto latched = controller.optimizeBatch(
+    MppiControl{0.3, 0.1},
+    [](const std::vector<MppiCandidate> & candidates) {
+      std::vector<MppiCandidateScore> scores(
+        candidates.size(), MppiCandidateScore{true, 100.0, MppiBypassSide::Left, true});
+      scores[0].cost = 0.0;
+      return scores;
+    },
+    []() {return true;});
+  ASSERT_TRUE(latched.has_valid_control);
+  ASSERT_EQ(latched.selected_bypass_side, MppiBypassSide::Left);
+
+  const auto structured = controller.optimizeBatch(
+    MppiControl{0.3, 0.1},
+    [](const std::vector<MppiCandidate> & candidates) {
+      std::vector<MppiCandidateScore> scores(
+        candidates.size(), MppiCandidateScore{true, 10000.0, MppiBypassSide::Left, true});
+      scores[0].cost = 3.0;
+      return scores;
+    },
+    []() {return true;});
+  ASSERT_TRUE(structured.has_valid_control);
+  ASSERT_EQ(structured.structured_candidates, 2u);
+  EXPECT_EQ(structured.best_sample_index, 0u);
+  EXPECT_DOUBLE_EQ(structured.best_critic_cost, 3.0);
+  EXPECT_DOUBLE_EQ(structured.best_control_energy, 0.0);
+  EXPECT_DOUBLE_EQ(structured.best_cost, 3.0);
+
+  const auto nominal = controller.controlSequence();
+  double expected_random_energy = 0.0;
+  for(std::size_t step = 0; step < config.time_steps; ++step){
+    const auto noise = controller.debugNoiseAt(2, step);
+    expected_random_energy +=
+      config.gamma / (config.vx_std * config.vx_std) * nominal[step].vx * noise.vx +
+      config.gamma / (config.wz_std * config.wz_std) * nominal[step].wz * noise.wz;
+  }
+  ASSERT_GT(std::fabs(expected_random_energy), 1e-9);
+
+  const auto random = controller.optimizeBatch(
+    MppiControl{0.3, 0.1},
+    [](const std::vector<MppiCandidate> & candidates) {
+      std::vector<MppiCandidateScore> scores(
+        candidates.size(), MppiCandidateScore{true, 10000.0, MppiBypassSide::Left, true});
+      scores[2].cost = 5.0;
+      return scores;
+    },
+    []() {return true;});
+  ASSERT_TRUE(random.has_valid_control);
+  EXPECT_EQ(random.structured_candidates, 2u);
+  EXPECT_EQ(random.best_sample_index, 2u);
+  EXPECT_DOUBLE_EQ(random.best_critic_cost, 5.0);
+  EXPECT_NEAR(random.best_control_energy, expected_random_energy, 1e-12);
+  EXPECT_NEAR(random.best_cost, 5.0 + expected_random_energy, 1e-12);
+}
+
+TEST(MppiControllerTest, BestCostDiagnosticsResetForEachIteration)
+{
+  auto config = makeControlEnergyConfig();
+  config.batch_size = 2;
+  config.iteration_count = 2;
+  config.gamma = 0.0;
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.4, 0.2});
+  controller.setDebugNoiseForTest({
+    {MppiControl{-0.1, 0.0}},
+    {MppiControl{0.1, 0.0}}
+  });
+
+  std::size_t score_calls = 0;
+  const auto result = controller.optimizeBatch(
+    MppiControl{0.4, 0.2},
+    [&](const std::vector<MppiCandidate> &) {
+      ++score_calls;
+      if(score_calls == 1){
+        return std::vector<MppiCandidateScore>{
+          MppiCandidateScore{true, 1.0}, MppiCandidateScore{true, 2.0}};
+      }
+      return std::vector<MppiCandidateScore>{
+        MppiCandidateScore{true, 8.0}, MppiCandidateScore{true, 7.0}};
+    });
+
+  ASSERT_TRUE(result.has_valid_control);
+  EXPECT_EQ(score_calls, 2u);
+  EXPECT_EQ(result.best_sample_index, 1u);
+  EXPECT_DOUBLE_EQ(result.best_critic_cost, 7.0);
+  EXPECT_DOUBLE_EQ(result.best_control_energy, 0.0);
+  EXPECT_DOUBLE_EQ(result.best_cost, 7.0);
+}
+
+TEST(MppiControllerTest, RejectsNonfiniteTotalCostBeforeSoftmax)
+{
+  auto config = makeControlEnergyConfig();
+  config.batch_size = 2;
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.4, 0.2});
+  controller.setDebugNoiseForTest({
+    {MppiControl{std::numeric_limits<double>::infinity(), 0.0}},
+    {MppiControl{0.0, 0.0}}
+  });
+
+  const auto result = controller.optimizeBatch(
+    MppiControl{0.4, 0.2},
+    [](const std::vector<MppiCandidate> &) {
+      return std::vector<MppiCandidateScore>{
+        MppiCandidateScore{true, 0.0}, MppiCandidateScore{true, 1.0}};
+    });
+
+  ASSERT_TRUE(result.has_valid_control);
+  EXPECT_EQ(result.rejected_samples, 1u);
+  EXPECT_EQ(result.best_sample_index, 1u);
+  EXPECT_DOUBLE_EQ(result.best_critic_cost, 1.0);
+  EXPECT_DOUBLE_EQ(result.best_control_energy, 0.0);
+  EXPECT_DOUBLE_EQ(result.best_cost, 1.0);
 }
 
 TEST(MppiControllerTest, ReusesNoiseAcrossOptimizationCyclesByDefault)
