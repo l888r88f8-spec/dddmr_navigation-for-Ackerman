@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <pcl/kdtree/kdtree_flann.h>
@@ -13,44 +14,47 @@
 namespace local_planner
 {
 
-class MppiObstacleSpatialHash;
+class MppiObstacleSpatialIndex;
 
 struct MppiObstacleClearanceResult
 {
   bool in_collision = false;
   double clearance = std::numeric_limits<double>::infinity();
   std::size_t ignored_indices = 0;
+  std::size_t node_checks = 0;
+  std::size_t point_checks = 0;
 };
 
 struct MppiObstacleCollisionResult
 {
   bool in_collision = false;
   bool evaluated = false;
+  std::size_t node_checks = 0;
+  std::size_t point_checks = 0;
 };
 
 struct MppiObstacleSnapshot
 {
   pcl::PointCloud<pcl::PointXYZI>::Ptr cloud;
   pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr kdtree;
-  std::shared_ptr<const MppiObstacleSpatialHash> collision_hash;
+  std::shared_ptr<const MppiObstacleSpatialIndex> obstacle_index;
 };
 
 struct MppiObstacleScoringWork
 {
-  std::size_t clearance_nearest_kdtree_queries = 0;
-  std::size_t clearance_radius_kdtree_queries = 0;
-  std::size_t collision_hash_queries = 0;
+  std::size_t clearance_index_queries = 0;
+  std::size_t collision_index_queries = 0;
   std::size_t collision_pose_checks = 0;
   bool overflowed = false;
 
-  std::size_t totalKdTreeQueries() const
+  std::size_t totalIndexQueries() const
   {
-    if(clearance_nearest_kdtree_queries >
-       std::numeric_limits<std::size_t>::max() - clearance_radius_kdtree_queries)
+    if(clearance_index_queries >
+       std::numeric_limits<std::size_t>::max() - collision_index_queries)
     {
       return std::numeric_limits<std::size_t>::max();
     }
-    return clearance_nearest_kdtree_queries + clearance_radius_kdtree_queries;
+    return clearance_index_queries + collision_index_queries;
   }
 };
 
@@ -103,6 +107,12 @@ MppiObstacleScoringWork estimateMppiObstacleScoringWork(
 double computeMppiCuboidCollisionQueryRadius(
   const pcl::PointCloud<pcl::PointXYZ> & cuboid,
   const pcl::PointXYZ & pose_center);
+
+std::string formatMppiObstacleQueryMetrics(
+  std::size_t collision_node_checks,
+  std::size_t collision_point_checks,
+  std::size_t clearance_node_checks,
+  std::size_t clearance_point_checks);
 
 }  // namespace local_planner
 

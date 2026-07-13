@@ -18,6 +18,7 @@ using local_planner::computeMppiCuboidCollisionQueryRadius;
 using local_planner::collectMppiObstacleCollisionCandidates;
 using local_planner::estimateMppiObstacleScoringWork;
 using local_planner::evaluateMppiObstacleCollisionForCuboid;
+using local_planner::formatMppiObstacleQueryMetrics;
 using local_planner::annotateMppiCandidateMetadata;
 using local_planner::classifyMppiBypassSide;
 using local_planner::hasObstacleCollisionForCuboid;
@@ -760,9 +761,8 @@ TEST(MppiObstacleGeometryTest, WorkEstimateIsIndependentOfObstacleCount)
 {
   for(const std::size_t obstacle_count : {129u, 1024u, 30000u}){
     const auto work = estimateMppiObstacleScoringWork(96, 75, 4, obstacle_count);
-    EXPECT_EQ(work.clearance_nearest_kdtree_queries, 1920u);
-    EXPECT_EQ(work.clearance_radius_kdtree_queries, 1920u);
-    EXPECT_EQ(work.collision_hash_queries, 7200u);
+    EXPECT_EQ(work.clearance_index_queries, 1920u);
+    EXPECT_EQ(work.collision_index_queries, 7200u);
     EXPECT_EQ(work.collision_pose_checks, 7200u);
   }
 }
@@ -770,8 +770,8 @@ TEST(MppiObstacleGeometryTest, WorkEstimateIsIndependentOfObstacleCount)
 TEST(MppiObstacleGeometryTest, WorkEstimateMatchesEmptyCloudFastPath)
 {
   const auto work = estimateMppiObstacleScoringWork(96, 75, 4, 0);
-  EXPECT_EQ(work.totalKdTreeQueries(), 0u);
-  EXPECT_EQ(work.collision_hash_queries, 0u);
+  EXPECT_EQ(work.totalIndexQueries(), 0u);
+  EXPECT_EQ(work.collision_index_queries, 0u);
   EXPECT_EQ(work.collision_pose_checks, 7200u);
   EXPECT_FALSE(work.overflowed);
 }
@@ -782,20 +782,27 @@ TEST(MppiObstacleGeometryTest, WorkEstimateSaturatesInsteadOfWrapping)
   const auto work = estimateMppiObstacleScoringWork(maximum, maximum, 4, 64);
   EXPECT_TRUE(work.overflowed);
   EXPECT_EQ(work.collision_pose_checks, maximum);
-  EXPECT_EQ(work.collision_hash_queries, maximum);
-  EXPECT_EQ(work.clearance_nearest_kdtree_queries, maximum);
-  EXPECT_EQ(work.clearance_radius_kdtree_queries, maximum);
+  EXPECT_EQ(work.collision_index_queries, maximum);
+  EXPECT_EQ(work.clearance_index_queries, maximum);
 }
 
-TEST(MppiObstacleGeometryTest, TotalKdTreeQueriesSaturatesAddition)
+TEST(MppiObstacleGeometryTest, TotalIndexQueriesSaturatesAddition)
 {
   local_planner::MppiObstacleScoringWork work;
-  work.clearance_nearest_kdtree_queries = std::numeric_limits<std::size_t>::max() - 2;
-  work.clearance_radius_kdtree_queries = 10;
-  EXPECT_EQ(work.totalKdTreeQueries(), std::numeric_limits<std::size_t>::max());
+  work.clearance_index_queries = std::numeric_limits<std::size_t>::max() - 2;
+  work.collision_index_queries = 10;
+  EXPECT_EQ(work.totalIndexQueries(), std::numeric_limits<std::size_t>::max());
 }
 
-TEST(MppiObstacleGeometryTest, SpatialHashCollisionMatchesFullScanOracleAcrossCloudSizes)
+TEST(MppiObstacleGeometryTest, QueryMetricLogFieldsRemainAligned)
+{
+  EXPECT_EQ(
+    formatMppiObstacleQueryMetrics(11, 22, 33, 44),
+    "collision_nodes=11, collision_candidates=22, clearance_nodes=33, "
+    "clearance_candidates=44");
+}
+
+TEST(MppiObstacleGeometryTest, SpatialIndexCollisionMatchesFullScanOracleAcrossCloudSizes)
 {
   std::mt19937 generator(17);
   std::uniform_real_distribution<float> xy(-5.0F, 5.0F);
@@ -827,7 +834,7 @@ TEST(MppiObstacleGeometryTest, SpatialHashCollisionMatchesFullScanOracleAcrossCl
   }
 }
 
-TEST(MppiObstacleGeometryTest, SpatialHashCoversRotatedCuboidAndCellBoundaries)
+TEST(MppiObstacleGeometryTest, SpatialIndexCoversRotatedCuboidAndFormerCellBoundaries)
 {
   auto obstacles = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
   for(const float coordinate : {-1.0F, -0.5F, 0.0F, 0.5F, 1.0F}){
@@ -849,7 +856,7 @@ TEST(MppiObstacleGeometryTest, SpatialHashCoversRotatedCuboidAndCellBoundaries)
   }
 }
 
-TEST(MppiObstacleGeometryTest, SpatialHashIncludesObstacleAtCombinedFarCorner)
+TEST(MppiObstacleGeometryTest, SpatialIndexIncludesObstacleAtCombinedFarCorner)
 {
   const double yaw = kTestPi / 4.0;
   const auto cuboid = makeTestCuboid(0.5, -0.5, 0.0, yaw);
@@ -867,7 +874,33 @@ TEST(MppiObstacleGeometryTest, SpatialHashIncludesObstacleAtCombinedFarCorner)
   EXPECT_TRUE(hasObstacleCollisionForCuboid(cuboid, snapshot, &candidate_ids));
 }
 
-TEST(MppiObstacleGeometryTest, SpatialHashFallsBackSafelyForExtremeFiniteRanges)
+TEST(MppiObstacleGeometryTest, RotatedTolerancePointOutsideWorldPaddingStillCollides)
+{
+  constexpr double yaw = kTestPi / 4.0;
+  constexpr double local_tolerance_offset = 0.9e-6;
+  const auto cuboid = makeTestCuboid(0.0, 0.0, 0.0, yaw);
+  auto obstacles = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+  pcl::PointXYZI tolerance_point;
+  const double local_x = 0.50 + local_tolerance_offset;
+  const double local_y = -0.32 - local_tolerance_offset;
+  tolerance_point.x = static_cast<float>(
+    std::cos(yaw) * local_x - std::sin(yaw) * local_y);
+  tolerance_point.y = static_cast<float>(
+    std::sin(yaw) * local_x + std::cos(yaw) * local_y);
+  tolerance_point.z = 0.0F;
+  obstacles->push_back(tolerance_point);
+  const auto snapshot = makeMppiObstacleSnapshot(obstacles);
+  std::vector<int> ids;
+
+  ASSERT_TRUE(hasObstacleCollisionForCuboid(cuboid, *snapshot.cloud));
+  const auto indexed = evaluateMppiObstacleCollisionForCuboid(cuboid, snapshot, &ids);
+  EXPECT_TRUE(indexed.evaluated);
+  EXPECT_TRUE(indexed.in_collision);
+  EXPECT_GT(indexed.node_checks, 0u);
+  EXPECT_GT(indexed.point_checks, 0u);
+}
+
+TEST(MppiObstacleGeometryTest, SpatialIndexHandlesExtremeFiniteRanges)
 {
   auto obstacles = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
   pcl::PointXYZI extreme;
@@ -879,10 +912,43 @@ TEST(MppiObstacleGeometryTest, SpatialHashFallsBackSafelyForExtremeFiniteRanges)
   const auto cuboid = makeTestCuboid(0.0, 0.0, 0.0, 0.0);
   std::vector<int> candidate_ids;
 
-  EXPECT_FALSE(collectMppiObstacleCollisionCandidates(cuboid, snapshot, &candidate_ids));
+  EXPECT_TRUE(collectMppiObstacleCollisionCandidates(cuboid, snapshot, &candidate_ids));
+  EXPECT_TRUE(candidate_ids.empty());
   EXPECT_EQ(
     hasObstacleCollisionForCuboid(cuboid, snapshot, &candidate_ids),
     hasObstacleCollisionForCuboid(cuboid, *snapshot.cloud));
+}
+
+TEST(MppiObstacleGeometryTest, MissingSpatialIndexFallsBackToExactFullScan)
+{
+  auto obstacles = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+  for(const float x : {-2.0F, 0.0F, 2.0F}){
+    pcl::PointXYZI point;
+    point.x = x;
+    point.y = 0.0F;
+    point.z = 0.0F;
+    obstacles->push_back(point);
+  }
+  auto snapshot = makeMppiObstacleSnapshot(obstacles);
+  snapshot.obstacle_index.reset();
+  const auto cuboid = makeTestCuboid(0.0, 0.0, 0.0, 0.0);
+  std::vector<int> ids;
+  std::vector<float> squared_distances;
+  pcl::PointXYZ center;
+  center.x = 0.0F;
+  center.y = 0.0F;
+  center.z = 0.0F;
+
+  const auto collision = evaluateMppiObstacleCollisionForCuboid(cuboid, snapshot, &ids);
+  const auto clearance = computeAdaptiveObstacleClearanceForCuboid(
+    cuboid, snapshot, center, 2.2, &ids, &squared_distances);
+  const auto exact = computeObstacleClearanceForCuboid(cuboid, *snapshot.cloud, {0, 1, 2});
+  EXPECT_TRUE(collision.evaluated);
+  EXPECT_EQ(collision.in_collision, exact.in_collision);
+  EXPECT_EQ(collision.point_checks, 2u);
+  EXPECT_EQ(clearance.in_collision, exact.in_collision);
+  EXPECT_DOUBLE_EQ(clearance.clearance, exact.clearance);
+  EXPECT_EQ(clearance.point_checks, 2u);
 }
 
 TEST(MppiObstacleGeometryTest, MalformedCuboidsRemainUnevaluatedAndFailValidation)
@@ -1017,12 +1083,14 @@ TEST(MppiObstacleGeometryTest, RepresentativeScoringGeometryFitsFifteenHertzBudg
   {
     std::size_t obstacle_count;
     bool dense_wall;
+    bool dense_bucket;
   };
 
   for(const auto scenario : {
-      Scenario{129u, false},
-      Scenario{1024u, true},
-      Scenario{30000u, false}})
+      Scenario{129u, false, false},
+      Scenario{1024u, true, false},
+      Scenario{30000u, false, false},
+      Scenario{30000u, false, true}})
   {
     auto obstacles = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
     obstacles->reserve(scenario.obstacle_count);
@@ -1031,7 +1099,13 @@ TEST(MppiObstacleGeometryTest, RepresentativeScoringGeometryFitsFifteenHertzBudg
     std::uniform_real_distribution<float> z(-0.3F, 1.0F);
     for(std::size_t index = 0; index < scenario.obstacle_count; ++index){
       pcl::PointXYZI obstacle;
-      if(scenario.dense_wall){
+      if(scenario.dense_bucket){
+        obstacle.x = 0.45F + 0.04F * static_cast<float>(index) /
+          static_cast<float>(scenario.obstacle_count);
+        obstacle.y = 0.49F;
+        obstacle.z = 0.49F;
+      }
+      else if(scenario.dense_wall){
         obstacle.x = 1.20F;
         obstacle.y = -4.0F + 8.0F * static_cast<float>(index % 64) / 63.0F;
         obstacle.z = -0.3F + 1.3F * static_cast<float>(index / 64) / 15.0F;
@@ -1046,6 +1120,9 @@ TEST(MppiObstacleGeometryTest, RepresentativeScoringGeometryFitsFifteenHertzBudg
 
     std::size_t evaluated_poses = 0;
     std::size_t collision_count = 0;
+    std::size_t clearance_calls = 0;
+    std::size_t collision_point_checks = 0;
+    std::size_t clearance_point_checks = 0;
     double clearance_sum = 0.0;
     bool every_pose_evaluated = true;
     const auto start = std::chrono::steady_clock::now();
@@ -1058,6 +1135,7 @@ TEST(MppiObstacleGeometryTest, RepresentativeScoringGeometryFitsFifteenHertzBudg
       const auto collision = evaluateMppiObstacleCollisionForCuboid(cuboid, snapshot, &ids);
       every_pose_evaluated = every_pose_evaluated && collision.evaluated;
       collision_count += collision.in_collision ? 1u : 0u;
+      collision_point_checks += collision.point_checks;
       if(evaluate_clearance){
         if(collision.in_collision){
           clearance_sum += 0.0;
@@ -1074,6 +1152,8 @@ TEST(MppiObstacleGeometryTest, RepresentativeScoringGeometryFitsFifteenHertzBudg
             inflation_radius,
             &ids,
             &squared_distances);
+          ++clearance_calls;
+          clearance_point_checks += clearance.point_checks;
           if(std::isfinite(clearance.clearance)){
             clearance_sum += clearance.clearance;
           }
@@ -1084,32 +1164,45 @@ TEST(MppiObstacleGeometryTest, RepresentativeScoringGeometryFitsFifteenHertzBudg
 
     for(std::size_t trajectory = 0; trajectory < batch_size; ++trajectory){
       const double lateral_offset =
+        scenario.dense_bucket ? 0.0 :
         (static_cast<double>(trajectory % 12) - 5.5) * 0.04;
       const double yaw =
+        scenario.dense_bucket ? 0.0 :
         (static_cast<double>(trajectory / 12) - 3.5) * 0.012;
       for(std::size_t point = 0; point < trajectory_point_count; ++point){
         evaluate_pose(
-          static_cast<double>(point) * 0.01,
+          scenario.dense_bucket ? 0.0 : static_cast<double>(point) * 0.01,
           lateral_offset,
           yaw,
           point % trajectory_point_step == 0 || point + 1 == trajectory_point_count);
       }
     }
     for(std::size_t point = 0; point < trajectory_point_count; ++point){
-      evaluate_pose(static_cast<double>(point) * 0.01, 0.0, 0.0, true);
+      evaluate_pose(
+        scenario.dense_bucket ? 0.0 : static_cast<double>(point) * 0.01,
+        0.0,
+        0.0,
+        true);
     }
     const auto elapsed = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - start);
     std::cout << "MPPI geometry benchmark: obstacles=" << scenario.obstacle_count
               << ", dense_wall=" << scenario.dense_wall
+              << ", dense_bucket=" << scenario.dense_bucket
               << ", elapsed_ms=" << elapsed.count() << std::endl;
 
     EXPECT_EQ(evaluated_poses, 7275u) << "obstacles=" << scenario.obstacle_count;
     EXPECT_TRUE(every_pose_evaluated) << "obstacles=" << scenario.obstacle_count;
     EXPECT_TRUE(std::isfinite(clearance_sum));
     EXPECT_LE(collision_count, evaluated_poses);
-    EXPECT_LT(elapsed.count(), 50.0)
-      << "Full MPPI obstacle cycle exceeded 50 ms, obstacles="
+    if(scenario.dense_bucket){
+      EXPECT_EQ(collision_count, 0u);
+      EXPECT_EQ(clearance_calls, 1995u);
+      EXPECT_LT(collision_point_checks, evaluated_poses * 32u);
+      EXPECT_LT(clearance_point_checks, clearance_calls * 64u);
+    }
+    EXPECT_LT(elapsed.count(), 45.0)
+      << "Full MPPI obstacle cycle exceeded 45 ms, obstacles="
       << scenario.obstacle_count << ", dense_wall=" << scenario.dense_wall;
   }
 }
@@ -1167,7 +1260,7 @@ TEST(MppiObstacleGeometryTest, SnapshotTurnsAllNonFiniteInputIntoEmptyFastPath)
   ASSERT_TRUE(snapshot.kdtree);
   EXPECT_TRUE(snapshot.cloud->points.empty());
   const auto work = estimateMppiObstacleScoringWork(96, 75, 4, snapshot.cloud->points.size());
-  EXPECT_EQ(work.totalKdTreeQueries(), 0u);
+  EXPECT_EQ(work.totalIndexQueries(), 0u);
 }
 
 TEST(MppiObstacleGeometryTest, SnapshotOwnsCloudUsedByKdTree)

@@ -17,6 +17,10 @@ struct MppiTrajectoryPoint
   bool in_collision = false;
   double obstacle_clearance = 0.0;
   bool collision_evaluated = false;
+  std::size_t collision_node_checks = 0;
+  std::size_t collision_point_checks = 0;
+  std::size_t clearance_node_checks = 0;
+  std::size_t clearance_point_checks = 0;
 };
 
 struct MppiPathPoint
@@ -165,6 +169,10 @@ struct MppiCriticData
   double model_dt = 0.1;
   double path_obstacle_occupancy_ratio = 0.0;
   std::size_t blocked_path_points = 0;
+  std::size_t obstacle_collision_node_checks = 0;
+  std::size_t obstacle_collision_point_checks = 0;
+  std::size_t obstacle_clearance_node_checks = 0;
+  std::size_t obstacle_clearance_point_checks = 0;
 };
 
 struct MppiCriticResult

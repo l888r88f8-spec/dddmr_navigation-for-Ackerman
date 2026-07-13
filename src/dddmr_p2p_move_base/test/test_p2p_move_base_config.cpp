@@ -194,16 +194,18 @@ TEST(P2PMoveBaseConfigTest, MppiObstacleScoringStaysWithinRuntimeBudget)
     static_cast<std::size_t>(time_steps),
     1,
     representative_obstacle_points);
-  const std::size_t nominal_cycle_kdtree_queries =
-    work.totalKdTreeQueries() + optimal_trajectory_work.totalKdTreeQueries();
-  const std::size_t retry_cycle_kdtree_queries = 2 * nominal_cycle_kdtree_queries;
+  const std::size_t nominal_collision_index_queries =
+    work.collision_index_queries + optimal_trajectory_work.collision_index_queries;
+  const std::size_t nominal_clearance_index_queries =
+    work.clearance_index_queries + optimal_trajectory_work.clearance_index_queries;
 
   EXPECT_EQ(work.collision_pose_checks, 7200u)
     << "Every predicted pose must retain an exact collision check";
-  EXPECT_EQ(work.collision_hash_queries, 7200u)
-    << "Every predicted pose must use the exact spatial-hash collision path";
-  EXPECT_EQ(nominal_cycle_kdtree_queries, 3990u);
-  EXPECT_EQ(retry_cycle_kdtree_queries, 7980u)
+  EXPECT_EQ(nominal_collision_index_queries, 7275u)
+    << "Every predicted pose must use the exact spatial-index collision path";
+  EXPECT_EQ(nominal_clearance_index_queries, 1995u);
+  EXPECT_EQ(2 * nominal_collision_index_queries, 14550u);
+  EXPECT_EQ(2 * nominal_clearance_index_queries, 3990u)
     << "A validator retry intentionally performs a second complete scoring pass";
 }
 
