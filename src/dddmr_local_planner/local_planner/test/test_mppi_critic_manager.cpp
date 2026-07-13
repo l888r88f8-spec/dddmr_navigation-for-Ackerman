@@ -12,6 +12,7 @@ using local_planner::classifyMppiBypassSide;
 using local_planner::isMppiTrajectoryCollisionFree;
 using local_planner::makeMppiObstacleSnapshot;
 using local_planner::MppiBypassSide;
+using local_planner::MppiBypassSideClassifier;
 using local_planner::MppiCandidateScore;
 using local_planner::MppiCriticConfig;
 using local_planner::MppiCriticData;
@@ -120,6 +121,112 @@ TEST(MppiCriticManagerTest, ClassifiesGeometryIndependentlyOfTerminalYawRate)
   trajectory.controls.back().wz = -0.8;
 
   EXPECT_EQ(classifyMppiBypassSide(trajectory, path), MppiBypassSide::Left);
+}
+
+TEST(MppiCriticManagerTest, ClassifierRejectsTrajectoryWithEmptyControls)
+{
+  const std::vector<MppiPathPoint> path = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{2.0, 0.0, 0.0}
+  };
+  auto trajectory = makeTrajectory(0.2, {
+    MppiTrajectoryPoint{0.5, 0.3, 0.0}
+  });
+  trajectory.controls.clear();
+
+  EXPECT_EQ(classifyMppiBypassSide(trajectory, path), MppiBypassSide::Neutral);
+}
+
+TEST(MppiCriticManagerTest, ClassifierRejectsTrajectoryWithFewerControlsThanPoints)
+{
+  const std::vector<MppiPathPoint> path = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{2.0, 0.0, 0.0}
+  };
+  auto trajectory = makeTrajectory(0.2, {
+    MppiTrajectoryPoint{0.5, 0.3, 0.0},
+    MppiTrajectoryPoint{1.5, 0.4, 0.0}
+  });
+  trajectory.controls.resize(1);
+
+  EXPECT_EQ(classifyMppiBypassSide(trajectory, path), MppiBypassSide::Neutral);
+}
+
+TEST(MppiCriticManagerTest, ClassifierRejectsTrajectoryWithMoreControlsThanPoints)
+{
+  const std::vector<MppiPathPoint> path = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{2.0, 0.0, 0.0}
+  };
+  auto trajectory = makeTrajectory(0.2, {
+    MppiTrajectoryPoint{0.5, 0.3, 0.0}
+  });
+  trajectory.controls.resize(2);
+
+  EXPECT_EQ(classifyMppiBypassSide(trajectory, path), MppiBypassSide::Neutral);
+}
+
+TEST(MppiCriticManagerTest, ClassifierUsesPathDirectionForRotatedAndReversedSegments)
+{
+  const std::vector<MppiPathPoint> upward_path = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{0.0, 2.0, 0.0}
+  };
+  const std::vector<MppiPathPoint> downward_path = {
+    MppiPathPoint{0.0, 2.0, 0.0},
+    MppiPathPoint{0.0, 0.0, 0.0}
+  };
+  const auto trajectory = makeTrajectory(0.2, {
+    MppiTrajectoryPoint{-0.5, 1.0, 0.0}
+  });
+
+  EXPECT_EQ(classifyMppiBypassSide(trajectory, upward_path), MppiBypassSide::Left);
+  EXPECT_EQ(classifyMppiBypassSide(trajectory, downward_path), MppiBypassSide::Right);
+}
+
+TEST(MppiCriticManagerTest, ClassifierUsesStrictSymmetricDeadband)
+{
+  const std::vector<MppiPathPoint> path = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{2.0, 0.0, 0.0}
+  };
+  const auto positive_boundary = makeTrajectory(0.2, {
+    MppiTrajectoryPoint{1.0, 0.10, 0.0}
+  });
+  const auto negative_boundary = makeTrajectory(0.2, {
+    MppiTrajectoryPoint{1.0, -0.10, 0.0}
+  });
+  const auto just_left = makeTrajectory(0.2, {
+    MppiTrajectoryPoint{1.0, 0.1001, 0.0}
+  });
+  const auto just_right = makeTrajectory(0.2, {
+    MppiTrajectoryPoint{1.0, -0.1001, 0.0}
+  });
+
+  EXPECT_EQ(classifyMppiBypassSide(positive_boundary, path), MppiBypassSide::Neutral);
+  EXPECT_EQ(classifyMppiBypassSide(negative_boundary, path), MppiBypassSide::Neutral);
+  EXPECT_EQ(classifyMppiBypassSide(just_left, path), MppiBypassSide::Left);
+  EXPECT_EQ(classifyMppiBypassSide(just_right, path), MppiBypassSide::Right);
+}
+
+TEST(MppiCriticManagerTest, ReusableClassifierMatchesCompatibilityWrapper)
+{
+  const std::vector<MppiPathPoint> path = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{1.0, 0.0, 0.0},
+    MppiPathPoint{1.0, 0.0, 0.0},
+    MppiPathPoint{2.0, 0.0, 0.0}
+  };
+  const std::vector<MppiScoredTrajectory> trajectories = {
+    makeTrajectory(0.2, {MppiTrajectoryPoint{1.0, 0.3, 0.0}}),
+    makeTrajectory(0.2, {MppiTrajectoryPoint{1.0, -0.3, 0.0}}),
+    makeTrajectory(0.2, {MppiTrajectoryPoint{1.0, 0.05, 0.0}})
+  };
+  const MppiBypassSideClassifier classifier(path);
+
+  for(const auto & trajectory : trajectories){
+    EXPECT_EQ(classifier.classify(trajectory), classifyMppiBypassSide(trajectory, path));
+  }
 }
 
 TEST(MppiCriticManagerTest, ClassifierRejectsDegenerateAndNonfiniteInputs)

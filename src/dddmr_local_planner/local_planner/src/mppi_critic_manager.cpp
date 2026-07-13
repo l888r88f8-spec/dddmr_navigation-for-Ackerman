@@ -17,18 +17,47 @@ bool isMppiTrajectoryCollisionFree(const MppiScoredTrajectory & trajectory)
     [](const MppiTrajectoryPoint & point) {return point.in_collision;});
 }
 
-MppiBypassSide classifyMppiBypassSide(
-  const MppiScoredTrajectory & trajectory,
-  const std::vector<MppiPathPoint> & path)
+MppiBypassSideClassifier::MppiBypassSideClassifier(const std::vector<MppiPathPoint> & path)
 {
-  if(path.size() < 2 || trajectory.points.empty()){
-    return MppiBypassSide::Neutral;
+  if(path.size() < 2){
+    return;
   }
 
   for(const auto & path_point : path){
     if(!std::isfinite(path_point.x) || !std::isfinite(path_point.y)){
-      return MppiBypassSide::Neutral;
+      return;
     }
+  }
+
+  segments_.reserve(path.size() - 1);
+  for(std::size_t i = 1; i < path.size(); ++i){
+    const double dx = path[i].x - path[i - 1].x;
+    const double dy = path[i].y - path[i - 1].y;
+    const double length = std::hypot(dx, dy);
+    if(!std::isfinite(length)){
+      segments_.clear();
+      return;
+    }
+    if(length == 0.0){
+      continue;
+    }
+    segments_.push_back(PathSegment{
+      path[i - 1].x,
+      path[i - 1].y,
+      dx,
+      dy,
+      1.0 / length});
+  }
+  path_valid_ = !segments_.empty();
+}
+
+MppiBypassSide MppiBypassSideClassifier::classify(
+  const MppiScoredTrajectory & trajectory) const
+{
+  if(!path_valid_ || trajectory.points.empty() ||
+    trajectory.points.size() != trajectory.controls.size())
+  {
+    return MppiBypassSide::Neutral;
   }
 
   double peak_offset = 0.0;
@@ -40,27 +69,20 @@ MppiBypassSide classifyMppiBypassSide(
 
     double closest_distance_squared = std::numeric_limits<double>::infinity();
     double closest_signed_offset = 0.0;
-    bool found_segment = false;
-    for(std::size_t i = 1; i < path.size(); ++i){
-      const double dx = path[i].x - path[i - 1].x;
-      const double dy = path[i].y - path[i - 1].y;
-      const double length_squared = dx * dx + dy * dy;
-      if(length_squared == 0.0){
-        continue;
-      }
-
+    for(const auto & segment : segments_){
       const double projection = std::clamp(
-        ((trajectory_point.x - path[i - 1].x) * dx +
-        (trajectory_point.y - path[i - 1].y) * dy) / length_squared,
+        ((trajectory_point.x - segment.start_x) * segment.dx +
+        (trajectory_point.y - segment.start_y) * segment.dy) *
+        segment.inverse_length * segment.inverse_length,
         0.0,
         1.0);
-      const double projected_x = path[i - 1].x + projection * dx;
-      const double projected_y = path[i - 1].y + projection * dy;
+      const double projected_x = segment.start_x + projection * segment.dx;
+      const double projected_y = segment.start_y + projection * segment.dy;
       const double offset_x = trajectory_point.x - projected_x;
       const double offset_y = trajectory_point.y - projected_y;
       const double distance_squared = offset_x * offset_x + offset_y * offset_y;
-      const double segment_length = std::sqrt(length_squared);
-      const double signed_offset = (dx * offset_y - dy * offset_x) / segment_length;
+      const double signed_offset =
+        (segment.dx * offset_y - segment.dy * offset_x) * segment.inverse_length;
 
       if(!std::isfinite(distance_squared) || !std::isfinite(signed_offset)){
         return MppiBypassSide::Neutral;
@@ -68,11 +90,10 @@ MppiBypassSide classifyMppiBypassSide(
       if(distance_squared < closest_distance_squared){
         closest_distance_squared = distance_squared;
         closest_signed_offset = signed_offset;
-        found_segment = true;
       }
     }
 
-    if(!found_segment || !std::isfinite(closest_signed_offset)){
+    if(!std::isfinite(closest_signed_offset)){
       return MppiBypassSide::Neutral;
     }
     if(std::fabs(closest_signed_offset) > std::fabs(peak_offset)){
@@ -92,6 +113,13 @@ MppiBypassSide classifyMppiBypassSide(
     return MppiBypassSide::Right;
   }
   return MppiBypassSide::Neutral;
+}
+
+MppiBypassSide classifyMppiBypassSide(
+  const MppiScoredTrajectory & trajectory,
+  const std::vector<MppiPathPoint> & path)
+{
+  return MppiBypassSideClassifier(path).classify(trajectory);
 }
 
 MppiConstraintCriticConfig::MppiConstraintCriticConfig()

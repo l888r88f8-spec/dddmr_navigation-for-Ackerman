@@ -32,6 +32,27 @@ struct MppiScoredTrajectory
   std::vector<MppiTrajectoryPoint> points;
 };
 
+class MppiBypassSideClassifier
+{
+public:
+  explicit MppiBypassSideClassifier(const std::vector<MppiPathPoint> & path);
+
+  MppiBypassSide classify(const MppiScoredTrajectory & trajectory) const;
+
+private:
+  struct PathSegment
+  {
+    double start_x = 0.0;
+    double start_y = 0.0;
+    double dx = 0.0;
+    double dy = 0.0;
+    double inverse_length = 0.0;
+  };
+
+  bool path_valid_ = false;
+  std::vector<PathSegment> segments_;
+};
+
 bool isMppiTrajectoryCollisionFree(const MppiScoredTrajectory & trajectory);
 MppiBypassSide classifyMppiBypassSide(
   const MppiScoredTrajectory & trajectory,
