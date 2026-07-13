@@ -140,6 +140,8 @@ MppiResult MppiController::optimizeBatch(
   MppiBypassSide settled_bypass_side = provisional_bypass_side;
   std::size_t settled_infeasible_cycles = provisional_infeasible_cycles;
   bool side_state_settled = false;
+  bool directional_mode_selected = false;
+  bool select_directional_mode = false;
 
   for(std::size_t iteration = 0; iteration < config_.iteration_count; ++iteration){
     if(config_.shift_control_sequence && !control_sequence_.empty()){
@@ -205,8 +207,11 @@ MppiResult MppiController::optimizeBatch(
       collision_free.push_back(score.collision_free);
     }
 
-    const bool select_directional_mode =
-      mode_selection_function && mode_selection_function();
+    if(!directional_mode_selected){
+      select_directional_mode =
+        mode_selection_function && mode_selection_function();
+      directional_mode_selected = true;
+    }
     const MppiBypassSide side_before_update = provisional_bypass_side;
     const std::size_t infeasible_cycles_before_update = provisional_infeasible_cycles;
     const bool side_state_was_settled = side_state_settled;

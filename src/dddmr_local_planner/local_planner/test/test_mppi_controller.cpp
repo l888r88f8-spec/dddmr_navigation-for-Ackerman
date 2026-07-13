@@ -679,6 +679,50 @@ TEST(MppiControllerTest, MultiIterationSwitchSettlesSideOnlyOnceOnLaterInvalid)
   }
 }
 
+TEST(MppiControllerTest, MultiIterationFreezesInitialDirectionalModeWhenCallbackTurnsFalse)
+{
+  auto config = makeBypassLatchConfig();
+  config.iteration_count = 2;
+
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.2, 0.0});
+  controller.setDebugNoiseForTest(makeAngularNoises(config, 0.3, -0.3));
+  std::size_t mode_calls = 0;
+  const auto result = controller.optimizeBatch(
+    MppiControl{0.2, 0.0},
+    [](const std::vector<MppiCandidate> &) {
+      return makeSideScores(0.0, true, 0.0, true);
+    },
+    [&]() {return mode_calls++ == 0;});
+
+  ASSERT_TRUE(result.has_valid_control);
+  EXPECT_EQ(mode_calls, 1u);
+  EXPECT_EQ(result.selected_bypass_side, MppiBypassSide::Left);
+  EXPECT_NEAR(result.command.wz, 0.6, 1e-12);
+}
+
+TEST(MppiControllerTest, MultiIterationFreezesInitialNormalModeWhenCallbackTurnsTrue)
+{
+  auto config = makeBypassLatchConfig();
+  config.iteration_count = 2;
+
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.2, 0.0});
+  controller.setDebugNoiseForTest(makeAngularNoises(config, 0.3, -0.3));
+  std::size_t mode_calls = 0;
+  const auto result = controller.optimizeBatch(
+    MppiControl{0.2, 0.0},
+    [](const std::vector<MppiCandidate> &) {
+      return makeSideScores(0.0, true, 0.0, true);
+    },
+    [&]() {return mode_calls++ != 0;});
+
+  ASSERT_TRUE(result.has_valid_control);
+  EXPECT_EQ(mode_calls, 1u);
+  EXPECT_EQ(result.selected_bypass_side, MppiBypassSide::Neutral);
+  EXPECT_NEAR(result.command.wz, 0.0, 1e-12);
+}
+
 TEST(MppiControllerTest, SetConfigClearsPhysicalSideLatch)
 {
   const auto config = makeBypassLatchConfig();
