@@ -85,10 +85,10 @@ struct MppiResult
   double positive_weight_mass = 0.0;
   double negative_weight_mass = 0.0;
   double neutral_weight_mass = 0.0;
-  MppiBypassSide selected_bypass_side = MppiBypassSide::Neutral;
-  std::size_t side_infeasible_cycles = 0;
   MppiControl prefilter_command;
   std::size_t structured_candidates = 0;
+  MppiBypassSide selected_bypass_side = MppiBypassSide::Neutral;
+  std::size_t side_infeasible_cycles = 0;
 };
 
 class MppiController
@@ -156,7 +156,9 @@ private:
     const std::vector<double> & valid_costs,
     const std::vector<MppiBypassSide> & valid_sides,
     const std::vector<bool> & collision_free,
-    bool select_directional_mode);
+    bool select_directional_mode,
+    MppiBypassSide & bypass_side,
+    std::size_t & side_infeasible_cycles);
   void smoothControlSequence(const MppiControl & measured_speed);
   void updateControlHistory(const MppiControl & command);
   void shiftControlSequence();

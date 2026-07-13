@@ -592,6 +592,129 @@ TEST(MppiControllerTest, DirectionalModeRejectsNeutralOnlyCandidatesWithoutLatch
   EXPECT_NEAR(result.effective_sample_size, 2.0, 1e-12);
 }
 
+TEST(MppiControllerTest, MultiIterationInvalidResultRollsBackSequenceAndNewLatchFailure)
+{
+  auto config = makeBypassLatchConfig();
+  config.iteration_count = 2;
+
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.2, 0.0});
+  const auto entry_sequence = controller.controlSequence();
+  controller.setDebugNoiseForTest(makeAngularNoises(config, 0.1, 0.3));
+  std::size_t score_calls = 0;
+  const auto result = controller.optimizeBatch(
+    MppiControl{0.2, 0.0},
+    [&](const std::vector<MppiCandidate> &) {
+      if(score_calls++ == 0){
+        return std::vector<MppiCandidateScore>{
+          MppiCandidateScore{true, 1.0, MppiBypassSide::Left, true},
+          MppiCandidateScore{true, 0.0, MppiBypassSide::Left, true}};
+      }
+      return std::vector<MppiCandidateScore>(
+        2, MppiCandidateScore{false, -1.0});
+    },
+    []() {return true;});
+
+  ASSERT_FALSE(result.has_valid_control);
+  EXPECT_EQ(score_calls, 2u);
+  EXPECT_EQ(result.best_sample_index, 0u);
+  EXPECT_EQ(result.selected_bypass_side, MppiBypassSide::Left);
+  EXPECT_EQ(result.side_infeasible_cycles, 0u);
+  ASSERT_EQ(controller.controlSequence().size(), entry_sequence.size());
+  for(std::size_t step = 0; step < entry_sequence.size(); ++step){
+    EXPECT_DOUBLE_EQ(controller.controlSequence()[step].vx, entry_sequence[step].vx);
+    EXPECT_DOUBLE_EQ(controller.controlSequence()[step].wz, entry_sequence[step].wz);
+  }
+}
+
+TEST(MppiControllerTest, MultiIterationSwitchSettlesSideOnlyOnceOnLaterInvalid)
+{
+  auto config = makeBypassLatchConfig();
+  config.iteration_count = 2;
+
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.2, 0.0});
+  controller.setDebugNoiseForTest(makeAngularNoises(config, 0.2, -0.2));
+  const auto initial = controller.optimizeBatch(
+    MppiControl{0.2, 0.0},
+    [](const std::vector<MppiCandidate> &) {
+      return makeSideScores(0.0, true, 1.0, true);
+    },
+    []() {return true;});
+  ASSERT_TRUE(initial.has_valid_control);
+  ASSERT_EQ(initial.selected_bypass_side, MppiBypassSide::Left);
+
+  const auto left_blocked = [](const std::vector<MppiCandidate> &) {
+      return makeSideScores(0.0, false, 0.0, true);
+    };
+  const auto first_failure = controller.optimizeBatch(
+    MppiControl{0.2, initial.command.wz}, left_blocked, []() {return true;});
+  const auto second_failure = controller.optimizeBatch(
+    MppiControl{0.2, initial.command.wz}, left_blocked, []() {return true;});
+  ASSERT_FALSE(first_failure.has_valid_control);
+  ASSERT_EQ(first_failure.side_infeasible_cycles, 1u);
+  ASSERT_FALSE(second_failure.has_valid_control);
+  ASSERT_EQ(second_failure.side_infeasible_cycles, 2u);
+
+  const auto entry_sequence = controller.controlSequence();
+  std::size_t score_calls = 0;
+  const auto result = controller.optimizeBatch(
+    MppiControl{0.2, initial.command.wz},
+    [&](const std::vector<MppiCandidate> &) {
+      if(score_calls++ == 0){
+        return makeSideScores(0.0, false, 0.0, true);
+      }
+      return makeSideScores(0.0, true, 0.0, false);
+    },
+    []() {return true;});
+
+  ASSERT_FALSE(result.has_valid_control);
+  EXPECT_EQ(score_calls, 2u);
+  EXPECT_EQ(result.selected_bypass_side, MppiBypassSide::Right);
+  EXPECT_EQ(result.side_infeasible_cycles, 0u);
+  ASSERT_EQ(controller.controlSequence().size(), entry_sequence.size());
+  for(std::size_t step = 0; step < entry_sequence.size(); ++step){
+    EXPECT_DOUBLE_EQ(controller.controlSequence()[step].vx, entry_sequence[step].vx);
+    EXPECT_DOUBLE_EQ(controller.controlSequence()[step].wz, entry_sequence[step].wz);
+  }
+}
+
+TEST(MppiControllerTest, SetConfigClearsPhysicalSideLatch)
+{
+  const auto config = makeBypassLatchConfig();
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.2, 0.0});
+  controller.setDebugNoiseForTest(makeAngularNoises(config, 0.2, -0.2));
+  const auto initial = controller.optimizeBatch(
+    MppiControl{0.2, 0.0},
+    [](const std::vector<MppiCandidate> &) {
+      return makeSideScores(0.0, true, 1.0, true);
+    },
+    []() {return true;});
+  ASSERT_EQ(initial.selected_bypass_side, MppiBypassSide::Left);
+  const auto blocked = controller.optimizeBatch(
+    MppiControl{0.2, initial.command.wz},
+    [](const std::vector<MppiCandidate> &) {
+      return makeSideScores(0.0, false, 0.0, true);
+    },
+    []() {return true;});
+  ASSERT_FALSE(blocked.has_valid_control);
+  ASSERT_EQ(blocked.side_infeasible_cycles, 1u);
+
+  controller.setConfig(config);
+  controller.setDebugNoiseForTest(makeAngularNoises(config, 0.2, -0.2));
+  const auto after_reconfigure = controller.optimizeBatch(
+    MppiControl{0.2, 0.0},
+    [](const std::vector<MppiCandidate> &) {
+      return makeSideScores(0.0, false, 0.0, true);
+    },
+    []() {return true;});
+
+  ASSERT_TRUE(after_reconfigure.has_valid_control);
+  EXPECT_EQ(after_reconfigure.selected_bypass_side, MppiBypassSide::Right);
+  EXPECT_EQ(after_reconfigure.side_infeasible_cycles, 0u);
+}
+
 TEST(MppiControllerTest, SoftmaxUpdateUsesMoreThanBestSample)
 {
   MppiConfig config;

@@ -56,6 +56,8 @@ void MppiController::setConfig(const MppiConfig & config)
   use_debug_noise_for_test_ = false;
   control_sequence_.assign(config_.time_steps, MppiControl{0.0, 0.0});
   control_history_.fill(MppiControl{});
+  latched_bypass_side_ = MppiBypassSide::Neutral;
+  latched_side_infeasible_cycles_ = 0;
   regenerateNoise();
 }
 
@@ -132,6 +134,13 @@ MppiResult MppiController::optimizeBatch(
     return result;
   }
 
+  const auto entry_control_sequence = control_sequence_;
+  MppiBypassSide provisional_bypass_side = latched_bypass_side_;
+  std::size_t provisional_infeasible_cycles = latched_side_infeasible_cycles_;
+  MppiBypassSide settled_bypass_side = provisional_bypass_side;
+  std::size_t settled_infeasible_cycles = provisional_infeasible_cycles;
+  bool side_state_settled = false;
+
   for(std::size_t iteration = 0; iteration < config_.iteration_count; ++iteration){
     if(config_.shift_control_sequence && !control_sequence_.empty()){
       control_sequence_.front() = measured_speed;
@@ -145,6 +154,7 @@ MppiResult MppiController::optimizeBatch(
     std::vector<bool> collision_free;
     result.rejected_samples = 0;
     result.best_cost = std::numeric_limits<double>::infinity();
+    result.best_sample_index = 0;
     result.best_sample_sequence.clear();
 
     std::vector<std::vector<MppiControl>> sampled_sequences;
@@ -197,26 +207,47 @@ MppiResult MppiController::optimizeBatch(
 
     const bool select_directional_mode =
       mode_selection_function && mode_selection_function();
+    const MppiBypassSide side_before_update = provisional_bypass_side;
+    const std::size_t infeasible_cycles_before_update = provisional_infeasible_cycles;
+    const bool side_state_was_settled = side_state_settled;
     const auto statistics = applySoftmaxUpdate(
       valid_sequences,
       valid_costs,
       valid_sides,
       collision_free,
-      select_directional_mode);
+      select_directional_mode,
+      provisional_bypass_side,
+      provisional_infeasible_cycles);
+    if(side_state_was_settled){
+      provisional_bypass_side = settled_bypass_side;
+      provisional_infeasible_cycles = settled_infeasible_cycles;
+    }
+    else if(provisional_bypass_side != side_before_update ||
+      provisional_infeasible_cycles != infeasible_cycles_before_update)
+    {
+      side_state_settled = true;
+      settled_bypass_side = provisional_bypass_side;
+      settled_infeasible_cycles = provisional_infeasible_cycles;
+    }
     result.effective_sample_size = statistics.effective_sample_size;
     result.positive_weight_mass = statistics.positive_weight_mass;
     result.negative_weight_mass = statistics.negative_weight_mass;
     result.neutral_weight_mass = statistics.neutral_weight_mass;
     result.prefilter_command = statistics.prefilter_command;
-    result.selected_bypass_side = latched_bypass_side_;
-    result.side_infeasible_cycles = latched_side_infeasible_cycles_;
+    result.selected_bypass_side = provisional_bypass_side;
+    result.side_infeasible_cycles = provisional_infeasible_cycles;
     if(!statistics.valid){
+      control_sequence_ = entry_control_sequence;
+      latched_bypass_side_ = provisional_bypass_side;
+      latched_side_infeasible_cycles_ = provisional_infeasible_cycles;
       result.has_valid_control = false;
       result.optimal_sequence = control_sequence_;
       return result;
     }
   }
 
+  latched_bypass_side_ = provisional_bypass_side;
+  latched_side_infeasible_cycles_ = provisional_infeasible_cycles;
   result.has_valid_control = true;
   smoothControlSequence(measured_speed);
   result.optimal_sequence = control_sequence_;
@@ -373,21 +404,23 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
   const std::vector<double> & valid_costs,
   const std::vector<MppiBypassSide> & valid_sides,
   const std::vector<bool> & collision_free,
-  const bool select_directional_mode)
+  const bool select_directional_mode,
+  MppiBypassSide & bypass_side,
+  std::size_t & side_infeasible_cycles)
 {
   UpdateStatistics statistics;
   if(!select_directional_mode){
-    latched_bypass_side_ = MppiBypassSide::Neutral;
-    latched_side_infeasible_cycles_ = 0;
+    bypass_side = MppiBypassSide::Neutral;
+    side_infeasible_cycles = 0;
   }
 
   if(valid_sequences.empty() || valid_sequences.size() != valid_costs.size() ||
     valid_sequences.size() != valid_sides.size() ||
     valid_sequences.size() != collision_free.size())
   {
-    if(select_directional_mode && latched_bypass_side_ != MppiBypassSide::Neutral){
-      latched_side_infeasible_cycles_ = std::min(
-        latched_side_infeasible_cycles_ + 1,
+    if(select_directional_mode && bypass_side != MppiBypassSide::Neutral){
+      side_infeasible_cycles = std::min(
+        side_infeasible_cycles + 1,
         kSideSwitchConfirmCycles);
     }
     return statistics;
@@ -438,7 +471,7 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
         return false;
       };
 
-    if(latched_bypass_side_ == MppiBypassSide::Neutral){
+    if(bypass_side == MppiBypassSide::Neutral){
       double eligible_min_cost = std::numeric_limits<double>::infinity();
       for(std::size_t sample = 0; sample < valid_sequences.size(); ++sample){
         if(collision_free[sample] &&
@@ -467,10 +500,10 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
       }
 
       if(left_weight_mass > right_weight_mass){
-        latched_bypass_side_ = MppiBypassSide::Left;
+        bypass_side = MppiBypassSide::Left;
       }
       else if(right_weight_mass > left_weight_mass){
-        latched_bypass_side_ = MppiBypassSide::Right;
+        bypass_side = MppiBypassSide::Right;
       }
       else{
         double lowest_cost = std::numeric_limits<double>::infinity();
@@ -480,40 +513,40 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
             valid_costs[sample] < lowest_cost)
           {
             lowest_cost = valid_costs[sample];
-            latched_bypass_side_ = valid_sides[sample];
+            bypass_side = valid_sides[sample];
           }
         }
       }
     }
 
-    if(latched_bypass_side_ == MppiBypassSide::Neutral){
+    if(bypass_side == MppiBypassSide::Neutral){
       return statistics;
     }
 
-    if(has_feasible_side(latched_bypass_side_)){
-      latched_side_infeasible_cycles_ = 0;
+    if(has_feasible_side(bypass_side)){
+      side_infeasible_cycles = 0;
     }
     else{
-      latched_side_infeasible_cycles_ = std::min(
-        latched_side_infeasible_cycles_ + 1,
+      side_infeasible_cycles = std::min(
+        side_infeasible_cycles + 1,
         kSideSwitchConfirmCycles);
-      if(latched_side_infeasible_cycles_ < kSideSwitchConfirmCycles){
+      if(side_infeasible_cycles < kSideSwitchConfirmCycles){
         return statistics;
       }
 
       const MppiBypassSide opposite_side =
-        latched_bypass_side_ == MppiBypassSide::Left ?
+        bypass_side == MppiBypassSide::Left ?
         MppiBypassSide::Right : MppiBypassSide::Left;
       if(!has_feasible_side(opposite_side)){
         return statistics;
       }
-      latched_bypass_side_ = opposite_side;
-      latched_side_infeasible_cycles_ = 0;
+      bypass_side = opposite_side;
+      side_infeasible_cycles = 0;
     }
 
     for(std::size_t sample = 0; sample < valid_sequences.size(); ++sample){
       selected[sample] = collision_free[sample] &&
-        valid_sides[sample] == latched_bypass_side_;
+        valid_sides[sample] == bypass_side;
     }
   }
 
