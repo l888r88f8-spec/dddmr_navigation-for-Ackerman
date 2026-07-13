@@ -427,10 +427,14 @@ MppiController::SampledSequence MppiController::buildNoisedSequence(
         config_.gamma / (config_.vx_std * config_.vx_std) *
         control_sequence_[step].vx * noise.vx;
     }
-    if(config_.wz_std > 1e-9){
+    if(config_.wz_std > 1e-9 && angular_noise_scale > 1e-9){
+      // Conditioned on the vx-constrained sample, angular noise has standard
+      // deviation wz_std * angular_noise_scale.
+      const double effective_wz_std = config_.wz_std * angular_noise_scale;
+      const double effective_wz_noise = noise.wz * angular_noise_scale;
       sampled_sequence.control_energy +=
-        config_.gamma / (config_.wz_std * config_.wz_std) *
-        control_sequence_[step].wz * (noise.wz * angular_noise_scale);
+        config_.gamma / (effective_wz_std * effective_wz_std) *
+        control_sequence_[step].wz * effective_wz_noise;
     }
     sequence[step] = constrainControl(previous, requested, dt);
     previous = sequence[step];

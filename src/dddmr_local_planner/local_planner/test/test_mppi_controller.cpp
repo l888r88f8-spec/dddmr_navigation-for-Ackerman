@@ -1712,6 +1712,109 @@ TEST(MppiControllerTest, RejectsNonfiniteTotalCostBeforeSoftmax)
   EXPECT_DOUBLE_EQ(result.best_cost, 1.0);
 }
 
+TEST(MppiControllerTest, SeededRandomAngularEnergyUsesEffectiveCovariance)
+{
+  auto config = makeControlEnergyConfig();
+  config.structured_candidate_count = 0;
+  config.seed = 23;
+  config.gamma = 0.4;
+  config.vx_std = 0.0;
+  config.wz_std = 1.0;
+  config.vx_min = 0.2;
+  config.vx_max = 0.2;
+  config.wz_max = 2.0;
+  config.wheelbase = 0.2;
+  config.max_steer = std::atan(0.5);
+
+  const MppiControl nominal{0.2, 0.3};
+  MppiController controller(config);
+  controller.resetControlSequence(nominal);
+  const double raw_angular_noise = controller.debugNoiseAt(0, 0).wz;
+  const double angular_limit = std::min(
+    config.wz_max,
+    std::fabs(nominal.vx) * std::tan(config.max_steer) / config.wheelbase);
+  const double angular_noise_scale = std::min(1.0, angular_limit / config.wz_std);
+  ASSERT_GT(angular_noise_scale, 0.0);
+  ASSERT_LT(angular_noise_scale, 1.0);
+  ASSERT_GT(std::fabs(raw_angular_noise), 1e-9);
+
+  const auto result = controller.optimize(
+    nominal,
+    [](const MppiCandidate &) {return MppiCandidateScore{true, 4.0};});
+
+  const double effective_std = config.wz_std * angular_noise_scale;
+  const double effective_noise = raw_angular_noise * angular_noise_scale;
+  const double expected_energy =
+    config.gamma / (effective_std * effective_std) * nominal.wz * effective_noise;
+  const double old_energy =
+    config.gamma / (config.wz_std * config.wz_std) * nominal.wz * effective_noise;
+  ASSERT_TRUE(result.has_valid_control);
+  EXPECT_EQ(result.structured_candidates, 0u);
+  EXPECT_NEAR(result.best_control_energy, expected_energy, 1e-12);
+  EXPECT_NEAR(result.best_cost, 4.0 + expected_energy, 1e-12);
+  EXPECT_GT(std::fabs(expected_energy - old_energy), 1e-6);
+}
+
+TEST(MppiControllerTest, SeededVxNoiseCarriesPerSampleAngularCovariance)
+{
+  auto config = makeControlEnergyConfig();
+  config.batch_size = 2;
+  config.structured_candidate_count = 0;
+  config.seed = 31;
+  config.gamma = 0.1;
+  config.vx_std = 0.12;
+  config.wz_std = 0.8;
+  config.vx_min = 0.05;
+  config.vx_max = 0.5;
+  config.wz_max = 2.0;
+  config.wheelbase = 0.5;
+  config.max_steer = 0.5;
+
+  const MppiControl nominal{0.2, 0.1};
+  MppiController controller(config);
+  controller.resetControlSequence(nominal);
+  const std::vector<MppiControl> raw_noises{
+    controller.debugNoiseAt(0, 0),
+    controller.debugNoiseAt(1, 0)};
+  std::vector<MppiCandidate> captured;
+
+  const auto result = controller.optimizeBatch(
+    nominal,
+    [&](const std::vector<MppiCandidate> & candidates) {
+      captured = candidates;
+      return std::vector<MppiCandidateScore>(
+        candidates.size(), MppiCandidateScore{true, 2.0});
+    });
+
+  ASSERT_TRUE(result.has_valid_control);
+  ASSERT_EQ(captured.size(), 2u);
+  std::vector<double> scales(2, 0.0);
+  std::vector<double> expected_energies(2, 0.0);
+  for(std::size_t sample = 0; sample < 2; ++sample){
+    const double angular_limit = std::min(
+      config.wz_max,
+      std::fabs(captured[sample].controls.front().vx) *
+      std::tan(config.max_steer) / config.wheelbase);
+    scales[sample] = std::min(1.0, angular_limit / config.wz_std);
+    expected_energies[sample] =
+      config.gamma / (config.vx_std * config.vx_std) *
+      nominal.vx * raw_noises[sample].vx;
+    if(scales[sample] > 1e-9){
+      const double effective_std = config.wz_std * scales[sample];
+      const double effective_noise = raw_noises[sample].wz * scales[sample];
+      expected_energies[sample] +=
+        config.gamma / (effective_std * effective_std) *
+        nominal.wz * effective_noise;
+    }
+  }
+  ASSERT_GT(std::fabs(scales[0] - scales[1]), 1e-6);
+  const std::size_t expected_best =
+    expected_energies[0] < expected_energies[1] ? 0u : 1u;
+  EXPECT_EQ(result.best_sample_index, expected_best);
+  EXPECT_NEAR(result.best_control_energy, expected_energies[expected_best], 1e-12);
+  EXPECT_NEAR(result.best_cost, 2.0 + expected_energies[expected_best], 1e-12);
+}
+
 TEST(MppiControllerTest, ReusesNoiseAcrossOptimizationCyclesByDefault)
 {
   MppiConfig config;
