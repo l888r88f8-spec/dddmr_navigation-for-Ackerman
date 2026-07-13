@@ -2518,7 +2518,8 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
   measured_speed.wz = robot_state_.twist.twist.angular.z;
 
   const auto mppi_scoring_start = std::chrono::steady_clock::now();
-  const auto obstacle_snapshot = makeMppiObstacleSnapshot(context.aggregate_observation);
+  const auto obstacle_snapshot = makeMppiObstacleSnapshot(
+    context.aggregate_observation, false);
   const std::size_t mppi_obstacle_points =
     obstacle_snapshot.cloud ? obstacle_snapshot.cloud->points.size() : 0u;
   std::size_t mppi_scored_trajectories = 0;

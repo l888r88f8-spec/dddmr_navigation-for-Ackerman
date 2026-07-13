@@ -61,6 +61,10 @@ struct MppiObstacleScoringWork
 MppiObstacleSnapshot makeMppiObstacleSnapshot(
   const pcl::PointCloud<pcl::PointXYZI>::ConstPtr & obstacles);
 
+MppiObstacleSnapshot makeMppiObstacleSnapshot(
+  const pcl::PointCloud<pcl::PointXYZI>::ConstPtr & obstacles,
+  bool build_compatibility_kdtree);
+
 MppiObstacleClearanceResult computeObstacleClearanceForCuboid(
   const pcl::PointCloud<pcl::PointXYZ> & cuboid,
   const pcl::PointCloud<pcl::PointXYZI> & obstacles,

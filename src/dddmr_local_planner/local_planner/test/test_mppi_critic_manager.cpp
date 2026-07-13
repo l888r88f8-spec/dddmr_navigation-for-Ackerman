@@ -820,7 +820,7 @@ TEST(MppiObstacleGeometryTest, SpatialIndexCollisionMatchesFullScanOracleAcrossC
       point.z = z(generator);
       obstacles->push_back(point);
     }
-    const auto snapshot = makeMppiObstacleSnapshot(obstacles);
+    const auto snapshot = makeMppiObstacleSnapshot(obstacles, false);
     for(std::size_t sample = 0; sample < 12; ++sample){
       const auto cuboid = makeTestCuboid(pose_xy(generator), pose_xy(generator), 0.0, yaw(generator));
       std::vector<int> candidate_ids;
@@ -1084,13 +1084,15 @@ TEST(MppiObstacleGeometryTest, RepresentativeScoringGeometryFitsFifteenHertzBudg
     std::size_t obstacle_count;
     bool dense_wall;
     bool dense_bucket;
+    bool adversarial_bucket;
   };
 
   for(const auto scenario : {
-      Scenario{129u, false, false},
-      Scenario{1024u, true, false},
-      Scenario{30000u, false, false},
-      Scenario{30000u, false, true}})
+      Scenario{129u, false, false, false},
+      Scenario{1024u, true, false, false},
+      Scenario{30000u, false, false, false},
+      Scenario{30000u, false, true, false},
+      Scenario{30000u, false, false, true}})
   {
     auto obstacles = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
     obstacles->reserve(scenario.obstacle_count);
@@ -1099,7 +1101,13 @@ TEST(MppiObstacleGeometryTest, RepresentativeScoringGeometryFitsFifteenHertzBudg
     std::uniform_real_distribution<float> z(-0.3F, 1.0F);
     for(std::size_t index = 0; index < scenario.obstacle_count; ++index){
       pcl::PointXYZI obstacle;
-      if(scenario.dense_bucket){
+      if(scenario.adversarial_bucket){
+        obstacle.x = 0.01F + 0.48F * static_cast<float>(index) /
+          static_cast<float>(scenario.obstacle_count);
+        obstacle.y = 0.49F;
+        obstacle.z = 0.0F;
+      }
+      else if(scenario.dense_bucket){
         obstacle.x = 0.45F + 0.04F * static_cast<float>(index) /
           static_cast<float>(scenario.obstacle_count);
         obstacle.y = 0.49F;
@@ -1121,12 +1129,14 @@ TEST(MppiObstacleGeometryTest, RepresentativeScoringGeometryFitsFifteenHertzBudg
     std::size_t evaluated_poses = 0;
     std::size_t collision_count = 0;
     std::size_t clearance_calls = 0;
+    std::size_t collision_node_checks = 0;
     std::size_t collision_point_checks = 0;
+    std::size_t clearance_node_checks = 0;
     std::size_t clearance_point_checks = 0;
     double clearance_sum = 0.0;
     bool every_pose_evaluated = true;
     const auto start = std::chrono::steady_clock::now();
-    const auto snapshot = makeMppiObstacleSnapshot(obstacles);
+    const auto snapshot = makeMppiObstacleSnapshot(obstacles, false);
     std::vector<int> ids;
     std::vector<float> squared_distances;
     const auto evaluate_pose = [&](const double x, const double y, const double yaw,
@@ -1135,6 +1145,7 @@ TEST(MppiObstacleGeometryTest, RepresentativeScoringGeometryFitsFifteenHertzBudg
       const auto collision = evaluateMppiObstacleCollisionForCuboid(cuboid, snapshot, &ids);
       every_pose_evaluated = every_pose_evaluated && collision.evaluated;
       collision_count += collision.in_collision ? 1u : 0u;
+      collision_node_checks += collision.node_checks;
       collision_point_checks += collision.point_checks;
       if(evaluate_clearance){
         if(collision.in_collision){
@@ -1153,6 +1164,7 @@ TEST(MppiObstacleGeometryTest, RepresentativeScoringGeometryFitsFifteenHertzBudg
             &ids,
             &squared_distances);
           ++clearance_calls;
+          clearance_node_checks += clearance.node_checks;
           clearance_point_checks += clearance.point_checks;
           if(std::isfinite(clearance.clearance)){
             clearance_sum += clearance.clearance;
@@ -1189,6 +1201,11 @@ TEST(MppiObstacleGeometryTest, RepresentativeScoringGeometryFitsFifteenHertzBudg
     std::cout << "MPPI geometry benchmark: obstacles=" << scenario.obstacle_count
               << ", dense_wall=" << scenario.dense_wall
               << ", dense_bucket=" << scenario.dense_bucket
+              << ", adversarial_bucket=" << scenario.adversarial_bucket
+              << ", collision_nodes=" << collision_node_checks
+              << ", collision_candidates=" << collision_point_checks
+              << ", clearance_nodes=" << clearance_node_checks
+              << ", clearance_candidates=" << clearance_point_checks
               << ", elapsed_ms=" << elapsed.count() << std::endl;
 
     EXPECT_EQ(evaluated_poses, 7275u) << "obstacles=" << scenario.obstacle_count;
@@ -1200,6 +1217,12 @@ TEST(MppiObstacleGeometryTest, RepresentativeScoringGeometryFitsFifteenHertzBudg
       EXPECT_EQ(clearance_calls, 1995u);
       EXPECT_LT(collision_point_checks, evaluated_poses * 32u);
       EXPECT_LT(clearance_point_checks, clearance_calls * 64u);
+    }
+    if(scenario.adversarial_bucket){
+      EXPECT_LT(collision_node_checks, evaluated_poses * 64u);
+      EXPECT_LT(collision_point_checks, evaluated_poses * 96u);
+      EXPECT_LT(clearance_node_checks, 500000u);
+      EXPECT_LT(clearance_point_checks, 500000u);
     }
     EXPECT_LT(elapsed.count(), 45.0)
       << "Full MPPI obstacle cycle exceeded 45 ms, obstacles="

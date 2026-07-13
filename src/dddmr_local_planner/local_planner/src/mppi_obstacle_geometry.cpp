@@ -30,7 +30,8 @@ public:
 };
 
 MppiObstacleSnapshot makeMppiObstacleSnapshot(
-  const pcl::PointCloud<pcl::PointXYZI>::ConstPtr & obstacles)
+  const pcl::PointCloud<pcl::PointXYZI>::ConstPtr & obstacles,
+  const bool build_compatibility_kdtree)
 {
   MppiObstacleSnapshot snapshot;
   snapshot.cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
@@ -111,11 +112,17 @@ MppiObstacleSnapshot makeMppiObstacleSnapshot(
     }
   }
   snapshot.obstacle_index = obstacle_index;
-  if(!snapshot.cloud->points.empty()){
+  if(build_compatibility_kdtree && !snapshot.cloud->points.empty()){
     snapshot.kdtree->setInputCloud(snapshot.cloud);
   }
 
   return snapshot;
+}
+
+MppiObstacleSnapshot makeMppiObstacleSnapshot(
+  const pcl::PointCloud<pcl::PointXYZI>::ConstPtr & obstacles)
+{
+  return makeMppiObstacleSnapshot(obstacles, true);
 }
 
 namespace
@@ -224,13 +231,13 @@ double obstacleClearanceToCuboid(
   return std::hypot(clearance_x, clearance_y, clearance_z);
 }
 
-double obstacleNodeLowerBound(
+std::array<double, 3> obstacleNodeAxisGaps(
   const MppiCuboidGeometry & geometry,
   const MppiObstacleSpatialIndex::Node & node)
 {
-  // The AABB projection interval is exact on each orthonormal OBB axis. The
-  // largest interval gap is therefore a conservative lower bound on the 3-D
-  // point-to-OBB distance and is safe for both collision and clearance pruning.
+  // The AABB projection interval is exact on each orthonormal OBB axis. Every
+  // contained point is at least each interval gap away on that axis, so the L2
+  // norm of all three gaps is a conservative point-to-OBB distance lower bound.
   const double node_center[3] = {
     (node.minimum[0] + node.maximum[0]) * 0.5,
     (node.minimum[1] + node.maximum[1]) * 0.5,
@@ -242,7 +249,7 @@ double obstacleNodeLowerBound(
   const double * axes[3] = {geometry.axis_x, geometry.axis_y, geometry.axis_z};
   const double cuboid_halves[3] = {
     geometry.half_x, geometry.half_y, geometry.half_z};
-  double lower_bound = 0.0;
+  double gaps[3] = {0.0, 0.0, 0.0};
   for(std::size_t axis_index = 0; axis_index < 3; ++axis_index){
     const double * axis = axes[axis_index];
     const double node_projection =
@@ -262,10 +269,27 @@ double obstacleNodeLowerBound(
       64.0 * std::numeric_limits<double>::epsilon() *
       (std::fabs(node_projection) + std::fabs(cuboid_projection) +
       node_projection_radius + cuboid_halves[axis_index] + 1.0);
-    const double gap = std::max(0.0, raw_gap - rounding_margin);
-    lower_bound = std::max(lower_bound, gap);
+    gaps[axis_index] = std::max(0.0, raw_gap - rounding_margin);
   }
-  return lower_bound;
+  return {gaps[0], gaps[1], gaps[2]};
+}
+
+double obstacleNodeLowerBound(
+  const MppiCuboidGeometry & geometry,
+  const MppiObstacleSpatialIndex::Node & node)
+{
+  const auto gaps = obstacleNodeAxisGaps(geometry, node);
+  return std::hypot(gaps[0], gaps[1], gaps[2]);
+}
+
+double obstacleNodeCollisionLowerBound(
+  const MppiCuboidGeometry & geometry,
+  const MppiObstacleSpatialIndex::Node & node)
+{
+  const auto gaps = obstacleNodeAxisGaps(geometry, node);
+  // Exact collision expands every OBB interval independently by the boundary
+  // tolerance, so collision pruning must use the L-infinity gap rather than L2.
+  return std::max(gaps[0], std::max(gaps[1], gaps[2]));
 }
 
 std::size_t saturatingMultiply(
@@ -400,7 +424,9 @@ bool collectMppiObstacleCollisionCandidates(
     stack.pop_back();
     const auto & node =
       snapshot.obstacle_index->nodes[static_cast<std::size_t>(node_index)];
-    if(obstacleNodeLowerBound(geometry, node) > kMppiCuboidBoundaryTolerance){
+    if(obstacleNodeCollisionLowerBound(geometry, node) >
+       kMppiCuboidBoundaryTolerance)
+    {
       continue;
     }
     if(node.isLeaf()){
@@ -461,7 +487,9 @@ MppiObstacleCollisionResult evaluateMppiObstacleCollisionForCuboid(
     const auto & node =
       snapshot.obstacle_index->nodes[static_cast<std::size_t>(node_index)];
     ++result.node_checks;
-    if(obstacleNodeLowerBound(geometry, node) > kMppiCuboidBoundaryTolerance){
+    if(obstacleNodeCollisionLowerBound(geometry, node) >
+       kMppiCuboidBoundaryTolerance)
+    {
       continue;
     }
     if(!node.isLeaf()){
