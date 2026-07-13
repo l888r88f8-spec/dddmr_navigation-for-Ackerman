@@ -34,6 +34,10 @@
 
 #include <angles/angles.h>
 
+#include <local_planner/mppi_critic_manager.h>
+#include <local_planner/mppi_controller.h>
+#include <local_planner/mppi_obstacle_geometry.h>
+
 /*For graph*/
 #include <queue>
 #include <set>
@@ -269,7 +273,21 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       base_trajectory::Trajectory buildPredictedTrajectory(
         double linear_velocity,
         double angular_velocity) const;
+      base_trajectory::Trajectory buildPredictedTrajectoryFromMppiControls(
+        const std::vector<local_planner::MppiControl> & controls) const;
+      local_planner::MppiScoredTrajectory buildMppiScoredTrajectory(
+        const std::vector<local_planner::MppiControl> & controls,
+        const pcl::PointCloud<pcl::PointXYZI>::Ptr & aggregate_observation,
+        const pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr & aggregate_observation_kdtree,
+        bool check_every_obstacle_point = false) const;
+      local_planner::MppiCriticData buildMppiCriticData(
+        const std::vector<local_planner::MppiCandidate> & candidates,
+        const pcl::PointCloud<pcl::PointXYZI>::Ptr & aggregate_observation,
+        const pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr & aggregate_observation_kdtree) const;
       dddmr_sys_core::PlannerState computeRppControlCommand(
+        const std::string & controller_name,
+        geometry_msgs::msg::Twist * cmd_vel);
+      dddmr_sys_core::PlannerState computeMppiControlCommand(
         const std::string & controller_name,
         geometry_msgs::msg::Twist * cmd_vel);
 
@@ -284,6 +302,10 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       std::string name_;
       std::string controller_backend_;
       std::string rpp_critic_trajectory_generator_name_;
+      local_planner::MppiController mppi_controller_;
+      local_planner::MppiCriticManager mppi_critic_manager_;
+      local_planner::MppiControl mppi_last_command_;
+      bool mppi_use_perception_blocked_preemption_;
       std::vector<pcl::PointXYZ> robot_cuboid_vertices_;
       double rpp_nominal_linear_speed_;
       double rpp_min_linear_speed_;

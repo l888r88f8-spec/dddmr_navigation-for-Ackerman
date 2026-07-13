@@ -56,21 +56,23 @@ p2p_move_base:
     alignment_controller_name: "ackermann_heading_rotate_shortest"  # 对齐阶段控制器名
     recovery_action_name: ""                                     # 恢复行为名，空字符串表示不显式指定
 
-# 全局路径管理
+# 全局规划：路径请求与后端选择
 global_plan_manager:
   ros__parameters:
     route_action_name: "get_plan"                                # 全局规划 action 名称
     route_request_frequency: -1.0                                # 路径请求采用事件触发；负值表示不周期轮询
     freeze_route_per_goal: false
 
-# 全局规划器
 global_planner:
   ros__parameters:
-    enable_detail_log: true                                     # 是否开启详细日志
+    # 全局规划器公共参数
+    enable_detail_log: true                                      # 是否开启详细日志
     # use_pre_graph: true
+
+    # 全局规划器后端选择
     raw_route_backend: "hybrid_a_star"                           # graph_a_star/hybrid_a_star
 
-    # graph_a_star 参数
+    # 全局规划器后端参数: graph_a_star
     graph_a_star:
       turning_weight: 0.5                                        # 转折惩罚，越大越偏向平滑
       a_star_expanding_radius: 0.5                               # 图搜索扩张半径（m）
@@ -83,7 +85,7 @@ global_planner:
         lock_goal_distance: 1.2                                   # 终点锁定距离（m）
         ground_search_radius: 0.8                                 # 平滑候选点地面搜索半径（m）
 
-    # hybrid_a_star 参数
+    # 全局规划器后端参数: hybrid_a_star
     hybrid_astar:
       wheelbase: 0.46                                             # 轴距（m）
       max_steer: 0.238                                            # 最大转角（rad）
@@ -104,7 +106,7 @@ global_planner:
       max_projected_vertical_jump: 0.12                           # 投影点最大垂向跳变（m）
       allow_sample_nearest_fallback: false                        # 采样投影失败时是否允许最近邻回退
 
-# 全局感知层
+# 全局规划感知输入
 perception_3d_global:
   ros__parameters:
     enable_detail_log: false                                     # 是否开启感知层详细日志
@@ -159,14 +161,17 @@ perception_3d_global:
       segmentation_ignore_ratio: 1.1                             # 与静态图匹配比例阈值（高于该值忽略）
       expected_sensor_time: 0.5                                  # 传感器时间容忍（s），避免调度抖动导致全局动态层过期
 
-# 局部规划器
+# 局部规划：控制后端选择与公共约束
 local_planner:
   ros__parameters:
-    odom_topic: /lio_sam/localization/odometry                  # 局部规划里程计输入
-    controller_backend: "regulated_pure_pursuit"                # 控制后端 legacy_rollout / regulated_pure_pursuit
-    controller_frequency: 15.0                                  # 控制循环频率（Hz）
+    # 局部规划器公共参数
+    odom_topic: /lio_sam/localization/odometry                   # 局部规划里程计输入
+    controller_frequency: 15.0                                   # 控制循环频率（Hz）
 
-    # 局部参考路径窗口
+    # 局部规划器后端选择
+    controller_backend: "mppi"                 # 控制后端 legacy_rollout / regulated_pure_pursuit / mppi
+
+    # 局部规划器公共路径/目标参数
     local_reference:
       forward_distance: 4.0                                     # 前向参考窗口长度（m），决定 blocked_wait 的前向检测距离
       backward_distance: 1.0                                    # 后向保留窗口长度（m）
@@ -186,7 +191,7 @@ local_planner:
     xy_goal_tolerance: 0.3                                      # 位置容差（m）
     yaw_goal_tolerance: 0.8                                     # 航向容差（rad），与全局终点朝向约束保持一致
 
-    # Regulated Pure Pursuit 参数
+    # 局部控制后端参数: regulated_pure_pursuit
     regulated_pure_pursuit:
       critic_trajectory_generator_name: "ackermann_simple"       # RPP 名义轨迹送入哪套 critics 评估
       nominal_linear_speed: 0.3                                 # 常规巡航速度（m/s）
@@ -203,6 +208,83 @@ local_planner:
       max_steer: 0.238                                          # 最大转角（rad）等效自行车模型前轮转角，atan(wheelbase / min_turning_radius)
       max_angular_velocity: 0.158                               # 输出角速度上限（rad/s），linear_speed / min_turning_radius
 
+    # 局部控制后端参数: mppi
+    mppi:
+      prediction_horizon_sec: 5.0                               # MPPI 预测时域（s），Ackermann 绕障需要足够横向位移
+      model_dt: 0.0666667                                       # 与 15Hz controller_period 对齐以启用控制序列 shift
+      batch_size: 96                                            # 采样批量；点云 KDTree 查询较重，优先保证实时预算
+      structured_candidate_count: 8                             # 成对连续圆弧/S弯候选，保证小批量中存在完整绕障控制形状
+      iteration_count: 1                                        # 与 Nav2 默认一致，通常 1 次迭代即可
+      temperature: 0.1                                          # MPPI softmax 温度；降低后更跟随低代价绕障样本，减少左右平均抵消
+      gamma: 0.015                                              # 控制能量项权重
+      vx_std: 0.2                                               # 线速度高斯噪声标准差
+      wz_std: 0.08                                              # Ackermann 可行域内角速度噪声，避免大量样本裁成正负满舵
+      vx_min: 0.05                                              # Ackermann 平台默认只前进
+      vx_max: 0.5                                               # 最大前进速度；过低会同步压低 Ackermann 可用角速度
+      wz_max: 0.526                                             # 角速度硬上限，最终还会被 steering 几何约束裁剪
+      ax_min: -3.0                                              # 最大减速度
+      ax_max: 3.0                                               # 最大加速度，避免启动时速度被钳在 vx_min
+      az_max: 3.5                                               # 最大角加速度，保持初始转向采样有足够响应
+      wheelbase: 0.46                                           # 轴距
+      max_steer: 0.238                                          # 最大前轮转角（rad）
+      seed: 7                                                   # 固定 seed，保证离线测试可复现
+      regenerate_noises: false                                  # 与 Nav2 默认一致，跨周期复用噪声以稳定绕障方向
+      use_perception_blocked_preemption: false                  # MPPI 避障时不让路径阻塞意见提前触发重规划，由 critic 体系判断是否可绕行
+      critics: ["ConstraintCritic", "ObstaclesCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic"]  # 官方 MPPI critic 顺序
+
+      ConstraintCritic:
+        cost_weight: 4.0                                        # 运动约束惩罚权重
+        cost_power: 1                                           # 代价幂次
+
+      ObstaclesCritic:
+        cost_power: 1                                           # 障碍代价幂次
+        critical_weight: 20.0                                   # 近碰撞/碰撞惩罚权重
+        repulsion_weight: 1.5                                   # 远离障碍偏好权重
+        collision_cost: 100000.0                                # 轨迹碰撞代价
+        collision_margin_distance: 0.10                         # 近碰撞边界（m）
+        near_goal_distance: 0.5                                 # 近目标时降低远离障碍偏好
+        inflation_radius: 2.2                                   # 点云障碍排斥半径（m），略大于约 1.9m 最小转弯半径以提前选边
+        trajectory_point_step: 4                                # 障碍检测步长，降低每周期 KDTree 查询量
+
+      GoalCritic:
+        cost_weight: 5.0                                        # 近目标位置收敛权重
+        cost_power: 1
+        threshold_to_consider: 1.4                              # 路径剩余长度小于该值时启用
+
+      GoalAngleCritic:
+        cost_weight: 3.0                                        # 近目标朝向收敛权重
+        cost_power: 1
+        threshold_to_consider: 0.5
+        symmetric_yaw_tolerance: false
+
+      PathAlignCritic:
+        cost_weight: 10.0                                       # 轨迹贴合路径权重
+        cost_power: 1
+        threshold_to_consider: 0.5
+        max_path_occupancy_ratio: 0.07
+        offset_from_furthest: 20
+        trajectory_point_step: 4
+        use_path_orientations: false
+
+      PathFollowCritic:
+        cost_weight: 5.0                                        # 终端点向前跟随路径权重
+        cost_power: 1
+        threshold_to_consider: 1.4
+        offset_from_furthest: 6
+
+      PathAngleCritic:
+        cost_weight: 2.2                                        # 终端航向对准路径权重
+        cost_power: 1
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 0.785398
+        offset_from_furthest: 4
+        mode: 0                                                 # 0: forward preference
+
+      PreferForwardCritic:
+        cost_weight: 5.0                                        # 倒车惩罚权重
+        cost_power: 1
+        threshold_to_consider: 0.5
+
     # 调试可视化
     debug_publish:
       robot_cuboid: true                                        # 发布车体包络
@@ -212,7 +294,7 @@ local_planner:
       best_trajectory: true                                     # 发布最优轨迹
       all_trajectories: false                                   # 发布全部采样轨迹（较重）
 
-# legacy_rollout 轨迹生成/跟踪
+# 局部控制后端参数: legacy_rollout trajectory_generators
 trajectory_generators:
   ros__parameters:
     plugins: ["ackermann_simple"] # , "ackermann_heading_rotate_inplace", "ackermann_heading_rotate_shortest"]  # 轨迹生成插件列表
@@ -250,7 +332,7 @@ trajectory_generators:
       sim_granularity: 0.05                                      # 位移离散步长（m）
       angular_sim_granularity: 0.025                             # 角位移离散步长（rad）
 
-# 局部感知层
+# 局部规划感知输入
 perception_3d_local:
   ros__parameters:
     enable_detail_log: false                                     # 是否开启感知层详细日志
@@ -299,10 +381,10 @@ recovery_behaviors:
       tolerance: 0.3                                             # 旋转误差容差（rad）
       trajectory_generator_name: "ackermann_heading_rotate_inplace"  # 旋转行为使用的轨迹生成器
 
-# MPC 代价模型
+# 局部轨迹评分 critics
 mpc_critics:
   ros__parameters:
-    plugins: ["collision", "prefer_forward_speed", "stick_path", "pure_pursuit", "toward_global_plan", "collision_rotate", "collision_rotate_shortest", "prefer_rotate_shortest"]  # 代价模型插件列表
+    plugins: ["collision", "prefer_forward_speed", "stick_path", "pure_pursuit", "toward_global_plan", "collision_rotate", "collision_rotate_shortest", "prefer_rotate_shortest"]  # legacy/RPP 代价模型插件列表
 
     collision:
       plugin: "mpc_critics::CollisionModel"                      # trajectory generator 碰撞模型

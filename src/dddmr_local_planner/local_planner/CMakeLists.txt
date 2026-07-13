@@ -63,11 +63,26 @@ include_directories(
 )
 
 
+add_library(local_planner_mppi_controller SHARED
+  src/mppi_critic_manager.cpp
+  src/mppi_controller.cpp
+  src/mppi_obstacle_geometry.cpp
+)
+target_include_directories(local_planner_mppi_controller PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${PCL_INCLUDE_DIRS}
+)
+target_link_libraries(local_planner_mppi_controller
+  ${PCL_LIBRARIES}
+)
+
 # local_planner
 add_library(local_planner SHARED
   src/local_planner.cpp
 )
 target_link_libraries(local_planner
+  local_planner_mppi_controller
   ${PCL_LIBRARIES}
 )
 ament_target_dependencies(local_planner
@@ -97,11 +112,30 @@ ament_target_dependencies(local_planner_play_ground_node
 )
 
 install(TARGETS
+  local_planner_mppi_controller
   local_planner
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
 )
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_mppi_controller
+    test/test_mppi_controller.cpp
+  )
+  target_link_libraries(test_mppi_controller
+    local_planner_mppi_controller
+  )
+
+  ament_add_gtest(test_mppi_critic_manager
+    test/test_mppi_critic_manager.cpp
+  )
+  target_link_libraries(test_mppi_critic_manager
+    local_planner_mppi_controller
+  )
+endif()
 
 #install node
 install(TARGETS
@@ -129,6 +163,6 @@ install(PROGRAMS
 
 
 ament_export_include_directories(include)
-ament_export_libraries(local_planner)
+ament_export_libraries(local_planner_mppi_controller local_planner)
 ament_export_dependencies(${dependencies})
 ament_package()

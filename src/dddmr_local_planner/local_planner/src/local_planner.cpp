@@ -32,6 +32,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 
 namespace local_planner {
@@ -44,6 +45,9 @@ std::string normalizeControllerBackend(const std::string & backend)
   }
   if(backend == "legacy_rollout" || backend == "legacy"){
     return "legacy_rollout";
+  }
+  if(backend == "mppi" || backend == "mppi_controller" || backend == "nav2_mppi"){
+    return "mppi";
   }
   return backend;
 }
@@ -66,6 +70,7 @@ Local_Planner::Local_Planner(const std::string& name): Node(name)
   cached_local_pruned_path_valid_ = false;
   controller_backend_ = "legacy_rollout";
   rpp_critic_trajectory_generator_name_ = "ackermann_simple";
+  mppi_last_command_ = MppiControl{0.05, 0.0};
   rpp_nominal_linear_speed_ = 1.0;
   rpp_min_linear_speed_ = 0.15;
   rpp_alignment_linear_speed_ = 0.25;
@@ -82,6 +87,7 @@ Local_Planner::Local_Planner(const std::string& name): Node(name)
   rpp_wheelbase_ = 0.55;
   rpp_max_steer_ = 0.69;
   rpp_max_angular_velocity_ = 1.2;
+  mppi_use_perception_blocked_preemption_ = false;
   allow_offroute_anchor_recovery_ = false;
 }
 
@@ -216,7 +222,8 @@ void Local_Planner::initial(
   this->get_parameter("controller_backend", controller_backend_);
   controller_backend_ = normalizeControllerBackend(controller_backend_);
   if(controller_backend_ != "legacy_rollout" &&
-     controller_backend_ != "regulated_pure_pursuit")
+     controller_backend_ != "regulated_pure_pursuit" &&
+     controller_backend_ != "mppi")
   {
     RCLCPP_WARN(
       this->get_logger(),
@@ -397,6 +404,173 @@ void Local_Planner::initial(
       this->get_logger(),
       "regulated_pure_pursuit.max_angular_velocity: %.2f",
       rpp_max_angular_velocity_);
+  }
+
+  MppiConfig mppi_config;
+  MppiCriticConfig mppi_critic_config;
+  double mppi_prediction_horizon_sec = 2.5;
+  declare_parameter("mppi.prediction_horizon_sec", rclcpp::ParameterValue(2.5));
+  declare_parameter("mppi.model_dt", rclcpp::ParameterValue(0.1));
+  declare_parameter("mppi.batch_size", rclcpp::ParameterValue(384));
+  declare_parameter("mppi.structured_candidate_count", rclcpp::ParameterValue(8));
+  declare_parameter("mppi.iteration_count", rclcpp::ParameterValue(1));
+  declare_parameter("mppi.temperature", rclcpp::ParameterValue(0.3));
+  declare_parameter("mppi.gamma", rclcpp::ParameterValue(0.015));
+  declare_parameter("mppi.vx_std", rclcpp::ParameterValue(0.18));
+  declare_parameter("mppi.wz_std", rclcpp::ParameterValue(0.25));
+  declare_parameter("mppi.vx_min", rclcpp::ParameterValue(0.05));
+  declare_parameter("mppi.vx_max", rclcpp::ParameterValue(0.8));
+  declare_parameter("mppi.wz_max", rclcpp::ParameterValue(1.2));
+  declare_parameter("mppi.ax_min", rclcpp::ParameterValue(-0.8));
+  declare_parameter("mppi.ax_max", rclcpp::ParameterValue(0.8));
+  declare_parameter("mppi.az_max", rclcpp::ParameterValue(1.5));
+  declare_parameter("mppi.wheelbase", rclcpp::ParameterValue(0.55));
+  declare_parameter("mppi.max_steer", rclcpp::ParameterValue(0.69));
+  declare_parameter("mppi.seed", rclcpp::ParameterValue(7));
+  declare_parameter("mppi.regenerate_noises", rclcpp::ParameterValue(false));
+  declare_parameter("mppi.use_perception_blocked_preemption", rclcpp::ParameterValue(false));
+  declare_parameter("mppi.critics", rclcpp::ParameterValue(mppi_critic_config.critics));
+
+  auto get_double_param = [&](const std::string & param_name, const double default_value) {
+    declare_parameter(param_name, rclcpp::ParameterValue(default_value));
+    return this->get_parameter(param_name).as_double();
+  };
+  auto get_int_param = [&](const std::string & param_name, const int default_value) {
+    declare_parameter(param_name, rclcpp::ParameterValue(default_value));
+    return static_cast<int>(this->get_parameter(param_name).as_int());
+  };
+  auto get_bool_param = [&](const std::string & param_name, const bool default_value) {
+    declare_parameter(param_name, rclcpp::ParameterValue(default_value));
+    return this->get_parameter(param_name).as_bool();
+  };
+
+  this->get_parameter("mppi.prediction_horizon_sec", mppi_prediction_horizon_sec);
+  this->get_parameter("mppi.model_dt", mppi_config.model_dt);
+  mppi_config.controller_period = 1.0 / std::max(1e-3, controller_frequency_);
+  mppi_config.time_steps = static_cast<std::size_t>(
+    std::max(1.0, std::ceil(mppi_prediction_horizon_sec / std::max(1e-3, mppi_config.model_dt))));
+  mppi_config.batch_size = static_cast<std::size_t>(
+    std::max<int64_t>(1, this->get_parameter("mppi.batch_size").as_int()));
+  mppi_config.structured_candidate_count = static_cast<std::size_t>(
+    std::max<int64_t>(0, this->get_parameter("mppi.structured_candidate_count").as_int()));
+  mppi_config.iteration_count = static_cast<std::size_t>(
+    std::max<int64_t>(1, this->get_parameter("mppi.iteration_count").as_int()));
+  mppi_config.temperature = this->get_parameter("mppi.temperature").as_double();
+  mppi_config.gamma = this->get_parameter("mppi.gamma").as_double();
+  mppi_config.vx_std = this->get_parameter("mppi.vx_std").as_double();
+  mppi_config.wz_std = this->get_parameter("mppi.wz_std").as_double();
+  mppi_config.vx_min = this->get_parameter("mppi.vx_min").as_double();
+  mppi_config.vx_max = this->get_parameter("mppi.vx_max").as_double();
+  mppi_config.wz_max = this->get_parameter("mppi.wz_max").as_double();
+  mppi_config.ax_min = this->get_parameter("mppi.ax_min").as_double();
+  mppi_config.ax_max = this->get_parameter("mppi.ax_max").as_double();
+  mppi_config.az_max = this->get_parameter("mppi.az_max").as_double();
+  mppi_config.wheelbase = this->get_parameter("mppi.wheelbase").as_double();
+  mppi_config.max_steer = this->get_parameter("mppi.max_steer").as_double();
+  mppi_config.seed = static_cast<std::uint32_t>(
+    std::max<int64_t>(0, this->get_parameter("mppi.seed").as_int()));
+  mppi_config.regenerate_noises =
+    this->get_parameter("mppi.regenerate_noises").as_bool();
+  mppi_use_perception_blocked_preemption_ =
+    this->get_parameter("mppi.use_perception_blocked_preemption").as_bool();
+  mppi_config.shift_control_sequence =
+    std::fabs(mppi_config.controller_period - mppi_config.model_dt) < 1e-6;
+  mppi_controller_.setConfig(mppi_config);
+  mppi_last_command_ = MppiControl{std::max(0.0, mppi_config.vx_min), 0.0};
+
+  this->get_parameter("mppi.critics", mppi_critic_config.critics);
+  mppi_critic_config.constraint.cost_weight =
+    get_double_param("mppi.ConstraintCritic.cost_weight", mppi_critic_config.constraint.cost_weight);
+  mppi_critic_config.constraint.cost_power =
+    get_int_param("mppi.ConstraintCritic.cost_power", mppi_critic_config.constraint.cost_power);
+
+  mppi_critic_config.obstacles.cost_power =
+    get_int_param("mppi.ObstaclesCritic.cost_power", mppi_critic_config.obstacles.cost_power);
+  mppi_critic_config.obstacles.critical_weight =
+    get_double_param("mppi.ObstaclesCritic.critical_weight", mppi_critic_config.obstacles.critical_weight);
+  mppi_critic_config.obstacles.repulsion_weight =
+    get_double_param("mppi.ObstaclesCritic.repulsion_weight", mppi_critic_config.obstacles.repulsion_weight);
+  mppi_critic_config.obstacles.collision_cost =
+    get_double_param("mppi.ObstaclesCritic.collision_cost", mppi_critic_config.obstacles.collision_cost);
+  mppi_critic_config.obstacles.collision_margin_distance =
+    get_double_param("mppi.ObstaclesCritic.collision_margin_distance", mppi_critic_config.obstacles.collision_margin_distance);
+  mppi_critic_config.obstacles.near_goal_distance =
+    get_double_param("mppi.ObstaclesCritic.near_goal_distance", mppi_critic_config.obstacles.near_goal_distance);
+  mppi_critic_config.obstacles.inflation_radius =
+    get_double_param("mppi.ObstaclesCritic.inflation_radius", mppi_critic_config.obstacles.inflation_radius);
+  mppi_critic_config.obstacles.trajectory_point_step = static_cast<std::size_t>(
+    std::max(1, get_int_param("mppi.ObstaclesCritic.trajectory_point_step", static_cast<int>(mppi_critic_config.obstacles.trajectory_point_step))));
+
+  mppi_critic_config.goal.cost_weight =
+    get_double_param("mppi.GoalCritic.cost_weight", mppi_critic_config.goal.cost_weight);
+  mppi_critic_config.goal.cost_power =
+    get_int_param("mppi.GoalCritic.cost_power", mppi_critic_config.goal.cost_power);
+  mppi_critic_config.goal.threshold_to_consider =
+    get_double_param("mppi.GoalCritic.threshold_to_consider", mppi_critic_config.goal.threshold_to_consider);
+
+  mppi_critic_config.goal_angle.cost_weight =
+    get_double_param("mppi.GoalAngleCritic.cost_weight", mppi_critic_config.goal_angle.cost_weight);
+  mppi_critic_config.goal_angle.cost_power =
+    get_int_param("mppi.GoalAngleCritic.cost_power", mppi_critic_config.goal_angle.cost_power);
+  mppi_critic_config.goal_angle.threshold_to_consider =
+    get_double_param("mppi.GoalAngleCritic.threshold_to_consider", mppi_critic_config.goal_angle.threshold_to_consider);
+  mppi_critic_config.goal_angle.symmetric_yaw_tolerance =
+    get_bool_param("mppi.GoalAngleCritic.symmetric_yaw_tolerance", mppi_critic_config.goal_angle.symmetric_yaw_tolerance);
+
+  mppi_critic_config.path_align.cost_weight =
+    get_double_param("mppi.PathAlignCritic.cost_weight", mppi_critic_config.path_align.cost_weight);
+  mppi_critic_config.path_align.cost_power =
+    get_int_param("mppi.PathAlignCritic.cost_power", mppi_critic_config.path_align.cost_power);
+  mppi_critic_config.path_align.threshold_to_consider =
+    get_double_param("mppi.PathAlignCritic.threshold_to_consider", mppi_critic_config.path_align.threshold_to_consider);
+  mppi_critic_config.path_align.max_path_occupancy_ratio =
+    get_double_param("mppi.PathAlignCritic.max_path_occupancy_ratio", mppi_critic_config.path_align.max_path_occupancy_ratio);
+  mppi_critic_config.path_align.offset_from_furthest = static_cast<std::size_t>(
+    std::max(0, get_int_param("mppi.PathAlignCritic.offset_from_furthest", static_cast<int>(mppi_critic_config.path_align.offset_from_furthest))));
+  mppi_critic_config.path_align.trajectory_point_step = static_cast<std::size_t>(
+    std::max(1, get_int_param("mppi.PathAlignCritic.trajectory_point_step", static_cast<int>(mppi_critic_config.path_align.trajectory_point_step))));
+  mppi_critic_config.path_align.use_path_orientations =
+    get_bool_param("mppi.PathAlignCritic.use_path_orientations", mppi_critic_config.path_align.use_path_orientations);
+
+  mppi_critic_config.path_follow.cost_weight =
+    get_double_param("mppi.PathFollowCritic.cost_weight", mppi_critic_config.path_follow.cost_weight);
+  mppi_critic_config.path_follow.cost_power =
+    get_int_param("mppi.PathFollowCritic.cost_power", mppi_critic_config.path_follow.cost_power);
+  mppi_critic_config.path_follow.threshold_to_consider =
+    get_double_param("mppi.PathFollowCritic.threshold_to_consider", mppi_critic_config.path_follow.threshold_to_consider);
+  mppi_critic_config.path_follow.offset_from_furthest = static_cast<std::size_t>(
+    std::max(0, get_int_param("mppi.PathFollowCritic.offset_from_furthest", static_cast<int>(mppi_critic_config.path_follow.offset_from_furthest))));
+
+  mppi_critic_config.path_angle.cost_weight =
+    get_double_param("mppi.PathAngleCritic.cost_weight", mppi_critic_config.path_angle.cost_weight);
+  mppi_critic_config.path_angle.cost_power =
+    get_int_param("mppi.PathAngleCritic.cost_power", mppi_critic_config.path_angle.cost_power);
+  mppi_critic_config.path_angle.threshold_to_consider =
+    get_double_param("mppi.PathAngleCritic.threshold_to_consider", mppi_critic_config.path_angle.threshold_to_consider);
+  mppi_critic_config.path_angle.max_angle_to_furthest =
+    get_double_param("mppi.PathAngleCritic.max_angle_to_furthest", mppi_critic_config.path_angle.max_angle_to_furthest);
+  mppi_critic_config.path_angle.offset_from_furthest = static_cast<std::size_t>(
+    std::max(0, get_int_param("mppi.PathAngleCritic.offset_from_furthest", static_cast<int>(mppi_critic_config.path_angle.offset_from_furthest))));
+  mppi_critic_config.path_angle.mode =
+    get_int_param("mppi.PathAngleCritic.mode", mppi_critic_config.path_angle.mode);
+
+  mppi_critic_config.prefer_forward.cost_weight =
+    get_double_param("mppi.PreferForwardCritic.cost_weight", mppi_critic_config.prefer_forward.cost_weight);
+  mppi_critic_config.prefer_forward.cost_power =
+    get_int_param("mppi.PreferForwardCritic.cost_power", mppi_critic_config.prefer_forward.cost_power);
+  mppi_critic_config.prefer_forward.threshold_to_consider =
+    get_double_param("mppi.PreferForwardCritic.threshold_to_consider", mppi_critic_config.prefer_forward.threshold_to_consider);
+  mppi_critic_manager_.setConfig(mppi_critic_config);
+
+  if(controller_backend_ == "mppi"){
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "mppi.batch_size: %zu, time_steps: %zu, model_dt: %.3f, temperature: %.3f, gamma: %.3f",
+      mppi_controller_.config().batch_size,
+      mppi_controller_.config().time_steps,
+      mppi_controller_.config().model_dt,
+      mppi_controller_.config().temperature,
+      mppi_controller_.config().gamma);
   }
 
   declare_parameter("debug_publish.robot_cuboid", rclcpp::ParameterValue(false));
@@ -890,6 +1064,243 @@ base_trajectory::Trajectory Local_Planner::buildPredictedTrajectory(
   return trajectory;
 }
 
+base_trajectory::Trajectory Local_Planner::buildPredictedTrajectoryFromMppiControls(
+  const std::vector<MppiControl> & controls) const
+{
+  const double time_step = std::max(0.02, mppi_controller_.config().model_dt);
+  const unsigned int steps = static_cast<unsigned int>(std::max<std::size_t>(1, controls.size()));
+  const double initial_vx = controls.empty() ? 0.0 : controls.front().vx;
+  const double initial_wz = controls.empty() ? 0.0 : controls.front().wz;
+
+  base_trajectory::Trajectory trajectory(
+    initial_vx,
+    0.0,
+    initial_wz,
+    time_step,
+    steps);
+  trajectory.cost_ = 0.0;
+
+  double x = trans_gbl2b_.transform.translation.x;
+  double y = trans_gbl2b_.transform.translation.y;
+  double z = trans_gbl2b_.transform.translation.z;
+  double yaw = getRobotYaw();
+
+  for(const auto & control : controls){
+    x += control.vx * std::cos(yaw + control.wz * time_step * 0.5) * time_step;
+    y += control.vx * std::sin(yaw + control.wz * time_step * 0.5) * time_step;
+    yaw = angles::normalize_angle(yaw + control.wz * time_step);
+
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header.frame_id = global_frame_;
+    pose.header.stamp = clock_->now();
+    pose.pose.position.x = x;
+    pose.pose.position.y = y;
+    pose.pose.position.z = z;
+    tf2::Quaternion q;
+    q.setRPY(0.0, 0.0, yaw);
+    q.normalize();
+    pose.pose.orientation = tf2::toMsg(q);
+
+    auto cuboid = transformRobotCuboid(pose);
+    trajectory.addPoint(pose, cuboid, computeCuboidMinMax(cuboid));
+  }
+
+  return trajectory;
+}
+
+MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
+  const std::vector<MppiControl> & controls,
+  const pcl::PointCloud<pcl::PointXYZI>::Ptr & aggregate_observation,
+  const pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr & aggregate_observation_kdtree,
+  const bool check_every_obstacle_point) const
+{
+  MppiScoredTrajectory trajectory;
+  trajectory.controls = controls;
+  trajectory.points.reserve(controls.size());
+
+  const double time_step = std::max(0.02, mppi_controller_.config().model_dt);
+  const double obstacle_search_radius = std::max(
+    3.0,
+    mppi_critic_manager_.config().obstacles.inflation_radius);
+  double x = trans_gbl2b_.transform.translation.x;
+  double y = trans_gbl2b_.transform.translation.y;
+  double z = trans_gbl2b_.transform.translation.z;
+  double yaw = getRobotYaw();
+  const std::size_t obstacle_point_step = check_every_obstacle_point ? 1 :
+    std::max<std::size_t>(1, mppi_critic_manager_.config().obstacles.trajectory_point_step);
+  std::size_t point_index = 0;
+
+  auto compute_clearance =
+    [&](const geometry_msgs::msg::PoseStamped & pose,
+        const pcl::PointCloud<pcl::PointXYZ> & cuboid,
+        bool * in_collision) {
+      if(in_collision != nullptr){
+        *in_collision = false;
+      }
+      if(!aggregate_observation || !aggregate_observation_kdtree ||
+         aggregate_observation->points.empty() || cuboid.points.size() < 4)
+      {
+        return std::numeric_limits<double>::infinity();
+      }
+
+      pcl::PointXYZI query;
+      query.x = pose.pose.position.x;
+      query.y = pose.pose.position.y;
+      query.z = pose.pose.position.z;
+      query.intensity = 0.0;
+      std::vector<int> ids;
+      std::vector<float> squared_distances;
+      aggregate_observation_kdtree->radiusSearch(
+        query,
+        obstacle_search_radius,
+        ids,
+        squared_distances);
+      const auto clearance_result =
+        computeObstacleClearanceForCuboid(cuboid, *aggregate_observation, ids);
+      if(in_collision != nullptr){
+        *in_collision = clearance_result.in_collision;
+      }
+      return clearance_result.clearance;
+    };
+
+  for(const auto & control : controls){
+    x += control.vx * std::cos(yaw + control.wz * time_step * 0.5) * time_step;
+    y += control.vx * std::sin(yaw + control.wz * time_step * 0.5) * time_step;
+    yaw = angles::normalize_angle(yaw + control.wz * time_step);
+
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header.frame_id = global_frame_;
+    pose.header.stamp = clock_->now();
+    pose.pose.position.x = x;
+    pose.pose.position.y = y;
+    pose.pose.position.z = z;
+    tf2::Quaternion q;
+    q.setRPY(0.0, 0.0, yaw);
+    q.normalize();
+    pose.pose.orientation = tf2::toMsg(q);
+
+    const auto cuboid = transformRobotCuboid(pose);
+    bool in_collision = false;
+    double obstacle_clearance = std::numeric_limits<double>::infinity();
+    if(point_index % obstacle_point_step == 0 || point_index + 1 == controls.size()){
+      obstacle_clearance = compute_clearance(pose, cuboid, &in_collision);
+    }
+    trajectory.points.push_back(
+      MppiTrajectoryPoint{x, y, yaw, in_collision, obstacle_clearance});
+    ++point_index;
+  }
+
+  return trajectory;
+}
+
+MppiCriticData Local_Planner::buildMppiCriticData(
+  const std::vector<MppiCandidate> & candidates,
+  const pcl::PointCloud<pcl::PointXYZI>::Ptr & aggregate_observation,
+  const pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr & aggregate_observation_kdtree) const
+{
+  MppiCriticData data;
+  data.trajectories.reserve(candidates.size());
+  for(const auto & candidate : candidates){
+    data.trajectories.push_back(
+      buildMppiScoredTrajectory(
+        candidate.controls,
+        aggregate_observation,
+        aggregate_observation_kdtree));
+  }
+
+  data.path.reserve(prune_plan_.poses.size());
+  data.local_path_length = 0.0;
+  for(std::size_t i = 0; i < prune_plan_.poses.size(); ++i){
+    const auto & pose = prune_plan_.poses[i];
+    tf2::Quaternion q;
+    tf2::fromMsg(pose.pose.orientation, q);
+    double roll = 0.0;
+    double pitch = 0.0;
+    double yaw = 0.0;
+    tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+    data.path.push_back(
+      MppiPathPoint{
+        pose.pose.position.x,
+        pose.pose.position.y,
+        yaw});
+    if(i > 0){
+      const auto & previous = prune_plan_.poses[i - 1];
+      data.local_path_length += getDistanceBTWPoseStamp(previous, pose);
+    }
+  }
+
+  if(aggregate_observation && aggregate_observation_kdtree &&
+     !aggregate_observation->points.empty() && !data.path.empty())
+  {
+    std::vector<int> ids;
+    std::vector<float> squared_distances;
+    for(std::size_t path_index = 0; path_index < data.path.size(); ++path_index){
+      auto & point = data.path[path_index];
+      geometry_msgs::msg::PoseStamped path_pose;
+      path_pose.pose.position.x = point.x;
+      path_pose.pose.position.y = point.y;
+      path_pose.pose.position.z = prune_plan_.poses[path_index].pose.position.z;
+      tf2::Quaternion path_orientation;
+      path_orientation.setRPY(0.0, 0.0, point.yaw);
+      path_orientation.normalize();
+      path_pose.pose.orientation = tf2::toMsg(path_orientation);
+      const auto path_cuboid = transformRobotCuboid(path_pose);
+
+      double path_collision_query_radius =
+        mppi_critic_manager_.config().obstacles.collision_margin_distance;
+      for(const auto & vertex : path_cuboid.points){
+        const double dx = vertex.x - point.x;
+        const double dy = vertex.y - point.y;
+        const double dz = vertex.z - path_pose.pose.position.z;
+        path_collision_query_radius = std::max(
+          path_collision_query_radius,
+          std::sqrt(dx * dx + dy * dy + dz * dz) +
+          mppi_critic_manager_.config().obstacles.collision_margin_distance);
+      }
+
+      pcl::PointXYZI query;
+      query.x = point.x;
+      query.y = point.y;
+      query.z = path_pose.pose.position.z;
+      query.intensity = 0.0F;
+      ids.clear();
+      squared_distances.clear();
+      if(aggregate_observation_kdtree->radiusSearch(
+          query,
+          path_collision_query_radius,
+          ids,
+          squared_distances) > 0)
+      {
+        const auto path_clearance = computeObstacleClearanceForCuboid(
+          path_cuboid,
+          *aggregate_observation,
+          ids);
+        point.obstacle_free =
+          !path_clearance.in_collision &&
+          (!std::isfinite(path_clearance.clearance) ||
+          path_clearance.clearance >=
+          mppi_critic_manager_.config().obstacles.collision_margin_distance);
+        if(!point.obstacle_free){
+          ++data.blocked_path_points;
+        }
+      }
+    }
+    data.path_obstacle_occupancy_ratio =
+      static_cast<double>(data.blocked_path_points) / static_cast<double>(data.path.size());
+  }
+
+  data.robot_x = trans_gbl2b_.transform.translation.x;
+  data.robot_y = trans_gbl2b_.transform.translation.y;
+  data.robot_yaw = getRobotYaw();
+  data.vx_min = mppi_controller_.config().vx_min;
+  data.vx_max = mppi_controller_.config().vx_max;
+  data.min_turning_radius =
+    mppi_controller_.config().wheelbase /
+    std::max(1e-6, std::tan(mppi_controller_.config().max_steer));
+  data.model_dt = mppi_controller_.config().model_dt;
+  return data;
+}
+
 void Local_Planner::resetLocalRouteTrackingState()
 {
   local_route_progress_index_ = 0;
@@ -1340,6 +1751,10 @@ void Local_Planner::cbOdom(const nav_msgs::msg::Odometry::SharedPtr msg)
       geometry_msgs::msg::Twist cmd_vel;
       computeRppControlCommand("rpp_preview", &cmd_vel);
     }
+    else if(controller_backend_ == "mppi"){
+      geometry_msgs::msg::Twist cmd_vel;
+      computeMppiControlCommand("mppi_preview", &cmd_vel);
+    }
     else{
       base_trajectory::Trajectory best_traj;
       computeVelocityCommand("differential_drive_simple", best_traj);
@@ -1474,6 +1889,11 @@ void Local_Planner::setRoute(
   goal_seq_ = goal_seq;
   route_source_label_ = source_label;
   resetLocalRouteTrackingState();
+  const MppiControl route_measured_speed{
+    robot_state_.twist.twist.linear.x,
+    robot_state_.twist.twist.angular.z};
+  mppi_controller_.resetControlSequence(route_measured_speed);
+  mppi_last_command_ = route_measured_speed;
 
   pcl_global_plan_.reset(new pcl::PointCloud<pcl::PointXYZ>);
   for(auto gbl_it = global_plan_.begin(); gbl_it!=global_plan_.end();gbl_it++){
@@ -2052,6 +2472,268 @@ dddmr_sys_core::PlannerState Local_Planner::computeRppControlCommand(
   return dddmr_sys_core::TRAJECTORY_FOUND;
 }
 
+dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
+  const std::string & controller_name,
+  geometry_msgs::msg::Twist * cmd_vel)
+{
+  ControllerContext context;
+  const auto context_state = prepareControllerContext(&context);
+  if(context_state != dddmr_sys_core::TRAJECTORY_FOUND){
+    return context_state;
+  }
+
+  if(mppi_use_perception_blocked_preemption_){
+    const auto opinion_state = evaluatePerceptionOpinions(context.opinions);
+    if(opinion_state != dddmr_sys_core::TRAJECTORY_FOUND){
+      return opinion_state;
+    }
+  }
+  else{
+    for(const auto & opinion : context.opinions){
+      if(opinion == perception_3d::PATH_BLOCKED_WAIT ||
+         opinion == perception_3d::PATH_BLOCKED_REPLANNING)
+      {
+        RCLCPP_DEBUG_THROTTLE(
+          this->get_logger().get_child(name_), *clock_, 2000,
+          "MPPI debug: ignoring perception blocked opinion and deferring obstacle handling to MPPI critics, controller=%s, route_version=%zu, goal_seq=%zu, source=%s",
+          controller_name.c_str(),
+          route_version_,
+          goal_seq_,
+          route_source_label_.c_str());
+        break;
+      }
+    }
+  }
+
+  if(context.current_allowed_max_linear_speed > 0.0 &&
+     context.current_allowed_max_linear_speed < mppi_controller_.config().vx_min)
+  {
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "MPPI trigger: state=ALL_TRAJECTORIES_FAIL, action=stop_wait, reason=speed_cap_below_minimum, controller=%s, route_version=%zu, goal_seq=%zu, source=%s, allowed_max_speed=%.2f, vx_min=%.2f",
+      controller_name.c_str(),
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str(),
+      context.current_allowed_max_linear_speed,
+      mppi_controller_.config().vx_min);
+    return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
+  }
+
+  MppiControl measured_speed;
+  measured_speed.vx = robot_state_.twist.twist.linear.x;
+  measured_speed.wz = robot_state_.twist.twist.angular.z;
+
+  const auto obstacle_snapshot = makeMppiObstacleSnapshot(context.aggregate_observation);
+  const std::size_t mppi_obstacle_points =
+    obstacle_snapshot.cloud ? obstacle_snapshot.cloud->points.size() : 0u;
+  std::size_t mppi_scored_trajectories = 0;
+  std::size_t mppi_scored_points = 0;
+  std::size_t mppi_finite_clearance_points = 0;
+  std::size_t mppi_collision_trajectories = 0;
+  std::size_t mppi_valid_scores = 0;
+  bool mppi_critic_fail_flag = false;
+  double mppi_min_clearance = std::numeric_limits<double>::infinity();
+  double mppi_path_occupancy_ratio = 0.0;
+  std::size_t mppi_blocked_path_points = 0;
+
+  MppiResult result;
+  auto score_function =
+    [&](const std::vector<MppiCandidate> & candidates) -> std::vector<MppiCandidateScore> {
+      auto critic_data = buildMppiCriticData(
+        candidates,
+        obstacle_snapshot.cloud,
+        obstacle_snapshot.kdtree);
+      auto critic_result = mppi_critic_manager_.score(critic_data);
+      mppi_scored_trajectories = critic_data.trajectories.size();
+      mppi_scored_points = 0;
+      mppi_finite_clearance_points = 0;
+      mppi_collision_trajectories = 0;
+      mppi_valid_scores = 0;
+      mppi_critic_fail_flag = critic_result.fail_flag;
+      mppi_min_clearance = std::numeric_limits<double>::infinity();
+      mppi_path_occupancy_ratio = critic_data.path_obstacle_occupancy_ratio;
+      mppi_blocked_path_points = critic_data.blocked_path_points;
+
+      for(const auto & trajectory : critic_data.trajectories){
+        bool trajectory_collides = false;
+        for(const auto & point : trajectory.points){
+          ++mppi_scored_points;
+          if(point.in_collision){
+            trajectory_collides = true;
+          }
+          if(std::isfinite(point.obstacle_clearance)){
+            ++mppi_finite_clearance_points;
+            mppi_min_clearance = std::min(mppi_min_clearance, point.obstacle_clearance);
+          }
+        }
+        if(trajectory_collides){
+          ++mppi_collision_trajectories;
+        }
+      }
+
+      if(critic_result.fail_flag){
+        return std::vector<MppiCandidateScore>(
+          candidates.size(),
+          MppiCandidateScore{false, -1.0});
+      }
+
+      if(critic_result.scores.size() != candidates.size()){
+        return std::vector<MppiCandidateScore>(
+          candidates.size(),
+          MppiCandidateScore{false, -1.0});
+      }
+
+      if(context.current_allowed_max_linear_speed > 0.0){
+        for(std::size_t i = 0; i < candidates.size(); ++i){
+          if(!mppiSequenceRespectsSpeedCap(
+              candidates[i].controls,
+              measured_speed.vx,
+              context.current_allowed_max_linear_speed,
+              mppi_controller_.config().shift_control_sequence,
+              mppi_controller_.config().ax_min,
+              mppi_controller_.config().model_dt,
+              mppi_controller_.config().controller_period))
+          {
+            critic_result.scores[i] = MppiCandidateScore{false, -1.0};
+          }
+        }
+      }
+
+      for(const auto & score : critic_result.scores){
+        if(score.valid && std::isfinite(score.cost) && score.cost >= 0.0){
+          ++mppi_valid_scores;
+        }
+      }
+
+      return critic_result.scores;
+    };
+
+  bool optimal_sequence_collision_free = false;
+  std::size_t optimization_attempts = 0;
+  constexpr std::size_t max_optimization_attempts = 2;
+  for(; optimization_attempts < max_optimization_attempts; ++optimization_attempts){
+    result = mppi_controller_.optimizeBatch(
+      measured_speed,
+      score_function,
+      [&]() {return mppi_blocked_path_points >= 3;});
+    if(!result.has_valid_control){
+      break;
+    }
+
+    const auto optimal_scored_trajectory = buildMppiScoredTrajectory(
+      result.optimal_sequence,
+      obstacle_snapshot.cloud,
+      obstacle_snapshot.kdtree,
+      true);
+    optimal_sequence_collision_free =
+      isMppiTrajectoryCollisionFree(optimal_scored_trajectory);
+    if(optimal_sequence_collision_free){
+      ++optimization_attempts;
+      break;
+    }
+
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "MPPI optimal trajectory validation failed: resetting control sequence and retrying, controller=%s, attempt=%zu/%zu",
+      controller_name.c_str(),
+      optimization_attempts + 1,
+      max_optimization_attempts);
+    mppi_controller_.resetControlSequence(measured_speed);
+  }
+  const std::size_t mppi_command_index =
+    mppi_controller_.config().shift_control_sequence &&
+    mppi_controller_.controlSequence().size() > 1 ? 1 : 0;
+  const MppiControl best_sample_command =
+    result.best_sample_sequence.empty() ? MppiControl{} :
+    result.best_sample_sequence[
+      std::min(mppi_command_index, result.best_sample_sequence.size() - 1)];
+  RCLCPP_INFO_THROTTLE(
+    this->get_logger().get_child(name_), *clock_, 2000,
+    "MPPI debug: controller=%s, obstacle_points=%zu, trajectories=%zu, trajectory_points=%zu, finite_clearances=%zu, min_clearance=%.3f, path_occupancy=%.3f, collision_trajectories=%zu, valid_scores=%zu, critic_fail=%d, rejected=%zu, best_cost=%.3f, best_vx=%.3f, best_wz=%.3f, prefilter_wz=%.3f, cmd_vx=%.3f, cmd_wz=%.3f, effective_samples=%.2f, weight_pos=%.3f, weight_neg=%.3f, weight_neutral=%.3f, structured=%zu, optimal_valid=%d, attempts=%zu, allowed_max_speed=%.3f",
+    controller_name.c_str(),
+    mppi_obstacle_points,
+    mppi_scored_trajectories,
+    mppi_scored_points,
+    mppi_finite_clearance_points,
+    std::isfinite(mppi_min_clearance) ? mppi_min_clearance : -1.0,
+    mppi_path_occupancy_ratio,
+    mppi_collision_trajectories,
+    mppi_valid_scores,
+    mppi_critic_fail_flag,
+    result.rejected_samples,
+    result.best_cost,
+    best_sample_command.vx,
+    best_sample_command.wz,
+    result.prefilter_command.wz,
+    result.command.vx,
+    result.command.wz,
+    result.effective_sample_size,
+    result.positive_weight_mass,
+    result.negative_weight_mass,
+    result.neutral_weight_mass,
+    result.structured_candidates,
+    optimal_sequence_collision_free ? 1 : 0,
+    optimization_attempts,
+    context.current_allowed_max_linear_speed);
+
+  if(!result.has_valid_control){
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "MPPI trigger: state=PATH_BLOCKED_REPLANNING, action=route_replan, reason=all_samples_rejected, controller=%s, route_version=%zu, goal_seq=%zu, source=%s, rejected=%zu",
+      controller_name.c_str(),
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str(),
+      result.rejected_samples);
+    return dddmr_sys_core::PATH_BLOCKED_REPLANNING;
+  }
+
+  if(!optimal_sequence_collision_free){
+    mppi_controller_.resetControlSequence(measured_speed);
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "MPPI trigger: state=PATH_BLOCKED_REPLANNING, action=route_replan, reason=optimal_sequence_collision, controller=%s, route_version=%zu, goal_seq=%zu, source=%s, attempts=%zu",
+      controller_name.c_str(),
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str(),
+      optimization_attempts);
+    return dddmr_sys_core::PATH_BLOCKED_REPLANNING;
+  }
+
+  mppi_last_command_ = result.command;
+  if(cmd_vel != nullptr){
+    cmd_vel->linear.x = result.command.vx;
+    cmd_vel->linear.y = 0.0;
+    cmd_vel->linear.z = 0.0;
+    cmd_vel->angular.x = 0.0;
+    cmd_vel->angular.y = 0.0;
+    cmd_vel->angular.z = result.command.wz;
+  }
+
+  auto best_traj = buildPredictedTrajectoryFromMppiControls(result.optimal_sequence);
+  publishDebugPath(
+    buildPathFromTrajectory(best_traj),
+    pub_best_trajectory_path_,
+    "mppi_best_trajectory",
+    route_version_,
+    goal_seq_,
+    route_source_label_,
+    true);
+
+  if(debug_publish_best_trajectory_ && pub_best_trajectory_pose_->get_subscription_count() > 0){
+    geometry_msgs::msg::PoseArray best_pose_arr;
+    pcl::PointCloud<pcl::PointXYZ> cuboids_pcl;
+    trajectory2posearray_cuboids(best_traj, best_pose_arr, cuboids_pcl);
+    best_pose_arr.header.frame_id = global_frame_;
+    best_pose_arr.header.stamp = clock_->now();
+    pub_best_trajectory_pose_->publish(best_pose_arr);
+  }
+
+  return dddmr_sys_core::TRAJECTORY_FOUND;
+}
+
 dddmr_sys_core::PlannerState Local_Planner::computeControlCommand(
   const std::string & controller_name,
   geometry_msgs::msg::Twist * cmd_vel)
@@ -2067,6 +2749,10 @@ dddmr_sys_core::PlannerState Local_Planner::computeControlCommand(
 
   if(controller_backend_ == "regulated_pure_pursuit"){
     return computeRppControlCommand(controller_name, cmd_vel);
+  }
+
+  if(controller_backend_ == "mppi"){
+    return computeMppiControlCommand(controller_name, cmd_vel);
   }
 
   base_trajectory::Trajectory best_traj;

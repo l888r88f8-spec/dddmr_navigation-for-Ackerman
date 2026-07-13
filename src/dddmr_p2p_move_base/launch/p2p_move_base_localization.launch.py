@@ -2,6 +2,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -13,6 +14,7 @@ def generate_launch_description():
     map_dir = LaunchConfiguration('map_dir')
     ground_dir = LaunchConfiguration('ground_dir')
     rviz_config = LaunchConfiguration('rviz_config')
+    use_rviz = LaunchConfiguration('use_rviz')
     global_planner_prefix = LaunchConfiguration('global_planner_prefix')
 
     localization_config = os.path.join(
@@ -51,6 +53,11 @@ def generate_launch_description():
             'rviz_config',
             default_value=default_rviz_config,
             description='Path to the RViz configuration file.',
+        ),
+        DeclareLaunchArgument(
+            'use_rviz',
+            default_value='true',
+            description='Start RViz.',
         ),
         DeclareLaunchArgument(
             'global_planner_prefix',
@@ -115,6 +122,7 @@ def generate_launch_description():
             name='rviz2',
             arguments=['-d', rviz_config],
             emulate_tty=True,
+            condition=IfCondition(use_rviz),
             parameters=[
                 {'use_sim_time': use_sim},
             ],
