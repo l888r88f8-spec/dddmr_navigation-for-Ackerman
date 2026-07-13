@@ -11,10 +11,12 @@ bool isMppiTrajectoryCollisionFree(const MppiScoredTrajectory & trajectory)
 {
   return !trajectory.points.empty() &&
     trajectory.points.size() == trajectory.controls.size() &&
-    std::none_of(
+    std::all_of(
     trajectory.points.begin(),
     trajectory.points.end(),
-    [](const MppiTrajectoryPoint & point) {return point.in_collision;});
+    [](const MppiTrajectoryPoint & point) {
+      return point.collision_evaluated && !point.in_collision;
+    });
 }
 
 MppiBypassSideClassifier::MppiBypassSideClassifier(const std::vector<MppiPathPoint> & path)
@@ -132,15 +134,22 @@ bool annotateMppiCandidateMetadata(
   if(result->scores.size() != data.trajectories.size()){
     for(auto & score : result->scores){
       score.valid = false;
+      score.bypass_side = MppiBypassSide::Neutral;
+      score.collision_free = false;
     }
     return false;
   }
 
   const MppiBypassSideClassifier classifier(data.path);
   for(std::size_t i = 0; i < data.trajectories.size(); ++i){
-    result->scores[i].bypass_side = classifier.classify(data.trajectories[i]);
-    result->scores[i].collision_free =
-      isMppiTrajectoryCollisionFree(data.trajectories[i]);
+    auto & score = result->scores[i];
+    if(!score.valid){
+      score.bypass_side = MppiBypassSide::Neutral;
+      score.collision_free = false;
+      continue;
+    }
+    score.bypass_side = classifier.classify(data.trajectories[i]);
+    score.collision_free = isMppiTrajectoryCollisionFree(data.trajectories[i]);
   }
   return true;
 }

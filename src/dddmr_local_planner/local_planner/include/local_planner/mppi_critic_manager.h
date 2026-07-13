@@ -16,6 +16,7 @@ struct MppiTrajectoryPoint
   double yaw = 0.0;
   bool in_collision = false;
   double obstacle_clearance = 0.0;
+  bool collision_evaluated = false;
 };
 
 struct MppiPathPoint

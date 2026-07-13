@@ -34,6 +34,15 @@ MppiObstacleClearanceResult computeObstacleClearanceForCuboid(
   const pcl::PointCloud<pcl::PointXYZI> & obstacles,
   const std::vector<int> & obstacle_indices);
 
+bool hasObstacleCollisionForCuboid(
+  const pcl::PointCloud<pcl::PointXYZ> & cuboid,
+  const pcl::PointCloud<pcl::PointXYZI> & obstacles,
+  const std::vector<int> & obstacle_indices);
+
+double computeMppiCuboidCollisionQueryRadius(
+  const pcl::PointCloud<pcl::PointXYZ> & cuboid,
+  const pcl::PointXYZ & pose_center);
+
 }  // namespace local_planner
 
 #endif  // LOCAL_PLANNER_MPPI_OBSTACLE_GEOMETRY_H_

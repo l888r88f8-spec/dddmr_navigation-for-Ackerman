@@ -23,10 +23,14 @@ MppiObstacleSnapshot makeMppiObstacleSnapshot(
   return snapshot;
 }
 
-MppiObstacleClearanceResult computeObstacleClearanceForCuboid(
+namespace
+{
+
+MppiObstacleClearanceResult evaluateObstacleCuboid(
   const pcl::PointCloud<pcl::PointXYZ> & cuboid,
   const pcl::PointCloud<pcl::PointXYZI> & obstacles,
-  const std::vector<int> & obstacle_indices)
+  const std::vector<int> & obstacle_indices,
+  const bool calculate_clearance)
 {
   MppiObstacleClearanceResult result;
   if(cuboid.points.size() < 4 || obstacles.points.empty() || obstacle_indices.empty()){
@@ -98,18 +102,56 @@ MppiObstacleClearanceResult computeObstacleClearanceForCuboid(
       return result;
     }
 
-    const double clearance_x = std::max(0.0, x_value - half_x);
-    const double clearance_y = std::max(0.0, y_value - half_y);
-    const double clearance_z = std::max(0.0, z_value - half_z);
-    result.clearance = std::min(
-      result.clearance,
-      std::sqrt(
-        clearance_x * clearance_x +
-        clearance_y * clearance_y +
-        clearance_z * clearance_z));
+    if(calculate_clearance){
+      const double clearance_x = std::max(0.0, x_value - half_x);
+      const double clearance_y = std::max(0.0, y_value - half_y);
+      const double clearance_z = std::max(0.0, z_value - half_z);
+      result.clearance = std::min(
+        result.clearance,
+        std::sqrt(
+          clearance_x * clearance_x +
+          clearance_y * clearance_y +
+          clearance_z * clearance_z));
+    }
   }
 
   return result;
+}
+
+}  // namespace
+
+MppiObstacleClearanceResult computeObstacleClearanceForCuboid(
+  const pcl::PointCloud<pcl::PointXYZ> & cuboid,
+  const pcl::PointCloud<pcl::PointXYZI> & obstacles,
+  const std::vector<int> & obstacle_indices)
+{
+  return evaluateObstacleCuboid(cuboid, obstacles, obstacle_indices, true);
+}
+
+bool hasObstacleCollisionForCuboid(
+  const pcl::PointCloud<pcl::PointXYZ> & cuboid,
+  const pcl::PointCloud<pcl::PointXYZI> & obstacles,
+  const std::vector<int> & obstacle_indices)
+{
+  return evaluateObstacleCuboid(cuboid, obstacles, obstacle_indices, false).in_collision;
+}
+
+double computeMppiCuboidCollisionQueryRadius(
+  const pcl::PointCloud<pcl::PointXYZ> & cuboid,
+  const pcl::PointXYZ & pose_center)
+{
+  double maximum_squared_distance = 0.0;
+  for(const auto & vertex : cuboid.points){
+    const double dx = static_cast<double>(vertex.x) - pose_center.x;
+    const double dy = static_cast<double>(vertex.y) - pose_center.y;
+    const double dz = static_cast<double>(vertex.z) - pose_center.z;
+    const double squared_distance = dx * dx + dy * dy + dz * dz;
+    if(!std::isfinite(squared_distance)){
+      return std::numeric_limits<double>::infinity();
+    }
+    maximum_squared_distance = std::max(maximum_squared_distance, squared_distance);
+  }
+  return std::sqrt(maximum_squared_distance) + 1e-6;
 }
 
 }  // namespace local_planner

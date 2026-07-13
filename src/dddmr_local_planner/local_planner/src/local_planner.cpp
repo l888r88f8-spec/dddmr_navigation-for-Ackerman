@@ -1129,18 +1129,29 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
   const std::size_t obstacle_point_step = check_every_obstacle_point ? 1 :
     std::max<std::size_t>(1, mppi_critic_manager_.config().obstacles.trajectory_point_step);
   std::size_t point_index = 0;
+  std::vector<int> obstacle_ids;
+  std::vector<float> squared_distances;
 
-  auto compute_clearance =
+  auto query_obstacles =
     [&](const geometry_msgs::msg::PoseStamped & pose,
         const pcl::PointCloud<pcl::PointXYZ> & cuboid,
-        bool * in_collision) {
-      if(in_collision != nullptr){
-        *in_collision = false;
+        const double query_radius,
+        const bool calculate_clearance,
+        bool * collision_evaluated) {
+      if(collision_evaluated != nullptr){
+        *collision_evaluated = false;
       }
-      if(!aggregate_observation || !aggregate_observation_kdtree ||
-         aggregate_observation->points.empty() || cuboid.points.size() < 4)
+      MppiObstacleClearanceResult result;
+      if(!aggregate_observation || aggregate_observation->points.empty()){
+        if(collision_evaluated != nullptr){
+          *collision_evaluated = true;
+        }
+        return result;
+      }
+      if(!aggregate_observation_kdtree || cuboid.points.size() < 4 ||
+         !std::isfinite(query_radius) || query_radius <= 0.0)
       {
-        return std::numeric_limits<double>::infinity();
+        return result;
       }
 
       pcl::PointXYZI query;
@@ -1148,19 +1159,29 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
       query.y = pose.pose.position.y;
       query.z = pose.pose.position.z;
       query.intensity = 0.0;
-      std::vector<int> ids;
-      std::vector<float> squared_distances;
+      obstacle_ids.clear();
+      squared_distances.clear();
       aggregate_observation_kdtree->radiusSearch(
         query,
-        obstacle_search_radius,
-        ids,
+        query_radius,
+        obstacle_ids,
         squared_distances);
-      const auto clearance_result =
-        computeObstacleClearanceForCuboid(cuboid, *aggregate_observation, ids);
-      if(in_collision != nullptr){
-        *in_collision = clearance_result.in_collision;
+      if(calculate_clearance){
+        result = computeObstacleClearanceForCuboid(
+          cuboid,
+          *aggregate_observation,
+          obstacle_ids);
       }
-      return clearance_result.clearance;
+      else{
+        result.in_collision = hasObstacleCollisionForCuboid(
+          cuboid,
+          *aggregate_observation,
+          obstacle_ids);
+      }
+      if(collision_evaluated != nullptr){
+        *collision_evaluated = true;
+      }
+      return result;
     };
 
   for(const auto & control : controls){
@@ -1181,12 +1202,37 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
 
     const auto cuboid = transformRobotCuboid(pose);
     bool in_collision = false;
+    bool collision_evaluated = false;
     double obstacle_clearance = std::numeric_limits<double>::infinity();
-    if(point_index % obstacle_point_step == 0 || point_index + 1 == controls.size()){
-      obstacle_clearance = compute_clearance(pose, cuboid, &in_collision);
+    const bool evaluate_clearance =
+      point_index % obstacle_point_step == 0 || point_index + 1 == controls.size();
+    double query_radius = obstacle_search_radius;
+    if(!evaluate_clearance){
+      pcl::PointXYZ pose_center;
+      pose_center.x = pose.pose.position.x;
+      pose_center.y = pose.pose.position.y;
+      pose_center.z = pose.pose.position.z;
+      query_radius = computeMppiCuboidCollisionQueryRadius(cuboid, pose_center);
+    }
+    const auto obstacle_result =
+      query_obstacles(
+        pose,
+        cuboid,
+        query_radius,
+        evaluate_clearance,
+        &collision_evaluated);
+    in_collision = obstacle_result.in_collision;
+    if(evaluate_clearance){
+      obstacle_clearance = obstacle_result.clearance;
     }
     trajectory.points.push_back(
-      MppiTrajectoryPoint{x, y, yaw, in_collision, obstacle_clearance});
+      MppiTrajectoryPoint{
+        x,
+        y,
+        yaw,
+        in_collision,
+        obstacle_clearance,
+        collision_evaluated});
     ++point_index;
   }
 

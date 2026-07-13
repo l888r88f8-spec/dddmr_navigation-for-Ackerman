@@ -8,8 +8,10 @@
 #include "local_planner/mppi_obstacle_geometry.h"
 
 using local_planner::computeObstacleClearanceForCuboid;
+using local_planner::computeMppiCuboidCollisionQueryRadius;
 using local_planner::annotateMppiCandidateMetadata;
 using local_planner::classifyMppiBypassSide;
+using local_planner::hasObstacleCollisionForCuboid;
 using local_planner::isMppiTrajectoryCollisionFree;
 using local_planner::makeMppiObstacleSnapshot;
 using local_planner::MppiBypassSide;
@@ -36,6 +38,9 @@ MppiScoredTrajectory makeTrajectory(
     control.wz = 0.0;
   }
   trajectory.points = points;
+  for(auto & point : trajectory.points){
+    point.collision_evaluated = true;
+  }
   return trajectory;
 }
 
@@ -72,8 +77,8 @@ TEST(MppiCriticManagerTest, AnnotatesAlignedScoresWithPhysicalSideAndCollisionMe
       MppiTrajectoryPoint{0.5, -0.3, 0.0, true},
       MppiTrajectoryPoint{1.5, -0.4, 0.0}}),
     makeTrajectory(0.2, {
-      MppiTrajectoryPoint{0.5, 0.02, 0.0},
-      MppiTrajectoryPoint{1.5, 0.03, 0.0}})};
+      MppiTrajectoryPoint{0.5, 0.3, 0.0},
+      MppiTrajectoryPoint{1.5, 0.4, 0.0}})};
   MppiCriticResult result;
   result.scores = {
     MppiCandidateScore{true, 1.0},
@@ -86,7 +91,7 @@ TEST(MppiCriticManagerTest, AnnotatesAlignedScoresWithPhysicalSideAndCollisionMe
   EXPECT_EQ(result.scores[1].bypass_side, MppiBypassSide::Right);
   EXPECT_FALSE(result.scores[1].collision_free);
   EXPECT_EQ(result.scores[2].bypass_side, MppiBypassSide::Neutral);
-  EXPECT_TRUE(result.scores[2].collision_free);
+  EXPECT_FALSE(result.scores[2].collision_free);
   EXPECT_FALSE(result.scores[2].valid);
   EXPECT_DOUBLE_EQ(result.scores[2].cost, -1.0);
 }
@@ -102,6 +107,22 @@ TEST(MppiCriticManagerTest, MetadataAnnotationRejectsMismatchedResultWithoutOutO
   EXPECT_FALSE(annotateMppiCandidateMetadata(data, &result));
   ASSERT_EQ(result.scores.size(), 1u);
   EXPECT_FALSE(result.scores.front().valid);
+}
+
+TEST(MppiCriticManagerTest, MetadataAnnotationTreatsUnevaluatedPoseAsNotCollisionFree)
+{
+  auto trajectory = makeTrajectory(0.2, {
+    MppiTrajectoryPoint{0.5, 0.3, 0.0},
+    MppiTrajectoryPoint{1.0, 0.4, 0.0},
+    MppiTrajectoryPoint{1.5, 0.3, 0.0}});
+  trajectory.points[1].collision_evaluated = false;
+  auto data = makeData({trajectory});
+  MppiCriticResult result;
+  result.scores = {MppiCandidateScore{true, 1.0}};
+
+  ASSERT_TRUE(annotateMppiCandidateMetadata(data, &result));
+  EXPECT_EQ(result.scores.front().bypass_side, MppiBypassSide::Left);
+  EXPECT_FALSE(result.scores.front().collision_free);
 }
 
 TEST(MppiCriticManagerTest, CandidateScoreDefaultsToNeutralCollisionFreeMetadata)
@@ -554,6 +575,18 @@ TEST(MppiCriticManagerTest, FinalTrajectoryValidatorRejectsAnyCollision)
   EXPECT_FALSE(isMppiTrajectoryCollisionFree(trajectory));
 }
 
+TEST(MppiCriticManagerTest, FinalTrajectoryValidatorRejectsUnevaluatedIntermediatePose)
+{
+  auto trajectory = makeTrajectory(0.2, {
+    MppiTrajectoryPoint{0.0, 0.0, 0.0, false, 1.0},
+    MppiTrajectoryPoint{1.0, 0.0, 0.0, false, 1.0},
+    MppiTrajectoryPoint{2.0, 0.0, 0.0, false, 1.0}
+  });
+  trajectory.points[1].collision_evaluated = false;
+
+  EXPECT_FALSE(isMppiTrajectoryCollisionFree(trajectory));
+}
+
 TEST(MppiCriticManagerTest, FinalTrajectoryValidatorAcceptsCollisionFreeTrajectory)
 {
   const auto trajectory = makeTrajectory(0.2, {
@@ -590,6 +623,44 @@ TEST(MppiObstacleGeometryTest, IgnoresStaleObstacleIndices)
   EXPECT_FALSE(result.in_collision);
   EXPECT_EQ(result.ignored_indices, 2u);
   EXPECT_GT(result.clearance, 0.0);
+}
+
+TEST(MppiObstacleGeometryTest, TightCollisionQueryRadiusBoundsEveryCuboidVertex)
+{
+  const pcl::PointXYZ center{1.0F, 2.0F, 3.0F};
+  pcl::PointCloud<pcl::PointXYZ> cuboid;
+  cuboid.push_back(pcl::PointXYZ{2.0F, 2.0F, 3.0F});
+  cuboid.push_back(pcl::PointXYZ{1.0F, 4.0F, 3.0F});
+  cuboid.push_back(pcl::PointXYZ{1.0F, 2.0F, 0.0F});
+  cuboid.push_back(pcl::PointXYZ{1.0F, 2.0F, 7.0F});
+
+  const double radius = computeMppiCuboidCollisionQueryRadius(cuboid, center);
+
+  EXPECT_GT(radius, 4.0);
+  EXPECT_LT(radius, 4.0 + 1e-5);
+}
+
+TEST(MppiObstacleGeometryTest, CollisionOnlyQueryUsesExactCuboidFootprint)
+{
+  pcl::PointCloud<pcl::PointXYZ> cuboid;
+  cuboid.push_back(pcl::PointXYZ{-1.0F, -1.0F, -1.0F});
+  cuboid.push_back(pcl::PointXYZ{-1.0F, 1.0F, -1.0F});
+  cuboid.push_back(pcl::PointXYZ{-1.0F, -1.0F, 1.0F});
+  cuboid.push_back(pcl::PointXYZ{1.0F, -1.0F, -1.0F});
+  pcl::PointCloud<pcl::PointXYZI> obstacles;
+  pcl::PointXYZI inside;
+  inside.x = 0.0F;
+  inside.y = 0.0F;
+  inside.z = 0.0F;
+  obstacles.push_back(inside);
+  pcl::PointXYZI outside;
+  outside.x = 2.0F;
+  outside.y = 0.0F;
+  outside.z = 0.0F;
+  obstacles.push_back(outside);
+
+  EXPECT_TRUE(hasObstacleCollisionForCuboid(cuboid, obstacles, {0}));
+  EXPECT_FALSE(hasObstacleCollisionForCuboid(cuboid, obstacles, {1}));
 }
 
 TEST(MppiObstacleGeometryTest, SnapshotOwnsCloudUsedByKdTree)
