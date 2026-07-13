@@ -2663,6 +2663,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
   bool optimal_sequence_collision_free = false;
   std::size_t optimization_attempts = 0;
   constexpr std::size_t max_optimization_attempts = 2;
+  const MppiAvoidanceState entry_avoidance_state = mppi_controller_.avoidanceState();
   for(; optimization_attempts < max_optimization_attempts; ++optimization_attempts){
     result = mppi_controller_.optimizeBatch(
       measured_speed,
@@ -2690,7 +2691,8 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
       controller_name.c_str(),
       optimization_attempts + 1,
       max_optimization_attempts);
-    mppi_controller_.resetControlSequence(measured_speed);
+    mppi_controller_.resetControlSequenceForRetry(
+      measured_speed, entry_avoidance_state);
   }
   const std::size_t mppi_command_index =
     mppi_controller_.config().shift_control_sequence &&
@@ -2752,7 +2754,8 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
   }
 
   if(!optimal_sequence_collision_free){
-    mppi_controller_.resetControlSequence(measured_speed);
+    mppi_controller_.resetControlSequenceForRetry(
+      measured_speed, entry_avoidance_state);
     RCLCPP_WARN_THROTTLE(
       this->get_logger().get_child(name_), *clock_, 2000,
       "MPPI trigger: state=PATH_BLOCKED_REPLANNING, action=route_replan, reason=optimal_sequence_collision, controller=%s, route_version=%zu, goal_seq=%zu, source=%s, attempts=%zu",

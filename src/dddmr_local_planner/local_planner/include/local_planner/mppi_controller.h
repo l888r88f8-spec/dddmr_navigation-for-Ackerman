@@ -58,6 +58,13 @@ enum class MppiBypassSide : int
 
 const char * toString(MppiBypassSide side);
 
+struct MppiAvoidanceState
+{
+  MppiBypassSide side = MppiBypassSide::Neutral;
+  std::size_t side_infeasible_cycles = 0;
+  std::size_t structured_phase_step = 0;
+};
+
 struct MppiCandidateScore
 {
   bool valid = false;
@@ -118,7 +125,11 @@ public:
 
   MppiControl debugNoiseAt(std::size_t sample_index, std::size_t step_index) const;
   const std::vector<MppiControl> & controlSequence() const;
+  MppiAvoidanceState avoidanceState() const;
   void resetControlSequence(const MppiControl & command);
+  void resetControlSequenceForRetry(
+    const MppiControl & command,
+    const MppiAvoidanceState & avoidance_state);
   void setDebugNoiseForTest(const std::vector<std::vector<MppiControl>> & noise);
 
   MppiResult optimize(const MppiControl & measured_speed, const ScoreFunction & score_function);

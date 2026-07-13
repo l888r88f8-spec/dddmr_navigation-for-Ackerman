@@ -97,6 +97,14 @@ const std::vector<MppiControl> & MppiController::controlSequence() const
   return control_sequence_;
 }
 
+MppiAvoidanceState MppiController::avoidanceState() const
+{
+  return MppiAvoidanceState{
+    latched_bypass_side_,
+    latched_side_infeasible_cycles_,
+    structured_phase_step_};
+}
+
 void MppiController::resetControlSequence(const MppiControl & command)
 {
   control_sequence_.assign(config_.time_steps, command);
@@ -104,6 +112,34 @@ void MppiController::resetControlSequence(const MppiControl & command)
   latched_bypass_side_ = MppiBypassSide::Neutral;
   latched_side_infeasible_cycles_ = 0;
   structured_phase_step_ = 0;
+}
+
+void MppiController::resetControlSequenceForRetry(
+  const MppiControl & command,
+  const MppiAvoidanceState & avoidance_state)
+{
+  control_sequence_.assign(config_.time_steps, command);
+  control_history_.fill(command);
+
+  if(avoidance_state.side != MppiBypassSide::Left &&
+    avoidance_state.side != MppiBypassSide::Right)
+  {
+    latched_bypass_side_ = MppiBypassSide::Neutral;
+    latched_side_infeasible_cycles_ = 0;
+    structured_phase_step_ = 0;
+    return;
+  }
+
+  latched_bypass_side_ = avoidance_state.side;
+  latched_side_infeasible_cycles_ = std::min(
+    avoidance_state.side_infeasible_cycles,
+    kSideSwitchConfirmCycles);
+  const std::size_t first_control_step =
+    config_.shift_control_sequence && config_.time_steps > 1 ? 1u : 0u;
+  const std::size_t controlled_steps = config_.time_steps - first_control_step;
+  structured_phase_step_ = std::min(
+    avoidance_state.structured_phase_step,
+    controlled_steps);
 }
 
 void MppiController::setDebugNoiseForTest(const std::vector<std::vector<MppiControl>> & noise)
