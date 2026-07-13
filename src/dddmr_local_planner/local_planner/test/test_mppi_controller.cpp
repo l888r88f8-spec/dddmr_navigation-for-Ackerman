@@ -13,6 +13,7 @@ using local_planner::MppiConfig;
 using local_planner::MppiControl;
 using local_planner::MppiController;
 using local_planner::mppiSequenceRespectsSpeedCap;
+using local_planner::toString;
 
 namespace
 {
@@ -173,6 +174,89 @@ void expectLatchedStructuredSCurveCompletes(
 }
 
 }  // namespace
+
+TEST(MppiControllerTest, BypassSideDiagnosticStringsAreStable)
+{
+  EXPECT_STREQ(toString(MppiBypassSide::Left), "left");
+  EXPECT_STREQ(toString(MppiBypassSide::Right), "right");
+  EXPECT_STREQ(toString(MppiBypassSide::Neutral), "neutral");
+}
+
+TEST(MppiControllerTest, ReportsAlignedBestSampleAndCollisionFreePhysicalSideCounts)
+{
+  auto config = makeBypassLatchConfig();
+  config.batch_size = 4;
+  config.time_steps = 1;
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.2, 0.0});
+  controller.setDebugNoiseForTest({
+    {MppiControl{0.0, -0.4}},
+    {MppiControl{0.0, 0.2}},
+    {MppiControl{0.0, 0.3}},
+    {MppiControl{0.0, 0.0}}});
+
+  const auto result = controller.optimizeBatch(
+    MppiControl{0.2, 0.0},
+    [](const std::vector<MppiCandidate> &) {
+      return std::vector<MppiCandidateScore>{
+        {true, 0.5, MppiBypassSide::Left, true},
+        {true, 1.0, MppiBypassSide::Left, false},
+        {true, 2.0, MppiBypassSide::Right, true},
+        {true, 3.0, MppiBypassSide::Neutral, true}};
+    },
+    []() {return true;});
+
+  ASSERT_TRUE(result.has_valid_control);
+  EXPECT_EQ(result.selected_bypass_side, MppiBypassSide::Left);
+  EXPECT_EQ(result.best_sample_side, MppiBypassSide::Left);
+  EXPECT_EQ(result.best_sample_index, 0u);
+  EXPECT_DOUBLE_EQ(result.best_critic_cost, 0.5);
+  EXPECT_DOUBLE_EQ(result.best_control_energy, 0.0);
+  EXPECT_EQ(result.feasible_left_candidates, 1u);
+  EXPECT_EQ(result.feasible_right_candidates, 1u);
+  EXPECT_EQ(result.feasible_neutral_candidates, 1u);
+  ASSERT_EQ(result.best_sample_sequence.size(), 1u);
+  EXPECT_LT(result.best_sample_sequence.front().wz, 0.0);
+}
+
+TEST(MppiControllerTest, FinalIterationReplacesEarlierSideDiagnostics)
+{
+  auto config = makeBypassLatchConfig();
+  config.batch_size = 3;
+  config.time_steps = 1;
+  config.iteration_count = 2;
+  MppiController controller(config);
+  controller.setDebugNoiseForTest({
+    {MppiControl{0.0, 0.1}},
+    {MppiControl{0.0, -0.2}},
+    {MppiControl{0.0, 0.3}}});
+  std::size_t score_calls = 0;
+
+  const auto result = controller.optimizeBatch(
+    MppiControl{0.2, 0.0},
+    [&](const std::vector<MppiCandidate> &) {
+      if(score_calls++ == 0){
+        return std::vector<MppiCandidateScore>{
+          {true, 0.1, MppiBypassSide::Left, true},
+          {true, 0.2, MppiBypassSide::Left, true},
+          {true, 0.3, MppiBypassSide::Neutral, false}};
+      }
+      return std::vector<MppiCandidateScore>{
+        {true, 2.0, MppiBypassSide::Left, false},
+        {true, 0.4, MppiBypassSide::Right, true},
+        {true, 1.0, MppiBypassSide::Neutral, true}};
+    },
+    []() {return false;});
+
+  ASSERT_TRUE(result.has_valid_control);
+  EXPECT_EQ(score_calls, 2u);
+  EXPECT_EQ(result.best_sample_side, MppiBypassSide::Right);
+  EXPECT_EQ(result.best_sample_index, 1u);
+  EXPECT_DOUBLE_EQ(result.best_critic_cost, 0.4);
+  EXPECT_EQ(result.feasible_left_candidates, 0u);
+  EXPECT_EQ(result.feasible_right_candidates, 1u);
+  EXPECT_EQ(result.feasible_neutral_candidates, 1u);
+}
 
 TEST(MppiControllerTest, SeededGaussianNoiseIsRepeatable)
 {
@@ -643,10 +727,14 @@ TEST(MppiControllerTest, InactiveTransitionRebuildsMirroredCandidatesBeforeAggre
       if(scored_batches.size() == 1){
         std::fill(
           scores.begin(), scores.end(),
-          MppiCandidateScore{true, 0.0, MppiBypassSide::Neutral, true});
+          MppiCandidateScore{true, 0.0, MppiBypassSide::Left, true});
       }
       else{
-        scores[1] = MppiCandidateScore{true, 0.0, MppiBypassSide::Neutral, true};
+        scores[1] = MppiCandidateScore{
+          true,
+          scored_batches.size() == 2 ? 2.0 : 1.0,
+          MppiBypassSide::Neutral,
+          true};
       }
       return scores;
     },
@@ -661,6 +749,12 @@ TEST(MppiControllerTest, InactiveTransitionRebuildsMirroredCandidatesBeforeAggre
   EXPECT_EQ(result.selected_bypass_side, MppiBypassSide::Neutral);
   EXPECT_EQ(result.structured_phase_step, 0u);
   EXPECT_EQ(result.structured_candidates, config.structured_candidate_count);
+  EXPECT_EQ(result.best_sample_side, MppiBypassSide::Neutral);
+  EXPECT_EQ(result.best_sample_index, 1u);
+  EXPECT_DOUBLE_EQ(result.best_critic_cost, 1.0);
+  EXPECT_EQ(result.feasible_left_candidates, 0u);
+  EXPECT_EQ(result.feasible_right_candidates, 0u);
+  EXPECT_EQ(result.feasible_neutral_candidates, 1u);
   EXPECT_GT(
     scored_batches[0][0].controls.front().wz *
     scored_batches[0][1].controls.front().wz,

@@ -7,6 +7,19 @@
 namespace local_planner
 {
 
+const char * toString(const MppiBypassSide side)
+{
+  switch(side){
+    case MppiBypassSide::Left:
+      return "left";
+    case MppiBypassSide::Right:
+      return "right";
+    case MppiBypassSide::Neutral:
+      return "neutral";
+  }
+  return "neutral";
+}
+
 bool mppiSequenceRespectsSpeedCap(
   const std::vector<MppiControl> & controls,
   const double measured_vx,
@@ -176,6 +189,10 @@ MppiResult MppiController::optimizeBatch(
     result.best_sample_sequence.clear();
     result.best_critic_cost = std::numeric_limits<double>::infinity();
     result.best_control_energy = 0.0;
+    result.best_sample_side = MppiBypassSide::Neutral;
+    result.feasible_left_candidates = 0;
+    result.feasible_right_candidates = 0;
+    result.feasible_neutral_candidates = 0;
 
     std::vector<SampledSequence> sampled_sequences;
     std::vector<MppiCandidate> candidates;
@@ -236,8 +253,23 @@ MppiResult MppiController::optimizeBatch(
         result.best_cost = total_cost;
         result.best_critic_cost = score.cost;
         result.best_control_energy = control_energy;
+        result.best_sample_side = score.bypass_side;
         result.best_sample_index = sample;
         result.best_sample_sequence = sequence;
+      }
+
+      if(score.collision_free){
+        switch(score.bypass_side){
+          case MppiBypassSide::Left:
+            ++result.feasible_left_candidates;
+            break;
+          case MppiBypassSide::Right:
+            ++result.feasible_right_candidates;
+            break;
+          case MppiBypassSide::Neutral:
+            ++result.feasible_neutral_candidates;
+            break;
+        }
       }
 
       valid_sequences.push_back(sequence);

@@ -55,6 +55,8 @@ enum class MppiBypassSide : int
   Left = 1
 };
 
+const char * toString(MppiBypassSide side);
+
 struct MppiCandidateScore
 {
   bool valid = false;
@@ -92,6 +94,10 @@ struct MppiResult
   std::size_t structured_phase_step = 0;
   double best_critic_cost = std::numeric_limits<double>::infinity();
   double best_control_energy = 0.0;
+  MppiBypassSide best_sample_side = MppiBypassSide::Neutral;
+  std::size_t feasible_left_candidates = 0;
+  std::size_t feasible_right_candidates = 0;
+  std::size_t feasible_neutral_candidates = 0;
 };
 
 class MppiController

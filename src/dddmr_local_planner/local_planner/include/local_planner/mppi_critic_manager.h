@@ -172,6 +172,10 @@ struct MppiCriticResult
   std::vector<MppiCandidateScore> scores;
 };
 
+bool annotateMppiCandidateMetadata(
+  const MppiCriticData & data,
+  MppiCriticResult * result);
+
 class MppiCriticManager
 {
 public:

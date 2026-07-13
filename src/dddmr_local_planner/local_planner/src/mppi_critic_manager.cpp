@@ -122,6 +122,29 @@ MppiBypassSide classifyMppiBypassSide(
   return MppiBypassSideClassifier(path).classify(trajectory);
 }
 
+bool annotateMppiCandidateMetadata(
+  const MppiCriticData & data,
+  MppiCriticResult * const result)
+{
+  if(result == nullptr){
+    return false;
+  }
+  if(result->scores.size() != data.trajectories.size()){
+    for(auto & score : result->scores){
+      score.valid = false;
+    }
+    return false;
+  }
+
+  const MppiBypassSideClassifier classifier(data.path);
+  for(std::size_t i = 0; i < data.trajectories.size(); ++i){
+    result->scores[i].bypass_side = classifier.classify(data.trajectories[i]);
+    result->scores[i].collision_free =
+      isMppiTrajectoryCollisionFree(data.trajectories[i]);
+  }
+  return true;
+}
+
 MppiConstraintCriticConfig::MppiConstraintCriticConfig()
 {
   cost_weight = 4.0;

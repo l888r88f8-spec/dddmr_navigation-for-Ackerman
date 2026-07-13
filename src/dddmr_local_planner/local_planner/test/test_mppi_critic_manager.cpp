@@ -8,6 +8,7 @@
 #include "local_planner/mppi_obstacle_geometry.h"
 
 using local_planner::computeObstacleClearanceForCuboid;
+using local_planner::annotateMppiCandidateMetadata;
 using local_planner::classifyMppiBypassSide;
 using local_planner::isMppiTrajectoryCollisionFree;
 using local_planner::makeMppiObstacleSnapshot;
@@ -17,6 +18,7 @@ using local_planner::MppiCandidateScore;
 using local_planner::MppiCriticConfig;
 using local_planner::MppiCriticData;
 using local_planner::MppiCriticManager;
+using local_planner::MppiCriticResult;
 using local_planner::MppiPathPoint;
 using local_planner::MppiScoredTrajectory;
 using local_planner::MppiTrajectoryPoint;
@@ -55,6 +57,52 @@ MppiCriticData makeData(const std::vector<MppiScoredTrajectory> & trajectories)
   return data;
 }
 }  // namespace
+
+TEST(MppiCriticManagerTest, AnnotatesAlignedScoresWithPhysicalSideAndCollisionMetadata)
+{
+  MppiCriticData data;
+  data.path = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{2.0, 0.0, 0.0}};
+  data.trajectories = {
+    makeTrajectory(0.2, {
+      MppiTrajectoryPoint{0.5, 0.3, 0.0},
+      MppiTrajectoryPoint{1.5, 0.4, 0.0}}),
+    makeTrajectory(0.2, {
+      MppiTrajectoryPoint{0.5, -0.3, 0.0, true},
+      MppiTrajectoryPoint{1.5, -0.4, 0.0}}),
+    makeTrajectory(0.2, {
+      MppiTrajectoryPoint{0.5, 0.02, 0.0},
+      MppiTrajectoryPoint{1.5, 0.03, 0.0}})};
+  MppiCriticResult result;
+  result.scores = {
+    MppiCandidateScore{true, 1.0},
+    MppiCandidateScore{true, 2.0},
+    MppiCandidateScore{false, -1.0}};
+
+  ASSERT_TRUE(annotateMppiCandidateMetadata(data, &result));
+  EXPECT_EQ(result.scores[0].bypass_side, MppiBypassSide::Left);
+  EXPECT_TRUE(result.scores[0].collision_free);
+  EXPECT_EQ(result.scores[1].bypass_side, MppiBypassSide::Right);
+  EXPECT_FALSE(result.scores[1].collision_free);
+  EXPECT_EQ(result.scores[2].bypass_side, MppiBypassSide::Neutral);
+  EXPECT_TRUE(result.scores[2].collision_free);
+  EXPECT_FALSE(result.scores[2].valid);
+  EXPECT_DOUBLE_EQ(result.scores[2].cost, -1.0);
+}
+
+TEST(MppiCriticManagerTest, MetadataAnnotationRejectsMismatchedResultWithoutOutOfBoundsAccess)
+{
+  const auto data = makeData({
+    makeTrajectory(0.2, {MppiTrajectoryPoint{0.5, 0.3, 0.0}}),
+    makeTrajectory(0.2, {MppiTrajectoryPoint{0.5, -0.3, 0.0}})});
+  MppiCriticResult result;
+  result.scores = {MppiCandidateScore{true, 1.0}};
+
+  EXPECT_FALSE(annotateMppiCandidateMetadata(data, &result));
+  ASSERT_EQ(result.scores.size(), 1u);
+  EXPECT_FALSE(result.scores.front().valid);
+}
 
 TEST(MppiCriticManagerTest, CandidateScoreDefaultsToNeutralCollisionFreeMetadata)
 {
