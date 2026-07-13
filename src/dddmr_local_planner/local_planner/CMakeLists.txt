@@ -76,6 +76,11 @@ target_include_directories(local_planner_mppi_controller PUBLIC
 target_link_libraries(local_planner_mppi_controller
   ${PCL_LIBRARIES}
 )
+if(NOT CMAKE_BUILD_TYPE)
+  # The controller runs at 15 Hz; avoid an accidentally unoptimized deployment when
+  # colcon is invoked without an explicit CMake build type.
+  target_compile_options(local_planner_mppi_controller PRIVATE -O2)
+endif()
 
 # local_planner
 add_library(local_planner SHARED

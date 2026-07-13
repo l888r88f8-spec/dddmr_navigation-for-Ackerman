@@ -746,7 +746,7 @@ TEST(MppiObstacleGeometryTest, RepresentativeScoringGeometryFitsFifteenHertzBudg
   constexpr std::size_t batch_size = 96;
   constexpr std::size_t trajectory_point_count = 75;
   constexpr std::size_t trajectory_point_step = 4;
-  constexpr std::size_t obstacle_count = 64;
+  constexpr std::size_t obstacle_count = 128;
 
   pcl::PointCloud<pcl::PointXYZ> cuboid;
   cuboid.push_back(pcl::PointXYZ{-0.5F, -0.3F, -0.2F});
@@ -789,12 +789,75 @@ TEST(MppiObstacleGeometryTest, RepresentativeScoringGeometryFitsFifteenHertzBudg
       ++evaluated_poses;
     }
   }
+  for(std::size_t point = 0; point < trajectory_point_count; ++point){
+    ids.clear();
+    squared_distances.clear();
+    snapshot.kdtree->radiusSearch(query, 3.0, ids, squared_distances);
+    (void)computeObstacleClearanceForCuboid(cuboid, *snapshot.cloud, ids);
+    ++evaluated_poses;
+  }
   const auto elapsed = std::chrono::duration<double, std::milli>(
     std::chrono::steady_clock::now() - start);
 
-  EXPECT_EQ(evaluated_poses, 7200u);
+  EXPECT_EQ(evaluated_poses, 7275u);
   EXPECT_LT(elapsed.count(), 66.7)
     << "Representative MPPI collision/clearance inner loop exceeded one 15 Hz period";
+}
+
+TEST(MppiObstacleGeometryTest, SnapshotFiltersNonFinitePointsBeforeBuildingKdTree)
+{
+  auto source = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+  pcl::PointXYZI valid;
+  valid.x = 1.0F;
+  valid.y = 0.0F;
+  valid.z = 0.0F;
+  source->push_back(valid);
+  pcl::PointXYZI nan_point;
+  nan_point.x = std::numeric_limits<float>::quiet_NaN();
+  nan_point.y = 0.0F;
+  nan_point.z = 0.0F;
+  source->push_back(nan_point);
+  pcl::PointXYZI infinite_point;
+  infinite_point.x = 0.0F;
+  infinite_point.y = std::numeric_limits<float>::infinity();
+  infinite_point.z = 0.0F;
+  source->push_back(infinite_point);
+
+  const auto snapshot = makeMppiObstacleSnapshot(source);
+
+  ASSERT_TRUE(snapshot.cloud);
+  ASSERT_TRUE(snapshot.kdtree);
+  ASSERT_EQ(snapshot.cloud->points.size(), 1u);
+  pcl::PointXYZI query;
+  query.x = 1.0F;
+  query.y = 0.0F;
+  query.z = 0.0F;
+  std::vector<int> ids;
+  std::vector<float> distances;
+  EXPECT_EQ(snapshot.kdtree->radiusSearch(query, 0.1, ids, distances), 1);
+}
+
+TEST(MppiObstacleGeometryTest, SnapshotTurnsAllNonFiniteInputIntoEmptyFastPath)
+{
+  auto source = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+  pcl::PointXYZI nan_point;
+  nan_point.x = std::numeric_limits<float>::quiet_NaN();
+  nan_point.y = 0.0F;
+  nan_point.z = 0.0F;
+  source->push_back(nan_point);
+  pcl::PointXYZI infinite_point;
+  infinite_point.x = 0.0F;
+  infinite_point.y = 0.0F;
+  infinite_point.z = -std::numeric_limits<float>::infinity();
+  source->push_back(infinite_point);
+
+  const auto snapshot = makeMppiObstacleSnapshot(source);
+
+  ASSERT_TRUE(snapshot.cloud);
+  ASSERT_TRUE(snapshot.kdtree);
+  EXPECT_TRUE(snapshot.cloud->points.empty());
+  const auto work = estimateMppiObstacleScoringWork(96, 75, 4, snapshot.cloud->points.size());
+  EXPECT_EQ(work.totalKdTreeQueries(), 0u);
 }
 
 TEST(MppiObstacleGeometryTest, SnapshotOwnsCloudUsedByKdTree)

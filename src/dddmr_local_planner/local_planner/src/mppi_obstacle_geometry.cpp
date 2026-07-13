@@ -14,7 +14,15 @@ MppiObstacleSnapshot makeMppiObstacleSnapshot(
   snapshot.kdtree = std::make_shared<pcl::KdTreeFLANN<pcl::PointXYZI>>();
 
   if(obstacles){
-    *snapshot.cloud = *obstacles;
+    snapshot.cloud->reserve(obstacles->points.size());
+    for(const auto & obstacle : obstacles->points){
+      if(std::isfinite(obstacle.x) && std::isfinite(obstacle.y) &&
+         std::isfinite(obstacle.z))
+      {
+        snapshot.cloud->push_back(obstacle);
+      }
+    }
+    snapshot.cloud->is_dense = true;
   }
   if(!snapshot.cloud->points.empty()){
     snapshot.kdtree->setInputCloud(snapshot.cloud);
