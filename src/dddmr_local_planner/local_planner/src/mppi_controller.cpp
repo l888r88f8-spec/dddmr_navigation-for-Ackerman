@@ -129,8 +129,6 @@ MppiResult MppiController::optimizeBatch(
   const ModeSelectionFunction & mode_selection_function)
 {
   MppiResult result;
-  result.structured_candidates = use_debug_noise_for_test_ ? 0 :
-    config_.structured_candidate_count;
   result.structured_phase_step = structured_phase_step_;
   if(!score_function){
     result.rejected_samples = config_.batch_size;
@@ -139,6 +137,7 @@ MppiResult MppiController::optimizeBatch(
   }
 
   const auto entry_control_sequence = control_sequence_;
+  const MppiBypassSide entry_bypass_side = latched_bypass_side_;
   MppiBypassSide provisional_bypass_side = latched_bypass_side_;
   std::size_t provisional_infeasible_cycles = latched_side_infeasible_cycles_;
   MppiBypassSide settled_bypass_side = provisional_bypass_side;
@@ -146,6 +145,10 @@ MppiResult MppiController::optimizeBatch(
   bool side_state_settled = false;
   bool directional_mode_selected = false;
   bool select_directional_mode = false;
+  MppiBypassSide generation_bypass_side = entry_bypass_side;
+  std::size_t generation_structured_phase_step = structured_phase_step_;
+  result.structured_candidates = use_debug_noise_for_test_ ? 0 :
+    activeStructuredCandidateCount(generation_bypass_side);
 
   for(std::size_t iteration = 0; iteration < config_.iteration_count; ++iteration){
     if(config_.shift_control_sequence && !control_sequence_.empty()){
@@ -165,14 +168,41 @@ MppiResult MppiController::optimizeBatch(
 
     std::vector<std::vector<MppiControl>> sampled_sequences;
     std::vector<MppiCandidate> candidates;
-    sampled_sequences.reserve(config_.batch_size);
-    candidates.reserve(config_.batch_size);
-    for(std::size_t sample = 0; sample < config_.batch_size; ++sample){
-      sampled_sequences.push_back(buildNoisedSequence(measured_speed, sample));
-      candidates.push_back(MppiCandidate{sampled_sequences.back()});
+    const auto generate_candidates = [&]() {
+        sampled_sequences.clear();
+        candidates.clear();
+        sampled_sequences.reserve(config_.batch_size);
+        candidates.reserve(config_.batch_size);
+        for(std::size_t sample = 0; sample < config_.batch_size; ++sample){
+          sampled_sequences.push_back(buildNoisedSequence(
+              measured_speed,
+              sample,
+              generation_bypass_side,
+              generation_structured_phase_step));
+          candidates.push_back(MppiCandidate{sampled_sequences.back()});
+        }
+      };
+    generate_candidates();
+    auto scores = score_function(candidates);
+
+    if(!directional_mode_selected){
+      select_directional_mode =
+        mode_selection_function && mode_selection_function();
+      directional_mode_selected = true;
+      if(!select_directional_mode){
+        structured_phase_step_ = 0;
+        result.structured_phase_step = 0;
+        if(generation_bypass_side != MppiBypassSide::Neutral){
+          generation_bypass_side = MppiBypassSide::Neutral;
+          generation_structured_phase_step = 0;
+          result.structured_candidates = use_debug_noise_for_test_ ? 0 :
+            activeStructuredCandidateCount(generation_bypass_side);
+          generate_candidates();
+          scores = score_function(candidates);
+        }
+      }
     }
 
-    const auto scores = score_function(candidates);
     for(std::size_t sample = 0; sample < config_.batch_size; ++sample){
       const auto & sequence = sampled_sequences[sample];
       const auto score =
@@ -211,15 +241,6 @@ MppiResult MppiController::optimizeBatch(
       collision_free.push_back(score.collision_free);
     }
 
-    if(!directional_mode_selected){
-      select_directional_mode =
-        mode_selection_function && mode_selection_function();
-      directional_mode_selected = true;
-      if(!select_directional_mode){
-        structured_phase_step_ = 0;
-        result.structured_phase_step = 0;
-      }
-    }
     const MppiBypassSide side_before_update = provisional_bypass_side;
     const std::size_t infeasible_cycles_before_update = provisional_infeasible_cycles;
     const bool side_state_was_settled = side_state_settled;
@@ -270,6 +291,11 @@ MppiResult MppiController::optimizeBatch(
   updateControlHistory(result.command);
   shiftControlSequence();
   if(select_directional_mode && latched_bypass_side_ != MppiBypassSide::Neutral){
+    if(entry_bypass_side != MppiBypassSide::Neutral &&
+      entry_bypass_side != latched_bypass_side_)
+    {
+      structured_phase_step_ = 0;
+    }
     const std::size_t first_control_step = config_.shift_control_sequence ? 1u : 0u;
     const std::size_t controlled_steps = config_.time_steps - first_control_step;
     if(structured_phase_step_ < controlled_steps){
@@ -328,6 +354,14 @@ double MppiController::ackermannWzLimit(const double vx) const
   return std::min(config_.wz_max, steering_limit);
 }
 
+std::size_t MppiController::activeStructuredCandidateCount(
+  const MppiBypassSide bypass_side) const
+{
+  return bypass_side == MppiBypassSide::Neutral ?
+    config_.structured_candidate_count :
+    std::min<std::size_t>(2, config_.structured_candidate_count);
+}
+
 MppiControl MppiController::constrainControl(
   const MppiControl & previous,
   const MppiControl & requested,
@@ -351,10 +385,15 @@ MppiControl MppiController::constrainControl(
 
 std::vector<MppiControl> MppiController::buildNoisedSequence(
   const MppiControl & measured_speed,
-  const std::size_t sample_index) const
+  const std::size_t sample_index,
+  const MppiBypassSide bypass_side,
+  const std::size_t structured_phase_step) const
 {
-  if(!use_debug_noise_for_test_ && sample_index < config_.structured_candidate_count){
-    return buildStructuredSequence(measured_speed, sample_index);
+  if(!use_debug_noise_for_test_ &&
+    sample_index < activeStructuredCandidateCount(bypass_side))
+  {
+    return buildStructuredSequence(
+      measured_speed, sample_index, bypass_side, structured_phase_step);
   }
 
   std::vector<MppiControl> sequence(config_.time_steps);
@@ -386,7 +425,9 @@ std::vector<MppiControl> MppiController::buildNoisedSequence(
 
 std::vector<MppiControl> MppiController::buildStructuredSequence(
   const MppiControl & measured_speed,
-  const std::size_t sample_index) const
+  const std::size_t sample_index,
+  const MppiBypassSide bypass_side,
+  const std::size_t structured_phase_step) const
 {
   std::vector<MppiControl> sequence(config_.time_steps);
   MppiControl previous = measured_speed;
@@ -396,10 +437,10 @@ std::vector<MppiControl> MppiController::buildStructuredSequence(
     first_control_step = 1;
   }
 
-  const bool has_latched_side = latched_bypass_side_ != MppiBypassSide::Neutral;
+  const bool has_latched_side = bypass_side != MppiBypassSide::Neutral;
   const std::size_t template_index = sample_index / 2;
   const double direction = has_latched_side ?
-    static_cast<double>(latched_bypass_side_) :
+    static_cast<double>(bypass_side) :
     (sample_index % 2 == 0 ? 1.0 : -1.0);
   const double intensity = has_latched_side ?
     (sample_index % 2 == 0 ? 0.55 : 0.90) :
@@ -416,9 +457,9 @@ std::vector<MppiControl> MppiController::buildStructuredSequence(
     const std::size_t phase_step = step - first_control_step;
     std::size_t absolute_phase = phase_step;
     if(has_latched_side){
-      absolute_phase = structured_phase_step_ >= controlled_steps ||
-        phase_step >= controlled_steps - structured_phase_step_ ?
-        controlled_steps : structured_phase_step_ + phase_step;
+      absolute_phase = structured_phase_step >= controlled_steps ||
+        phase_step >= controlled_steps - structured_phase_step ?
+        controlled_steps : structured_phase_step + phase_step;
     }
     double phase_direction = direction;
     if(s_curve && absolute_phase >= controlled_steps / 2){

@@ -143,16 +143,21 @@ private:
   void regenerateNoise();
   double clamp(double value, double low, double high) const;
   double ackermannWzLimit(double vx) const;
+  std::size_t activeStructuredCandidateCount(MppiBypassSide bypass_side) const;
   MppiControl constrainControl(
     const MppiControl & previous,
     const MppiControl & requested,
     double dt) const;
   std::vector<MppiControl> buildNoisedSequence(
     const MppiControl & measured_speed,
-    std::size_t sample_index) const;
+    std::size_t sample_index,
+    MppiBypassSide bypass_side,
+    std::size_t structured_phase_step) const;
   std::vector<MppiControl> buildStructuredSequence(
     const MppiControl & measured_speed,
-    std::size_t sample_index) const;
+    std::size_t sample_index,
+    MppiBypassSide bypass_side,
+    std::size_t structured_phase_step) const;
   UpdateStatistics applySoftmaxUpdate(
     const std::vector<std::vector<MppiControl>> & valid_sequences,
     const std::vector<double> & valid_costs,
