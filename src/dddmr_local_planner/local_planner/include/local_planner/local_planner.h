@@ -277,13 +277,11 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
         const std::vector<local_planner::MppiControl> & controls) const;
       local_planner::MppiScoredTrajectory buildMppiScoredTrajectory(
         const std::vector<local_planner::MppiControl> & controls,
-        const pcl::PointCloud<pcl::PointXYZI>::Ptr & aggregate_observation,
-        const pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr & aggregate_observation_kdtree,
+        const local_planner::MppiObstacleSnapshot & obstacle_snapshot,
         bool check_every_obstacle_point = false) const;
       local_planner::MppiCriticData buildMppiCriticData(
         const std::vector<local_planner::MppiCandidate> & candidates,
-        const pcl::PointCloud<pcl::PointXYZI>::Ptr & aggregate_observation,
-        const pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr & aggregate_observation_kdtree) const;
+        const local_planner::MppiObstacleSnapshot & obstacle_snapshot) const;
       dddmr_sys_core::PlannerState computeRppControlCommand(
         const std::string & controller_name,
         geometry_msgs::msg::Twist * cmd_vel);

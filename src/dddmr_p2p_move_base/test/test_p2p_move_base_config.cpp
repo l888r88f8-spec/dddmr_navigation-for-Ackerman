@@ -176,11 +176,14 @@ TEST(P2PMoveBaseConfigTest, MppiObstacleScoringStaysWithinRuntimeBudget)
   const double model_dt = extractDouble(mppi, "model_dt");
   const double batch_size = extractDouble(mppi, "batch_size");
   const double trajectory_point_step = extractDouble(obstacles, "trajectory_point_step");
+  const double inflation_radius = extractDouble(obstacles, "inflation_radius");
   ASSERT_GT(model_dt, 1e-6);
   ASSERT_GE(trajectory_point_step, 1.0);
+  EXPECT_DOUBLE_EQ(inflation_radius, 2.2)
+    << "The representative MPPI latency contract assumes the deployed inflation radius";
 
   const double time_steps = std::ceil(horizon / model_dt);
-  constexpr std::size_t representative_obstacle_points = 64;
+  constexpr std::size_t representative_obstacle_points = 30000;
   const auto work = local_planner::estimateMppiObstacleScoringWork(
     static_cast<std::size_t>(batch_size),
     static_cast<std::size_t>(time_steps),
@@ -197,10 +200,10 @@ TEST(P2PMoveBaseConfigTest, MppiObstacleScoringStaysWithinRuntimeBudget)
 
   EXPECT_EQ(work.collision_pose_checks, 7200u)
     << "Every predicted pose must retain an exact collision check";
-  EXPECT_EQ(nominal_cycle_kdtree_queries, 1995u);
-  EXPECT_LE(nominal_cycle_kdtree_queries, 2000u)
-    << "Nominal MPPI obstacle KDTree queries exceed the local runtime budget";
-  EXPECT_EQ(retry_cycle_kdtree_queries, 3990u)
+  EXPECT_EQ(work.collision_hash_queries, 7200u)
+    << "Every predicted pose must use the exact spatial-hash collision path";
+  EXPECT_EQ(nominal_cycle_kdtree_queries, 3990u);
+  EXPECT_EQ(retry_cycle_kdtree_queries, 7980u)
     << "A validator retry intentionally performs a second complete scoring pass";
 }
 

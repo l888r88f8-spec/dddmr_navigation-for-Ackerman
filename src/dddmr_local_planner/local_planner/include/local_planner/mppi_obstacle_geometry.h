@@ -13,6 +13,8 @@
 namespace local_planner
 {
 
+class MppiObstacleSpatialHash;
+
 struct MppiObstacleClearanceResult
 {
   bool in_collision = false;
@@ -20,28 +22,35 @@ struct MppiObstacleClearanceResult
   std::size_t ignored_indices = 0;
 };
 
+struct MppiObstacleCollisionResult
+{
+  bool in_collision = false;
+  bool evaluated = false;
+};
+
 struct MppiObstacleSnapshot
 {
   pcl::PointCloud<pcl::PointXYZI>::Ptr cloud;
   pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr kdtree;
+  std::shared_ptr<const MppiObstacleSpatialHash> collision_hash;
 };
 
 struct MppiObstacleScoringWork
 {
-  std::size_t clearance_kdtree_queries = 0;
-  std::size_t collision_kdtree_queries = 0;
-  std::size_t direct_collision_point_checks = 0;
+  std::size_t clearance_nearest_kdtree_queries = 0;
+  std::size_t clearance_radius_kdtree_queries = 0;
+  std::size_t collision_hash_queries = 0;
   std::size_t collision_pose_checks = 0;
   bool overflowed = false;
 
   std::size_t totalKdTreeQueries() const
   {
-    if(clearance_kdtree_queries >
-       std::numeric_limits<std::size_t>::max() - collision_kdtree_queries)
+    if(clearance_nearest_kdtree_queries >
+       std::numeric_limits<std::size_t>::max() - clearance_radius_kdtree_queries)
     {
       return std::numeric_limits<std::size_t>::max();
     }
-    return clearance_kdtree_queries + collision_kdtree_queries;
+    return clearance_nearest_kdtree_queries + clearance_radius_kdtree_queries;
   }
 };
 
@@ -62,7 +71,28 @@ bool hasObstacleCollisionForCuboid(
   const pcl::PointCloud<pcl::PointXYZ> & cuboid,
   const pcl::PointCloud<pcl::PointXYZI> & obstacles);
 
-bool shouldDirectlyScanMppiObstacles(std::size_t obstacle_count);
+bool collectMppiObstacleCollisionCandidates(
+  const pcl::PointCloud<pcl::PointXYZ> & cuboid,
+  const MppiObstacleSnapshot & snapshot,
+  std::vector<int> * obstacle_indices);
+
+MppiObstacleCollisionResult evaluateMppiObstacleCollisionForCuboid(
+  const pcl::PointCloud<pcl::PointXYZ> & cuboid,
+  const MppiObstacleSnapshot & snapshot,
+  std::vector<int> * obstacle_indices_scratch);
+
+bool hasObstacleCollisionForCuboid(
+  const pcl::PointCloud<pcl::PointXYZ> & cuboid,
+  const MppiObstacleSnapshot & snapshot,
+  std::vector<int> * obstacle_indices_scratch);
+
+MppiObstacleClearanceResult computeAdaptiveObstacleClearanceForCuboid(
+  const pcl::PointCloud<pcl::PointXYZ> & cuboid,
+  const MppiObstacleSnapshot & snapshot,
+  const pcl::PointXYZ & pose_center,
+  double inflation_radius,
+  std::vector<int> * obstacle_indices_scratch,
+  std::vector<float> * squared_distances_scratch);
 
 MppiObstacleScoringWork estimateMppiObstacleScoringWork(
   std::size_t batch_size,

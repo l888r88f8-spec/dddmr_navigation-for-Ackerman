@@ -31,6 +31,7 @@
 #include <local_planner/local_planner.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -1113,8 +1114,7 @@ base_trajectory::Trajectory Local_Planner::buildPredictedTrajectoryFromMppiContr
 
 MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
   const std::vector<MppiControl> & controls,
-  const pcl::PointCloud<pcl::PointXYZI>::Ptr & aggregate_observation,
-  const pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr & aggregate_observation_kdtree,
+  const MppiObstacleSnapshot & obstacle_snapshot,
   const bool check_every_obstacle_point) const
 {
   MppiScoredTrajectory trajectory;
@@ -1122,9 +1122,6 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
   trajectory.points.reserve(controls.size());
 
   const double time_step = std::max(0.02, mppi_controller_.config().model_dt);
-  const double obstacle_search_radius = std::max(
-    3.0,
-    mppi_critic_manager_.config().obstacles.inflation_radius);
   double x = trans_gbl2b_.transform.translation.x;
   double y = trans_gbl2b_.transform.translation.y;
   double z = trans_gbl2b_.transform.translation.z;
@@ -1134,69 +1131,6 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
   std::size_t point_index = 0;
   std::vector<int> obstacle_ids;
   std::vector<float> squared_distances;
-  const bool directly_scan_collision_only = aggregate_observation &&
-    shouldDirectlyScanMppiObstacles(aggregate_observation->points.size());
-
-  auto query_obstacles =
-    [&](const geometry_msgs::msg::PoseStamped & pose,
-        const pcl::PointCloud<pcl::PointXYZ> & cuboid,
-        const double query_radius,
-        const bool calculate_clearance,
-        bool * collision_evaluated) {
-      if(collision_evaluated != nullptr){
-        *collision_evaluated = false;
-      }
-      MppiObstacleClearanceResult result;
-      if(!aggregate_observation || aggregate_observation->points.empty()){
-        if(collision_evaluated != nullptr){
-          *collision_evaluated = true;
-        }
-        return result;
-      }
-      if(cuboid.points.size() < 4)
-      {
-        return result;
-      }
-      if(!calculate_clearance && directly_scan_collision_only){
-        result.in_collision = hasObstacleCollisionForCuboid(cuboid, *aggregate_observation);
-        if(collision_evaluated != nullptr){
-          *collision_evaluated = true;
-        }
-        return result;
-      }
-      if(!aggregate_observation_kdtree || !std::isfinite(query_radius) || query_radius <= 0.0){
-        return result;
-      }
-
-      pcl::PointXYZI query;
-      query.x = pose.pose.position.x;
-      query.y = pose.pose.position.y;
-      query.z = pose.pose.position.z;
-      query.intensity = 0.0;
-      obstacle_ids.clear();
-      squared_distances.clear();
-      aggregate_observation_kdtree->radiusSearch(
-        query,
-        query_radius,
-        obstacle_ids,
-        squared_distances);
-      if(calculate_clearance){
-        result = computeObstacleClearanceForCuboid(
-          cuboid,
-          *aggregate_observation,
-          obstacle_ids);
-      }
-      else{
-        result.in_collision = hasObstacleCollisionForCuboid(
-          cuboid,
-          *aggregate_observation,
-          obstacle_ids);
-      }
-      if(collision_evaluated != nullptr){
-        *collision_evaluated = true;
-      }
-      return result;
-    };
 
   for(const auto & control : controls){
     x += control.vx * std::cos(yaw + control.wz * time_step * 0.5) * time_step;
@@ -1215,38 +1149,37 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
     pose.pose.orientation = tf2::toMsg(q);
 
     const auto cuboid = transformRobotCuboid(pose);
-    bool in_collision = false;
-    bool collision_evaluated = false;
+    const auto collision = evaluateMppiObstacleCollisionForCuboid(
+      cuboid, obstacle_snapshot, &obstacle_ids);
     double obstacle_clearance = std::numeric_limits<double>::infinity();
     const bool evaluate_clearance =
       point_index % obstacle_point_step == 0 || point_index + 1 == controls.size();
-    double query_radius = obstacle_search_radius;
-    if(!evaluate_clearance && !directly_scan_collision_only){
-      pcl::PointXYZ pose_center;
-      pose_center.x = pose.pose.position.x;
-      pose_center.y = pose.pose.position.y;
-      pose_center.z = pose.pose.position.z;
-      query_radius = computeMppiCuboidCollisionQueryRadius(cuboid, pose_center);
-    }
-    const auto obstacle_result =
-      query_obstacles(
-        pose,
-        cuboid,
-        query_radius,
-        evaluate_clearance,
-        &collision_evaluated);
-    in_collision = obstacle_result.in_collision;
     if(evaluate_clearance){
-      obstacle_clearance = obstacle_result.clearance;
+      if(collision.in_collision){
+        obstacle_clearance = 0.0;
+      }
+      else{
+        pcl::PointXYZ pose_center;
+        pose_center.x = pose.pose.position.x;
+        pose_center.y = pose.pose.position.y;
+        pose_center.z = pose.pose.position.z;
+        obstacle_clearance = computeAdaptiveObstacleClearanceForCuboid(
+          cuboid,
+          obstacle_snapshot,
+          pose_center,
+          mppi_critic_manager_.config().obstacles.inflation_radius,
+          &obstacle_ids,
+          &squared_distances).clearance;
+      }
     }
     trajectory.points.push_back(
       MppiTrajectoryPoint{
         x,
         y,
         yaw,
-        in_collision,
+        collision.in_collision,
         obstacle_clearance,
-        collision_evaluated});
+        collision.evaluated});
     ++point_index;
   }
 
@@ -1255,8 +1188,7 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
 
 MppiCriticData Local_Planner::buildMppiCriticData(
   const std::vector<MppiCandidate> & candidates,
-  const pcl::PointCloud<pcl::PointXYZI>::Ptr & aggregate_observation,
-  const pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr & aggregate_observation_kdtree) const
+  const MppiObstacleSnapshot & obstacle_snapshot) const
 {
   MppiCriticData data;
   data.trajectories.reserve(candidates.size());
@@ -1264,8 +1196,7 @@ MppiCriticData Local_Planner::buildMppiCriticData(
     data.trajectories.push_back(
       buildMppiScoredTrajectory(
         candidate.controls,
-        aggregate_observation,
-        aggregate_observation_kdtree));
+        obstacle_snapshot));
   }
 
   data.path.reserve(prune_plan_.poses.size());
@@ -1289,8 +1220,8 @@ MppiCriticData Local_Planner::buildMppiCriticData(
     }
   }
 
-  if(aggregate_observation && aggregate_observation_kdtree &&
-     !aggregate_observation->points.empty() && !data.path.empty())
+  if(obstacle_snapshot.cloud && obstacle_snapshot.kdtree &&
+     !obstacle_snapshot.cloud->points.empty() && !data.path.empty())
   {
     std::vector<int> ids;
     std::vector<float> squared_distances;
@@ -1306,43 +1237,27 @@ MppiCriticData Local_Planner::buildMppiCriticData(
       path_pose.pose.orientation = tf2::toMsg(path_orientation);
       const auto path_cuboid = transformRobotCuboid(path_pose);
 
-      double path_collision_query_radius =
+      const auto path_collision = evaluateMppiObstacleCollisionForCuboid(
+        path_cuboid, obstacle_snapshot, &ids);
+      pcl::PointXYZ path_center;
+      path_center.x = point.x;
+      path_center.y = point.y;
+      path_center.z = path_pose.pose.position.z;
+      const double collision_margin =
         mppi_critic_manager_.config().obstacles.collision_margin_distance;
-      for(const auto & vertex : path_cuboid.points){
-        const double dx = vertex.x - point.x;
-        const double dy = vertex.y - point.y;
-        const double dz = vertex.z - path_pose.pose.position.z;
-        path_collision_query_radius = std::max(
-          path_collision_query_radius,
-          std::sqrt(dx * dx + dy * dy + dz * dz) +
-          mppi_critic_manager_.config().obstacles.collision_margin_distance);
-      }
-
-      pcl::PointXYZI query;
-      query.x = point.x;
-      query.y = point.y;
-      query.z = path_pose.pose.position.z;
-      query.intensity = 0.0F;
-      ids.clear();
-      squared_distances.clear();
-      if(aggregate_observation_kdtree->radiusSearch(
-          query,
-          path_collision_query_radius,
-          ids,
-          squared_distances) > 0)
-      {
-        const auto path_clearance = computeObstacleClearanceForCuboid(
+      const double path_clearance = path_collision.in_collision ? 0.0 :
+        computeAdaptiveObstacleClearanceForCuboid(
           path_cuboid,
-          *aggregate_observation,
-          ids);
-        point.obstacle_free =
-          !path_clearance.in_collision &&
-          (!std::isfinite(path_clearance.clearance) ||
-          path_clearance.clearance >=
-          mppi_critic_manager_.config().obstacles.collision_margin_distance);
-        if(!point.obstacle_free){
-          ++data.blocked_path_points;
-        }
+          obstacle_snapshot,
+          path_center,
+          collision_margin,
+          &ids,
+          &squared_distances).clearance;
+      point.obstacle_free =
+        path_collision.evaluated && !path_collision.in_collision &&
+        (!std::isfinite(path_clearance) || path_clearance >= collision_margin);
+      if(!point.obstacle_free){
+        ++data.blocked_path_points;
       }
     }
     data.path_obstacle_occupancy_ratio =
@@ -2584,6 +2499,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
   measured_speed.vx = robot_state_.twist.twist.linear.x;
   measured_speed.wz = robot_state_.twist.twist.angular.z;
 
+  const auto mppi_scoring_start = std::chrono::steady_clock::now();
   const auto obstacle_snapshot = makeMppiObstacleSnapshot(context.aggregate_observation);
   const std::size_t mppi_obstacle_points =
     obstacle_snapshot.cloud ? obstacle_snapshot.cloud->points.size() : 0u;
@@ -2602,8 +2518,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     [&](const std::vector<MppiCandidate> & candidates) -> std::vector<MppiCandidateScore> {
       auto critic_data = buildMppiCriticData(
         candidates,
-        obstacle_snapshot.cloud,
-        obstacle_snapshot.kdtree);
+        obstacle_snapshot);
       auto critic_result = mppi_critic_manager_.score(critic_data);
       mppi_scored_trajectories = critic_data.trajectories.size();
       mppi_scored_points = 0;
@@ -2686,8 +2601,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
 
     const auto optimal_scored_trajectory = buildMppiScoredTrajectory(
       result.optimal_sequence,
-      obstacle_snapshot.cloud,
-      obstacle_snapshot.kdtree,
+      obstacle_snapshot,
       true);
     optimal_sequence_collision_free =
       isMppiTrajectoryCollisionFree(optimal_scored_trajectory);
@@ -2712,11 +2626,14 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     result.best_sample_sequence.empty() ? MppiControl{} :
     result.best_sample_sequence[
       std::min(mppi_command_index, result.best_sample_sequence.size() - 1)];
+  const double mppi_scoring_ms = std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - mppi_scoring_start).count();
   RCLCPP_INFO_THROTTLE(
     this->get_logger().get_child(name_), *clock_, 2000,
-    "MPPI debug: controller=%s, obstacle_points=%zu, trajectories=%zu, trajectory_points=%zu, finite_clearances=%zu, min_clearance=%.3f, path_occupancy=%.3f, collision_trajectories=%zu, valid_scores=%zu, critic_fail=%d, rejected=%zu, best_cost=%.3f, best_vx=%.3f, best_wz=%.3f, prefilter_wz=%.3f, cmd_vx=%.3f, cmd_wz=%.3f, effective_samples=%.2f, weight_pos=%.3f, weight_neg=%.3f, weight_neutral=%.3f, structured=%zu, structured_weight=%.3f, selected_side=%s, best_side=%s, feasible_left=%zu, feasible_right=%zu, feasible_neutral=%zu, side_failures=%zu, structured_phase=%zu, best_sample=%zu, best_critic_cost=%.3f, best_energy=%.3f, optimal_valid=%d, attempts=%zu, allowed_max_speed=%.3f",
+    "MPPI debug: controller=%s, obstacle_points=%zu, scoring_ms=%.2f, trajectories=%zu, trajectory_points=%zu, finite_clearances=%zu, min_clearance=%.3f, path_occupancy=%.3f, collision_trajectories=%zu, valid_scores=%zu, critic_fail=%d, rejected=%zu, best_cost=%.3f, best_vx=%.3f, best_wz=%.3f, prefilter_wz=%.3f, cmd_vx=%.3f, cmd_wz=%.3f, effective_samples=%.2f, weight_pos=%.3f, weight_neg=%.3f, weight_neutral=%.3f, structured=%zu, structured_weight=%.3f, selected_side=%s, best_side=%s, feasible_left=%zu, feasible_right=%zu, feasible_neutral=%zu, side_failures=%zu, structured_phase=%zu, best_sample=%zu, best_critic_cost=%.3f, best_energy=%.3f, optimal_valid=%d, attempts=%zu, allowed_max_speed=%.3f",
     controller_name.c_str(),
     mppi_obstacle_points,
+    mppi_scoring_ms,
     mppi_scored_trajectories,
     mppi_scored_points,
     mppi_finite_clearance_points,

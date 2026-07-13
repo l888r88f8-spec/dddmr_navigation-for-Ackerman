@@ -63,6 +63,16 @@ include_directories(
 )
 
 
+function(enable_default_optimized_runtime target_name)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND
+     NOT CMAKE_CONFIGURATION_TYPES AND
+     NOT CMAKE_BUILD_TYPE)
+    # Keep real-time targets optimized for the common colcon invocation while
+    # preserving explicit Debug/Release and multi-config generator settings.
+    target_compile_options(${target_name} PRIVATE -O2)
+  endif()
+endfunction()
+
 add_library(local_planner_mppi_controller SHARED
   src/mppi_critic_manager.cpp
   src/mppi_controller.cpp
@@ -76,11 +86,7 @@ target_include_directories(local_planner_mppi_controller PUBLIC
 target_link_libraries(local_planner_mppi_controller
   ${PCL_LIBRARIES}
 )
-if(NOT CMAKE_BUILD_TYPE)
-  # The controller runs at 15 Hz; avoid an accidentally unoptimized deployment when
-  # colcon is invoked without an explicit CMake build type.
-  target_compile_options(local_planner_mppi_controller PRIVATE -O2)
-endif()
+enable_default_optimized_runtime(local_planner_mppi_controller)
 
 # local_planner
 add_library(local_planner SHARED
@@ -93,6 +99,7 @@ target_link_libraries(local_planner
 ament_target_dependencies(local_planner
   ${dependencies}
 )
+enable_default_optimized_runtime(local_planner)
 
 #local_planner_node
 add_executable(local_planner_node
@@ -140,6 +147,7 @@ if(BUILD_TESTING)
   target_link_libraries(test_mppi_critic_manager
     local_planner_mppi_controller
   )
+  enable_default_optimized_runtime(test_mppi_critic_manager)
 endif()
 
 #install node
