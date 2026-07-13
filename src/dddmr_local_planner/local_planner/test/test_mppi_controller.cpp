@@ -395,6 +395,36 @@ TEST(MppiControllerTest, LatchedFeasibleSideSurvivesOppositeSoftmaxUnderflow)
   EXPECT_GT(result.command.wz, 0.0);
 }
 
+TEST(MppiControllerTest, InitialSideMassIgnoresNeutralSoftmaxUnderflow)
+{
+  auto config = makeBypassLatchConfig();
+  config.batch_size = 4;
+  config.temperature = 1.0;
+
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.2, 0.0});
+  controller.setDebugNoiseForTest({
+    std::vector<MppiControl>(config.time_steps, MppiControl{0.0, 0.0}),
+    std::vector<MppiControl>(config.time_steps, MppiControl{0.0, -0.3}),
+    std::vector<MppiControl>(config.time_steps, MppiControl{0.0, -0.1}),
+    std::vector<MppiControl>(config.time_steps, MppiControl{0.0, 0.3})});
+
+  const auto result = controller.optimizeBatch(
+    MppiControl{0.2, 0.0},
+    [](const std::vector<MppiCandidate> &) {
+      return std::vector<MppiCandidateScore>{
+        MppiCandidateScore{true, 0.0, MppiBypassSide::Neutral, true},
+        MppiCandidateScore{true, 1000.1, MppiBypassSide::Left, true},
+        MppiCandidateScore{true, 1000.1, MppiBypassSide::Left, true},
+        MppiCandidateScore{true, 1000.0, MppiBypassSide::Right, true}};
+    },
+    []() {return true;});
+
+  ASSERT_TRUE(result.has_valid_control);
+  EXPECT_EQ(result.selected_bypass_side, MppiBypassSide::Left);
+  EXPECT_LT(result.command.wz, 0.0);
+}
+
 TEST(MppiControllerTest, LatchedSideReturnsInvalidForFirstTwoInfeasibleCycles)
 {
   const auto config = makeBypassLatchConfig();
@@ -420,9 +450,11 @@ TEST(MppiControllerTest, LatchedSideReturnsInvalidForFirstTwoInfeasibleCycles)
   EXPECT_FALSE(first.has_valid_control);
   EXPECT_EQ(first.selected_bypass_side, MppiBypassSide::Left);
   EXPECT_EQ(first.side_infeasible_cycles, 1u);
+  EXPECT_NEAR(first.effective_sample_size, 2.0, 1e-12);
   EXPECT_FALSE(second.has_valid_control);
   EXPECT_EQ(second.selected_bypass_side, MppiBypassSide::Left);
   EXPECT_EQ(second.side_infeasible_cycles, 2u);
+  EXPECT_NEAR(second.effective_sample_size, 2.0, 1e-12);
 }
 
 TEST(MppiControllerTest, LatchedSideSwitchesOnThirdInfeasibleCycle)
@@ -557,6 +589,7 @@ TEST(MppiControllerTest, DirectionalModeRejectsNeutralOnlyCandidatesWithoutLatch
   EXPECT_FALSE(result.has_valid_control);
   EXPECT_EQ(result.selected_bypass_side, MppiBypassSide::Neutral);
   EXPECT_EQ(result.side_infeasible_cycles, 0u);
+  EXPECT_NEAR(result.effective_sample_size, 2.0, 1e-12);
 }
 
 TEST(MppiControllerTest, SoftmaxUpdateUsesMoreThanBestSample)

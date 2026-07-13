@@ -423,6 +423,9 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
       statistics.neutral_weight_mass += normalized_weight;
     }
   }
+  if(squared_weight_sum > 1e-12){
+    statistics.effective_sample_size = 1.0 / squared_weight_sum;
+  }
 
   std::vector<bool> selected(valid_sequences.size(), true);
   if(select_directional_mode){
@@ -436,17 +439,30 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
       };
 
     if(latched_bypass_side_ == MppiBypassSide::Neutral){
+      double eligible_min_cost = std::numeric_limits<double>::infinity();
+      for(std::size_t sample = 0; sample < valid_sequences.size(); ++sample){
+        if(collision_free[sample] &&
+          valid_sides[sample] != MppiBypassSide::Neutral)
+        {
+          eligible_min_cost = std::min(eligible_min_cost, valid_costs[sample]);
+        }
+      }
+
       double left_weight_mass = 0.0;
       double right_weight_mass = 0.0;
       for(std::size_t sample = 0; sample < valid_sequences.size(); ++sample){
-        if(!collision_free[sample]){
+        if(!collision_free[sample] ||
+          valid_sides[sample] == MppiBypassSide::Neutral)
+        {
           continue;
         }
+        const double eligible_weight = std::exp(
+          -(valid_costs[sample] - eligible_min_cost) / config_.temperature);
         if(valid_sides[sample] == MppiBypassSide::Left){
-          left_weight_mass += weights[sample] / weight_sum;
+          left_weight_mass += eligible_weight;
         }
         else if(valid_sides[sample] == MppiBypassSide::Right){
-          right_weight_mass += weights[sample] / weight_sum;
+          right_weight_mass += eligible_weight;
         }
       }
 
@@ -531,9 +547,6 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
   control_sequence_ = updated;
   statistics.valid = true;
   statistics.prefilter_command = updated[command_index];
-  if(squared_weight_sum > 1e-12){
-    statistics.effective_sample_size = 1.0 / squared_weight_sum;
-  }
   return statistics;
 }
 
