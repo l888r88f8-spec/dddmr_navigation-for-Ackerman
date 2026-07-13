@@ -48,10 +48,19 @@ struct MppiCandidate
   std::vector<MppiControl> controls;
 };
 
+enum class MppiBypassSide : int
+{
+  Right = -1,
+  Neutral = 0,
+  Left = 1
+};
+
 struct MppiCandidateScore
 {
   bool valid = false;
   double cost = std::numeric_limits<double>::infinity();
+  MppiBypassSide bypass_side = MppiBypassSide::Neutral;
+  bool collision_free = true;
 };
 
 bool mppiSequenceRespectsSpeedCap(

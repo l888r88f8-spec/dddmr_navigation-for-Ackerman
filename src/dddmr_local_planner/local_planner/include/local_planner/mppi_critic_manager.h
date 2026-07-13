@@ -33,6 +33,9 @@ struct MppiScoredTrajectory
 };
 
 bool isMppiTrajectoryCollisionFree(const MppiScoredTrajectory & trajectory);
+MppiBypassSide classifyMppiBypassSide(
+  const MppiScoredTrajectory & trajectory,
+  const std::vector<MppiPathPoint> & path);
 
 struct MppiCriticTermConfig
 {

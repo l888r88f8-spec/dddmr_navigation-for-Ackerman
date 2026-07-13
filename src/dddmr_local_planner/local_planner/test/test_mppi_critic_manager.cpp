@@ -8,8 +8,11 @@
 #include "local_planner/mppi_obstacle_geometry.h"
 
 using local_planner::computeObstacleClearanceForCuboid;
+using local_planner::classifyMppiBypassSide;
 using local_planner::isMppiTrajectoryCollisionFree;
 using local_planner::makeMppiObstacleSnapshot;
+using local_planner::MppiBypassSide;
+using local_planner::MppiCandidateScore;
 using local_planner::MppiCriticConfig;
 using local_planner::MppiCriticData;
 using local_planner::MppiCriticManager;
@@ -51,6 +54,97 @@ MppiCriticData makeData(const std::vector<MppiScoredTrajectory> & trajectories)
   return data;
 }
 }  // namespace
+
+TEST(MppiCriticManagerTest, CandidateScoreDefaultsToNeutralCollisionFreeMetadata)
+{
+  const MppiCandidateScore score{true, 1.0};
+
+  EXPECT_EQ(score.bypass_side, MppiBypassSide::Neutral);
+  EXPECT_TRUE(score.collision_free);
+}
+
+TEST(MppiCriticManagerTest, ClassifiesTrajectoryAboveStraightPathAsLeft)
+{
+  const std::vector<MppiPathPoint> path = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{1.0, 0.0, 0.0},
+    MppiPathPoint{2.0, 0.0, 0.0}
+  };
+  const auto trajectory = makeTrajectory(0.2, {
+    MppiTrajectoryPoint{0.5, 0.2, 0.0},
+    MppiTrajectoryPoint{1.5, 0.4, 0.0}
+  });
+
+  EXPECT_EQ(classifyMppiBypassSide(trajectory, path), MppiBypassSide::Left);
+}
+
+TEST(MppiCriticManagerTest, ClassifiesTrajectoryBelowStraightPathAsRight)
+{
+  const std::vector<MppiPathPoint> path = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{1.0, 0.0, 0.0},
+    MppiPathPoint{2.0, 0.0, 0.0}
+  };
+  const auto trajectory = makeTrajectory(0.2, {
+    MppiTrajectoryPoint{0.5, -0.2, 0.0},
+    MppiTrajectoryPoint{1.5, -0.4, 0.0}
+  });
+
+  EXPECT_EQ(classifyMppiBypassSide(trajectory, path), MppiBypassSide::Right);
+}
+
+TEST(MppiCriticManagerTest, ClassifiesTrajectoryWithinDeadbandAsNeutral)
+{
+  const std::vector<MppiPathPoint> path = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{2.0, 0.0, 0.0}
+  };
+  const auto trajectory = makeTrajectory(0.2, {
+    MppiTrajectoryPoint{0.5, 0.05, 0.0},
+    MppiTrajectoryPoint{1.5, 0.10, 0.0}
+  });
+
+  EXPECT_EQ(classifyMppiBypassSide(trajectory, path), MppiBypassSide::Neutral);
+}
+
+TEST(MppiCriticManagerTest, ClassifiesGeometryIndependentlyOfTerminalYawRate)
+{
+  const std::vector<MppiPathPoint> path = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{2.0, 0.0, 0.0}
+  };
+  auto trajectory = makeTrajectory(0.2, {
+    MppiTrajectoryPoint{0.5, 0.3, 0.0},
+    MppiTrajectoryPoint{1.5, 0.4, 0.0}
+  });
+  trajectory.controls.back().wz = -0.8;
+
+  EXPECT_EQ(classifyMppiBypassSide(trajectory, path), MppiBypassSide::Left);
+}
+
+TEST(MppiCriticManagerTest, ClassifierRejectsDegenerateAndNonfiniteInputs)
+{
+  const auto trajectory = makeTrajectory(0.2, {
+    MppiTrajectoryPoint{0.5, 0.3, 0.0}
+  });
+  const std::vector<MppiPathPoint> degenerate_path = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{0.0, 0.0, 0.0}
+  };
+  const std::vector<MppiPathPoint> valid_path = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{1.0, 0.0, 0.0}
+  };
+  auto nonfinite_trajectory = trajectory;
+  nonfinite_trajectory.points.front().y = std::numeric_limits<double>::quiet_NaN();
+
+  EXPECT_EQ(
+    classifyMppiBypassSide(trajectory, degenerate_path), MppiBypassSide::Neutral);
+  EXPECT_EQ(
+    classifyMppiBypassSide(MppiScoredTrajectory{}, valid_path), MppiBypassSide::Neutral);
+  EXPECT_EQ(
+    classifyMppiBypassSide(nonfinite_trajectory, valid_path), MppiBypassSide::Neutral);
+}
 
 TEST(MppiCriticManagerTest, ObstaclesCriticAddsCollisionCostWithoutRejectingWholeBatch)
 {

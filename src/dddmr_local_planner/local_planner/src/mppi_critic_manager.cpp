@@ -17,6 +17,83 @@ bool isMppiTrajectoryCollisionFree(const MppiScoredTrajectory & trajectory)
     [](const MppiTrajectoryPoint & point) {return point.in_collision;});
 }
 
+MppiBypassSide classifyMppiBypassSide(
+  const MppiScoredTrajectory & trajectory,
+  const std::vector<MppiPathPoint> & path)
+{
+  if(path.size() < 2 || trajectory.points.empty()){
+    return MppiBypassSide::Neutral;
+  }
+
+  for(const auto & path_point : path){
+    if(!std::isfinite(path_point.x) || !std::isfinite(path_point.y)){
+      return MppiBypassSide::Neutral;
+    }
+  }
+
+  double peak_offset = 0.0;
+  double terminal_offset = 0.0;
+  for(const auto & trajectory_point : trajectory.points){
+    if(!std::isfinite(trajectory_point.x) || !std::isfinite(trajectory_point.y)){
+      return MppiBypassSide::Neutral;
+    }
+
+    double closest_distance_squared = std::numeric_limits<double>::infinity();
+    double closest_signed_offset = 0.0;
+    bool found_segment = false;
+    for(std::size_t i = 1; i < path.size(); ++i){
+      const double dx = path[i].x - path[i - 1].x;
+      const double dy = path[i].y - path[i - 1].y;
+      const double length_squared = dx * dx + dy * dy;
+      if(length_squared == 0.0){
+        continue;
+      }
+
+      const double projection = std::clamp(
+        ((trajectory_point.x - path[i - 1].x) * dx +
+        (trajectory_point.y - path[i - 1].y) * dy) / length_squared,
+        0.0,
+        1.0);
+      const double projected_x = path[i - 1].x + projection * dx;
+      const double projected_y = path[i - 1].y + projection * dy;
+      const double offset_x = trajectory_point.x - projected_x;
+      const double offset_y = trajectory_point.y - projected_y;
+      const double distance_squared = offset_x * offset_x + offset_y * offset_y;
+      const double segment_length = std::sqrt(length_squared);
+      const double signed_offset = (dx * offset_y - dy * offset_x) / segment_length;
+
+      if(!std::isfinite(distance_squared) || !std::isfinite(signed_offset)){
+        return MppiBypassSide::Neutral;
+      }
+      if(distance_squared < closest_distance_squared){
+        closest_distance_squared = distance_squared;
+        closest_signed_offset = signed_offset;
+        found_segment = true;
+      }
+    }
+
+    if(!found_segment || !std::isfinite(closest_signed_offset)){
+      return MppiBypassSide::Neutral;
+    }
+    if(std::fabs(closest_signed_offset) > std::fabs(peak_offset)){
+      peak_offset = closest_signed_offset;
+    }
+    terminal_offset = closest_signed_offset;
+  }
+
+  const double metric = 0.7 * peak_offset + 0.3 * terminal_offset;
+  if(!std::isfinite(metric)){
+    return MppiBypassSide::Neutral;
+  }
+  if(metric > 0.10){
+    return MppiBypassSide::Left;
+  }
+  if(metric < -0.10){
+    return MppiBypassSide::Right;
+  }
+  return MppiBypassSide::Neutral;
+}
+
 MppiConstraintCriticConfig::MppiConstraintCriticConfig()
 {
   cost_weight = 4.0;
