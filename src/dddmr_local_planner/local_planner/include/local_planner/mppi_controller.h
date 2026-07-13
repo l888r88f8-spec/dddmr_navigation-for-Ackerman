@@ -89,6 +89,7 @@ struct MppiResult
   std::size_t structured_candidates = 0;
   MppiBypassSide selected_bypass_side = MppiBypassSide::Neutral;
   std::size_t side_infeasible_cycles = 0;
+  std::size_t structured_phase_step = 0;
 };
 
 class MppiController
@@ -135,6 +136,7 @@ private:
   bool use_debug_noise_for_test_ = false;
   MppiBypassSide latched_bypass_side_ = MppiBypassSide::Neutral;
   std::size_t latched_side_infeasible_cycles_ = 0;
+  std::size_t structured_phase_step_ = 0;
   static constexpr std::size_t kSideSwitchConfirmCycles = 3;
 
   void normalizeConfig();

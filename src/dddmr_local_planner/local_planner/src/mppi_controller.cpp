@@ -58,6 +58,7 @@ void MppiController::setConfig(const MppiConfig & config)
   control_history_.fill(MppiControl{});
   latched_bypass_side_ = MppiBypassSide::Neutral;
   latched_side_infeasible_cycles_ = 0;
+  structured_phase_step_ = 0;
   regenerateNoise();
 }
 
@@ -89,6 +90,7 @@ void MppiController::resetControlSequence(const MppiControl & command)
   control_history_.fill(command);
   latched_bypass_side_ = MppiBypassSide::Neutral;
   latched_side_infeasible_cycles_ = 0;
+  structured_phase_step_ = 0;
 }
 
 void MppiController::setDebugNoiseForTest(const std::vector<std::vector<MppiControl>> & noise)
@@ -105,6 +107,7 @@ MppiResult MppiController::optimize(
     MppiResult result;
     result.rejected_samples = config_.batch_size;
     result.optimal_sequence = control_sequence_;
+    result.structured_phase_step = structured_phase_step_;
     return result;
   }
 
@@ -128,6 +131,7 @@ MppiResult MppiController::optimizeBatch(
   MppiResult result;
   result.structured_candidates = use_debug_noise_for_test_ ? 0 :
     config_.structured_candidate_count;
+  result.structured_phase_step = structured_phase_step_;
   if(!score_function){
     result.rejected_samples = config_.batch_size;
     result.optimal_sequence = control_sequence_;
@@ -211,6 +215,10 @@ MppiResult MppiController::optimizeBatch(
       select_directional_mode =
         mode_selection_function && mode_selection_function();
       directional_mode_selected = true;
+      if(!select_directional_mode){
+        structured_phase_step_ = 0;
+        result.structured_phase_step = 0;
+      }
     }
     const MppiBypassSide side_before_update = provisional_bypass_side;
     const std::size_t infeasible_cycles_before_update = provisional_infeasible_cycles;
@@ -261,6 +269,14 @@ MppiResult MppiController::optimizeBatch(
   result.command = control_sequence_[command_index];
   updateControlHistory(result.command);
   shiftControlSequence();
+  if(select_directional_mode && latched_bypass_side_ != MppiBypassSide::Neutral){
+    const std::size_t first_control_step = config_.shift_control_sequence ? 1u : 0u;
+    const std::size_t controlled_steps = config_.time_steps - first_control_step;
+    if(structured_phase_step_ < controlled_steps){
+      ++structured_phase_step_;
+    }
+  }
+  result.structured_phase_step = structured_phase_step_;
   return result;
 }
 
@@ -380,10 +396,15 @@ std::vector<MppiControl> MppiController::buildStructuredSequence(
     first_control_step = 1;
   }
 
+  const bool has_latched_side = latched_bypass_side_ != MppiBypassSide::Neutral;
   const std::size_t template_index = sample_index / 2;
-  const double direction = sample_index % 2 == 0 ? 1.0 : -1.0;
-  const double intensity = template_index % 2 == 0 ? 0.55 : 0.90;
-  const bool s_curve = template_index >= 2;
+  const double direction = has_latched_side ?
+    static_cast<double>(latched_bypass_side_) :
+    (sample_index % 2 == 0 ? 1.0 : -1.0);
+  const double intensity = has_latched_side ?
+    (sample_index % 2 == 0 ? 0.55 : 0.90) :
+    (template_index % 2 == 0 ? 0.55 : 0.90);
+  const bool s_curve = has_latched_side || template_index >= 2;
   const std::size_t controlled_steps = config_.time_steps - first_control_step;
 
   for(std::size_t step = first_control_step; step < config_.time_steps; ++step){
@@ -393,8 +414,19 @@ std::vector<MppiControl> MppiController::buildStructuredSequence(
       MppiControl{control_sequence_[step].vx, previous.wz},
       dt);
     const std::size_t phase_step = step - first_control_step;
-    const double phase_direction =
-      s_curve && phase_step >= controlled_steps / 2 ? -direction : direction;
+    std::size_t absolute_phase = phase_step;
+    if(has_latched_side){
+      absolute_phase = structured_phase_step_ >= controlled_steps ||
+        phase_step >= controlled_steps - structured_phase_step_ ?
+        controlled_steps : structured_phase_step_ + phase_step;
+    }
+    double phase_direction = direction;
+    if(s_curve && absolute_phase >= controlled_steps / 2){
+      phase_direction = -direction;
+    }
+    if(has_latched_side && absolute_phase >= controlled_steps){
+      phase_direction = 0.0;
+    }
     const MppiControl requested{
       control_sequence_[step].vx,
       phase_direction * intensity * ackermannWzLimit(vx_only.vx)};
