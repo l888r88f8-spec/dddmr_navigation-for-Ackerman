@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include "local_planner/mppi_obstacle_geometry.h"
+
 namespace
 {
 std::string readFile(const std::string & path)
@@ -178,11 +180,28 @@ TEST(P2PMoveBaseConfigTest, MppiObstacleScoringStaysWithinRuntimeBudget)
   ASSERT_GE(trajectory_point_step, 1.0);
 
   const double time_steps = std::ceil(horizon / model_dt);
-  const double obstacle_queries_per_cycle =
-    batch_size * std::ceil(time_steps / trajectory_point_step);
+  constexpr std::size_t representative_obstacle_points = 64;
+  const auto work = local_planner::estimateMppiObstacleScoringWork(
+    static_cast<std::size_t>(batch_size),
+    static_cast<std::size_t>(time_steps),
+    static_cast<std::size_t>(trajectory_point_step),
+    representative_obstacle_points);
+  const auto optimal_trajectory_work = local_planner::estimateMppiObstacleScoringWork(
+    1,
+    static_cast<std::size_t>(time_steps),
+    1,
+    representative_obstacle_points);
+  const std::size_t nominal_cycle_kdtree_queries =
+    work.totalKdTreeQueries() + optimal_trajectory_work.totalKdTreeQueries();
+  const std::size_t retry_cycle_kdtree_queries = 2 * nominal_cycle_kdtree_queries;
 
-  EXPECT_LE(obstacle_queries_per_cycle, 2000.0)
-    << "MPPI obstacle KDTree queries per cycle exceed the local runtime budget";
+  EXPECT_EQ(work.collision_pose_checks, 7200u)
+    << "Every predicted pose must retain an exact collision check";
+  EXPECT_EQ(nominal_cycle_kdtree_queries, 1995u);
+  EXPECT_LE(nominal_cycle_kdtree_queries, 2000u)
+    << "Nominal MPPI obstacle KDTree queries exceed the local runtime budget";
+  EXPECT_EQ(retry_cycle_kdtree_queries, 3990u)
+    << "A validator retry intentionally performs a second complete scoring pass";
 }
 
 TEST(P2PMoveBaseConfigTest, PlannerParametersAreGroupedByPlannerAndBackend)

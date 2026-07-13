@@ -246,6 +246,9 @@ if(BUILD_TESTING)
   target_compile_definitions(test_p2p_move_base_config PRIVATE
     P2P_MOVE_BASE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
   )
+  ament_target_dependencies(test_p2p_move_base_config
+    local_planner
+  )
 endif()
 
 ament_package()

@@ -26,14 +26,29 @@ MppiObstacleSnapshot makeMppiObstacleSnapshot(
 namespace
 {
 
+std::size_t saturatingMultiply(
+  const std::size_t lhs,
+  const std::size_t rhs,
+  bool & overflowed)
+{
+  if(lhs != 0 && rhs > std::numeric_limits<std::size_t>::max() / lhs){
+    overflowed = true;
+    return std::numeric_limits<std::size_t>::max();
+  }
+  return lhs * rhs;
+}
+
 MppiObstacleClearanceResult evaluateObstacleCuboid(
   const pcl::PointCloud<pcl::PointXYZ> & cuboid,
   const pcl::PointCloud<pcl::PointXYZI> & obstacles,
-  const std::vector<int> & obstacle_indices,
+  const std::vector<int> * obstacle_indices,
   const bool calculate_clearance)
 {
   MppiObstacleClearanceResult result;
-  if(cuboid.points.size() < 4 || obstacles.points.empty() || obstacle_indices.empty()){
+  double minimum_squared_clearance = std::numeric_limits<double>::infinity();
+  if(cuboid.points.size() < 4 || obstacles.points.empty() ||
+     (obstacle_indices != nullptr && obstacle_indices->empty()))
+  {
     return result;
   }
 
@@ -80,13 +95,13 @@ MppiObstacleClearanceResult evaluateObstacleCuboid(
   dz.y /= (2.0 * half_z);
   dz.z /= (2.0 * half_z);
 
-  for(const auto id : obstacle_indices){
-    if(id < 0 || static_cast<std::size_t>(id) >= obstacles.points.size()){
-      ++result.ignored_indices;
-      continue;
+  const auto evaluate_obstacle = [&](const pcl::PointXYZI & obstacle) {
+    if(!std::isfinite(obstacle.x) || !std::isfinite(obstacle.y) ||
+       !std::isfinite(obstacle.z))
+    {
+      return false;
     }
 
-    const auto & obstacle = obstacles.points[static_cast<std::size_t>(id)];
     pcl::PointXYZ delta;
     delta.x = obstacle.x - cuboid_center.x;
     delta.y = obstacle.y - cuboid_center.y;
@@ -99,20 +114,46 @@ MppiObstacleClearanceResult evaluateObstacleCuboid(
     if(x_value <= half_x && y_value <= half_y && z_value <= half_z){
       result.in_collision = true;
       result.clearance = 0.0;
-      return result;
+      return true;
     }
 
     if(calculate_clearance){
       const double clearance_x = std::max(0.0, x_value - half_x);
       const double clearance_y = std::max(0.0, y_value - half_y);
       const double clearance_z = std::max(0.0, z_value - half_z);
-      result.clearance = std::min(
-        result.clearance,
-        std::sqrt(
-          clearance_x * clearance_x +
-          clearance_y * clearance_y +
-          clearance_z * clearance_z));
+      minimum_squared_clearance = std::min(
+        minimum_squared_clearance,
+        clearance_x * clearance_x +
+        clearance_y * clearance_y +
+        clearance_z * clearance_z);
     }
+    return false;
+  };
+
+  if(obstacle_indices == nullptr){
+    for(const auto & obstacle : obstacles.points){
+      if(evaluate_obstacle(obstacle)){
+        break;
+      }
+    }
+    if(calculate_clearance && std::isfinite(minimum_squared_clearance)){
+      result.clearance = std::sqrt(minimum_squared_clearance);
+    }
+    return result;
+  }
+
+  for(const auto id : *obstacle_indices){
+    if(id < 0 || static_cast<std::size_t>(id) >= obstacles.points.size()){
+      ++result.ignored_indices;
+      continue;
+    }
+    if(evaluate_obstacle(obstacles.points[static_cast<std::size_t>(id)])){
+      break;
+    }
+  }
+
+  if(calculate_clearance && std::isfinite(minimum_squared_clearance)){
+    result.clearance = std::sqrt(minimum_squared_clearance);
   }
 
   return result;
@@ -125,7 +166,7 @@ MppiObstacleClearanceResult computeObstacleClearanceForCuboid(
   const pcl::PointCloud<pcl::PointXYZI> & obstacles,
   const std::vector<int> & obstacle_indices)
 {
-  return evaluateObstacleCuboid(cuboid, obstacles, obstacle_indices, true);
+  return evaluateObstacleCuboid(cuboid, obstacles, &obstacle_indices, true);
 }
 
 bool hasObstacleCollisionForCuboid(
@@ -133,7 +174,61 @@ bool hasObstacleCollisionForCuboid(
   const pcl::PointCloud<pcl::PointXYZI> & obstacles,
   const std::vector<int> & obstacle_indices)
 {
-  return evaluateObstacleCuboid(cuboid, obstacles, obstacle_indices, false).in_collision;
+  return evaluateObstacleCuboid(cuboid, obstacles, &obstacle_indices, false).in_collision;
+}
+
+bool hasObstacleCollisionForCuboid(
+  const pcl::PointCloud<pcl::PointXYZ> & cuboid,
+  const pcl::PointCloud<pcl::PointXYZI> & obstacles)
+{
+  return evaluateObstacleCuboid(cuboid, obstacles, nullptr, false).in_collision;
+}
+
+bool shouldDirectlyScanMppiObstacles(const std::size_t obstacle_count)
+{
+  // The workload model budgets one radiusSearch (tree traversal, result collection and
+  // indexed OBB scan) as at most 128 direct OBB point checks. The target-configuration
+  // latency test below this helper verifies that this crossover fits one 15 Hz period.
+  constexpr std::size_t kKdTreeQueryEquivalentPointChecks = 128;
+  return obstacle_count <= kKdTreeQueryEquivalentPointChecks;
+}
+
+MppiObstacleScoringWork estimateMppiObstacleScoringWork(
+  const std::size_t batch_size,
+  const std::size_t trajectory_point_count,
+  const std::size_t trajectory_point_step,
+  const std::size_t obstacle_count)
+{
+  MppiObstacleScoringWork work;
+  if(batch_size == 0 || trajectory_point_count == 0){
+    return work;
+  }
+
+  work.collision_pose_checks = saturatingMultiply(
+    batch_size, trajectory_point_count, work.overflowed);
+  if(obstacle_count == 0){
+    return work;
+  }
+
+  const std::size_t step = std::max<std::size_t>(1, trajectory_point_step);
+  std::size_t clearance_points = (trajectory_point_count - 1) / step + 1;
+  if((trajectory_point_count - 1) % step != 0){
+    ++clearance_points;
+  }
+  const std::size_t collision_only_points = trajectory_point_count - clearance_points;
+  work.clearance_kdtree_queries = saturatingMultiply(
+    batch_size, clearance_points, work.overflowed);
+  if(shouldDirectlyScanMppiObstacles(obstacle_count)){
+    const std::size_t collision_only_pose_checks = saturatingMultiply(
+      batch_size, collision_only_points, work.overflowed);
+    work.direct_collision_point_checks = saturatingMultiply(
+      collision_only_pose_checks, obstacle_count, work.overflowed);
+  }
+  else{
+    work.collision_kdtree_queries = saturatingMultiply(
+      batch_size, collision_only_points, work.overflowed);
+  }
+  return work;
 }
 
 double computeMppiCuboidCollisionQueryRadius(

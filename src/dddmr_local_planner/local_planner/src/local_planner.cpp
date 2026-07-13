@@ -1134,6 +1134,8 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
   std::size_t point_index = 0;
   std::vector<int> obstacle_ids;
   std::vector<float> squared_distances;
+  const bool directly_scan_collision_only = aggregate_observation &&
+    shouldDirectlyScanMppiObstacles(aggregate_observation->points.size());
 
   auto query_obstacles =
     [&](const geometry_msgs::msg::PoseStamped & pose,
@@ -1151,9 +1153,18 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
         }
         return result;
       }
-      if(!aggregate_observation_kdtree || cuboid.points.size() < 4 ||
-         !std::isfinite(query_radius) || query_radius <= 0.0)
+      if(cuboid.points.size() < 4)
       {
+        return result;
+      }
+      if(!calculate_clearance && directly_scan_collision_only){
+        result.in_collision = hasObstacleCollisionForCuboid(cuboid, *aggregate_observation);
+        if(collision_evaluated != nullptr){
+          *collision_evaluated = true;
+        }
+        return result;
+      }
+      if(!aggregate_observation_kdtree || !std::isfinite(query_radius) || query_radius <= 0.0){
         return result;
       }
 
@@ -1210,7 +1221,7 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
     const bool evaluate_clearance =
       point_index % obstacle_point_step == 0 || point_index + 1 == controls.size();
     double query_radius = obstacle_search_radius;
-    if(!evaluate_clearance){
+    if(!evaluate_clearance && !directly_scan_collision_only){
       pcl::PointXYZ pose_center;
       pose_center.x = pose.pose.position.x;
       pose_center.y = pose.pose.position.y;

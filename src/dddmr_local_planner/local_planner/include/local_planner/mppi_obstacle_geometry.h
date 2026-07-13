@@ -26,6 +26,25 @@ struct MppiObstacleSnapshot
   pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr kdtree;
 };
 
+struct MppiObstacleScoringWork
+{
+  std::size_t clearance_kdtree_queries = 0;
+  std::size_t collision_kdtree_queries = 0;
+  std::size_t direct_collision_point_checks = 0;
+  std::size_t collision_pose_checks = 0;
+  bool overflowed = false;
+
+  std::size_t totalKdTreeQueries() const
+  {
+    if(clearance_kdtree_queries >
+       std::numeric_limits<std::size_t>::max() - collision_kdtree_queries)
+    {
+      return std::numeric_limits<std::size_t>::max();
+    }
+    return clearance_kdtree_queries + collision_kdtree_queries;
+  }
+};
+
 MppiObstacleSnapshot makeMppiObstacleSnapshot(
   const pcl::PointCloud<pcl::PointXYZI>::ConstPtr & obstacles);
 
@@ -38,6 +57,18 @@ bool hasObstacleCollisionForCuboid(
   const pcl::PointCloud<pcl::PointXYZ> & cuboid,
   const pcl::PointCloud<pcl::PointXYZI> & obstacles,
   const std::vector<int> & obstacle_indices);
+
+bool hasObstacleCollisionForCuboid(
+  const pcl::PointCloud<pcl::PointXYZ> & cuboid,
+  const pcl::PointCloud<pcl::PointXYZI> & obstacles);
+
+bool shouldDirectlyScanMppiObstacles(std::size_t obstacle_count);
+
+MppiObstacleScoringWork estimateMppiObstacleScoringWork(
+  std::size_t batch_size,
+  std::size_t trajectory_point_count,
+  std::size_t trajectory_point_step,
+  std::size_t obstacle_count);
 
 double computeMppiCuboidCollisionQueryRadius(
   const pcl::PointCloud<pcl::PointXYZ> & cuboid,
