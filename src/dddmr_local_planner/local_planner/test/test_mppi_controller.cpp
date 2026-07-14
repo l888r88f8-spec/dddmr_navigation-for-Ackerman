@@ -824,17 +824,26 @@ TEST(MppiControllerTest, WrongPhaseRandomCandidateDoesNotBypassStructuredCommitm
   EXPECT_EQ(result.structured_phase_step, 0u);
 }
 
-TEST(MppiControllerTest, DirectionalAggregationRejectsSameSideCandidateWithWrongCurrentPhase)
+TEST(MppiControllerTest, DeploymentScaleDirectionalAggregationRejectsWrongCurrentPhase)
 {
   auto config = makeBypassLatchConfig();
-  config.batch_size = 2;
+  config.batch_size = 96;
   config.structured_candidate_count = 8;
   config.time_steps = 4;
   config.shift_control_sequence = false;
   config.wz_max = 0.4;
   MppiController controller(config);
   controller.resetControlSequence(MppiControl{0.2, 0.0});
-  controller.setDebugNoiseForTest(makeAngularNoises(config, -0.10, 0.10));
+  std::vector<std::vector<MppiControl>> noises(
+    config.batch_size,
+    std::vector<MppiControl>(config.time_steps));
+  for(std::size_t sample = 0; sample < noises.size(); ++sample){
+    std::fill(
+      noises[sample].begin(),
+      noises[sample].end(),
+      MppiControl{0.0, sample < config.batch_size / 2 ? -0.10 : 0.10});
+  }
+  controller.setDebugNoiseForTest(noises);
 
   const auto result = controller.optimizeBatch(
     MppiControl{0.2, 0.0},
@@ -847,7 +856,7 @@ TEST(MppiControllerTest, DirectionalAggregationRejectsSameSideCandidateWithWrong
 
   ASSERT_TRUE(result.has_valid_control);
   EXPECT_EQ(result.selected_bypass_side, MppiBypassSide::Right);
-  EXPECT_EQ(result.phase_compatible_candidates, 1u);
+  EXPECT_EQ(result.phase_compatible_candidates, config.batch_size / 2);
   EXPECT_NEAR(result.prefilter_command.wz, -0.10, 1e-12);
 }
 
