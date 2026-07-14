@@ -135,7 +135,7 @@ void MppiController::resetControlSequenceForRetry(
     avoidance_state.side_infeasible_cycles,
     kSideSwitchConfirmCycles);
   const std::size_t first_control_step =
-    config_.shift_control_sequence && config_.time_steps > 1 ? 1u : 0u;
+    config_.shift_control_sequence ? 1u : 0u;
   const std::size_t controlled_steps = config_.time_steps - first_control_step;
   structured_phase_step_ = std::min(
     avoidance_state.structured_phase_step,
@@ -326,6 +326,7 @@ MppiResult MppiController::optimizeBatch(
       collision_free,
       valid_structured,
       select_directional_mode,
+      generation_structured_phase_step,
       provisional_bypass_side,
       provisional_infeasible_cycles);
     if(side_state_was_settled){
@@ -345,6 +346,7 @@ MppiResult MppiController::optimizeBatch(
     result.neutral_weight_mass = statistics.neutral_weight_mass;
     result.structured_weight_mass = statistics.structured_weight_mass;
     result.prefilter_command = statistics.prefilter_command;
+    result.phase_compatible_candidates = statistics.phase_compatible_candidates;
     result.selected_bypass_side = provisional_bypass_side;
     result.side_infeasible_cycles = provisional_infeasible_cycles;
     if(!statistics.valid){
@@ -369,12 +371,17 @@ MppiResult MppiController::optimizeBatch(
   result.command = control_sequence_[command_index];
   updateControlHistory(result.command);
   shiftControlSequence();
-  // A structured maneuver materially contributed only when it owns at least
-  // half of the final selected-set weight after stable renormalization.
-  constexpr double kMaterialStructuredContributionThreshold = 0.5;
+  const bool side_switched_this_batch =
+    entry_bypass_side != MppiBypassSide::Neutral &&
+    latched_bypass_side_ != MppiBypassSide::Neutral &&
+    entry_bypass_side != latched_bypass_side_;
   if(select_directional_mode && latched_bypass_side_ != MppiBypassSide::Neutral){
     reset_structured_phase_for_side_change(latched_bypass_side_);
-    if(result.structured_weight_mass >= kMaterialStructuredContributionThreshold){
+    const double expected_direction =
+      expectedPhaseDirection(latched_bypass_side_, structured_phase_step_);
+    if(!side_switched_this_batch && expected_direction != 0.0 &&
+      isPhaseCompatible(result.command, expected_direction))
+    {
       const std::size_t first_control_step = config_.shift_control_sequence ? 1u : 0u;
       const std::size_t controlled_steps = config_.time_steps - first_control_step;
       if(structured_phase_step_ < controlled_steps){
@@ -434,6 +441,44 @@ double MppiController::ackermannWzLimit(const double vx) const
 {
   const double steering_limit = std::fabs(vx) * std::tan(config_.max_steer) / config_.wheelbase;
   return std::min(config_.wz_max, steering_limit);
+}
+
+double MppiController::expectedPhaseDirection(
+  const MppiBypassSide bypass_side,
+  const std::size_t structured_phase_step) const
+{
+  if(bypass_side == MppiBypassSide::Neutral){
+    return 0.0;
+  }
+
+  const std::size_t first_control_step =
+    config_.shift_control_sequence ? 1u : 0u;
+  const std::size_t controlled_steps = config_.time_steps - first_control_step;
+  if(structured_phase_step >= controlled_steps){
+    return 0.0;
+  }
+
+  const double side_direction = static_cast<double>(bypass_side);
+  return structured_phase_step < controlled_steps / 2 ?
+    side_direction : -side_direction;
+}
+
+bool MppiController::isPhaseCompatible(
+  const MppiControl & command,
+  const double expected_direction) const
+{
+  if(expected_direction == 0.0){
+    return true;
+  }
+  const double angular_limit = ackermannWzLimit(command.vx);
+  const double first_command_dt = config_.shift_control_sequence ?
+    config_.model_dt : config_.controller_period;
+  const double reachable_angular_change = config_.az_max * first_command_dt;
+  const double material_angular_velocity = kMaterialPhaseCurvatureRatio *
+    std::min(angular_limit, reachable_angular_change);
+  return material_angular_velocity > 1e-9 &&
+    expected_direction * command.wz >=
+    material_angular_velocity;
 }
 
 std::size_t MppiController::activeStructuredCandidateCount(
@@ -587,6 +632,7 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
   const std::vector<bool> & collision_free,
   const std::vector<bool> & valid_structured,
   const bool select_directional_mode,
+  const std::size_t structured_phase_step,
   MppiBypassSide & bypass_side,
   std::size_t & side_infeasible_cycles)
 {
@@ -645,6 +691,7 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
 
   std::vector<bool> selected(valid_sequences.size(), true);
   if(select_directional_mode){
+    const MppiBypassSide side_before_selection = bypass_side;
     const auto has_feasible_side = [&](const MppiBypassSide side) {
         for(std::size_t sample = 0; sample < valid_sides.size(); ++sample){
           if(collision_free[sample] && valid_sides[sample] == side){
@@ -727,9 +774,27 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
       side_infeasible_cycles = 0;
     }
 
+    const std::size_t selected_side_phase_step =
+      side_before_selection != MppiBypassSide::Neutral &&
+      side_before_selection != bypass_side ? 0u : structured_phase_step;
+    const bool side_switched =
+      side_before_selection != MppiBypassSide::Neutral &&
+      side_before_selection != bypass_side;
+    const double expected_direction =
+      expectedPhaseDirection(bypass_side, selected_side_phase_step);
+    const bool phase_commitment_active =
+      config_.structured_candidate_count > 0 &&
+      expected_direction != 0.0 && !side_switched;
     for(std::size_t sample = 0; sample < valid_sequences.size(); ++sample){
-      selected[sample] = collision_free[sample] &&
+      const bool physical_side_selected = collision_free[sample] &&
         valid_sides[sample] == bypass_side;
+      const bool phase_compatible = physical_side_selected &&
+        isPhaseCompatible(valid_sequences[sample][command_index], expected_direction);
+      selected[sample] = physical_side_selected &&
+        (!phase_commitment_active || phase_compatible);
+      if(phase_compatible){
+        ++statistics.phase_compatible_candidates;
+      }
     }
   }
 

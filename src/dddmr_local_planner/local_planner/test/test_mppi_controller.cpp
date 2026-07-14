@@ -800,7 +800,7 @@ TEST(MppiControllerTest, StructuredWinnerReportsUnitMassAndAdvancesPhase)
   EXPECT_EQ(result.structured_phase_step, 1u);
 }
 
-TEST(MppiControllerTest, RandomDominanceDoesNotSkipInitialStructuredOutwardTurn)
+TEST(MppiControllerTest, WrongPhaseRandomCandidateDoesNotBypassStructuredCommitment)
 {
   auto config = makeStructuredPhaseConfig();
   config.batch_size = 4;
@@ -808,116 +808,75 @@ TEST(MppiControllerTest, RandomDominanceDoesNotSkipInitialStructuredOutwardTurn)
   MppiController controller(config);
   controller.resetControlSequence(MppiControl{0.2, 0.0});
 
-  const auto random_wins = [](const std::vector<MppiCandidate> & candidates) {
-      std::vector<MppiCandidateScore> scores(
-        candidates.size(), MppiCandidateScore{false, -1.0});
-      scores[2] = MppiCandidateScore{true, 0.0, MppiBypassSide::Left, true};
-      return scores;
-    };
-  for(std::size_t cycle = 0; cycle < 41; ++cycle){
-    SCOPED_TRACE(cycle);
-    const auto result = controller.optimizeBatch(
-      MppiControl{0.2, 0.0}, random_wins, []() {return true;});
-    ASSERT_TRUE(result.has_valid_control);
-    EXPECT_NEAR(result.structured_weight_mass, 0.0, 1e-12);
-    EXPECT_EQ(result.structured_phase_step, 0u);
-  }
-
-  const auto structured = controller.optimizeBatch(
+  const auto result = controller.optimizeBatch(
     MppiControl{0.2, 0.0},
     [](const std::vector<MppiCandidate> & candidates) {
       std::vector<MppiCandidateScore> scores(
         candidates.size(), MppiCandidateScore{false, -1.0});
-      scores[0] = MppiCandidateScore{true, 0.0, MppiBypassSide::Left, true};
+      scores[2] = MppiCandidateScore{true, 0.0, MppiBypassSide::Left, true};
       return scores;
     },
     []() {return true;});
 
-  ASSERT_TRUE(structured.has_valid_control);
-  EXPECT_DOUBLE_EQ(structured.structured_weight_mass, 1.0);
-  EXPECT_GT(structured.command.wz, 0.0);
-  EXPECT_EQ(structured.structured_phase_step, 1u);
+  EXPECT_FALSE(result.has_valid_control);
+  EXPECT_EQ(result.selected_bypass_side, MppiBypassSide::Left);
+  EXPECT_EQ(result.phase_compatible_candidates, 0u);
+  EXPECT_EQ(result.structured_phase_step, 0u);
 }
 
-TEST(MppiControllerTest, MixedStructuredWeightUsesInclusiveHalfMassThreshold)
+TEST(MppiControllerTest, DirectionalAggregationRejectsSameSideCandidateWithWrongCurrentPhase)
 {
-  auto config = makeStructuredPhaseConfig();
-  config.batch_size = 4;
-  config.structured_candidate_count = 2;
-  constexpr double delta = 0.01;
+  auto config = makeBypassLatchConfig();
+  config.batch_size = 2;
+  config.structured_candidate_count = 8;
+  config.time_steps = 4;
+  config.shift_control_sequence = false;
+  config.wz_max = 0.4;
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.2, 0.0});
+  controller.setDebugNoiseForTest(makeAngularNoises(config, -0.10, 0.10));
 
-  const auto run_with_costs = [&](const double structured_cost, const double random_cost) {
-      MppiController controller(config);
-      controller.resetControlSequence(MppiControl{0.2, 0.0});
-      return controller.optimizeBatch(
-        MppiControl{0.2, 0.0},
-        [=](const std::vector<MppiCandidate> & candidates) {
-          std::vector<MppiCandidateScore> scores(
-            candidates.size(), MppiCandidateScore{false, -1.0});
-          scores[0] = MppiCandidateScore{
-            true, structured_cost, MppiBypassSide::Left, true};
-          scores[2] = MppiCandidateScore{
-            true, random_cost, MppiBypassSide::Left, true};
-          return scores;
-        },
-        []() {return true;});
-    };
+  const auto result = controller.optimizeBatch(
+    MppiControl{0.2, 0.0},
+    [](const std::vector<MppiCandidate> & candidates) {
+      return std::vector<MppiCandidateScore>(
+        candidates.size(),
+        MppiCandidateScore{true, 0.0, MppiBypassSide::Right, true});
+    },
+    []() {return true;});
 
-  const auto below = run_with_costs(delta, 0.0);
-  const double expected_below = std::exp(-delta / config.temperature) /
-    (1.0 + std::exp(-delta / config.temperature));
-  ASSERT_TRUE(below.has_valid_control);
-  EXPECT_NEAR(below.structured_weight_mass, expected_below, 1e-12);
-  EXPECT_LT(below.structured_weight_mass, 0.5);
-  EXPECT_EQ(below.structured_phase_step, 0u);
-
-  const auto exact = run_with_costs(0.0, 0.0);
-  ASSERT_TRUE(exact.has_valid_control);
-  EXPECT_DOUBLE_EQ(exact.structured_weight_mass, 0.5);
-  EXPECT_EQ(exact.structured_phase_step, 1u);
-
-  const auto above = run_with_costs(0.0, delta);
-  ASSERT_TRUE(above.has_valid_control);
-  EXPECT_NEAR(above.structured_weight_mass, 1.0 - expected_below, 1e-12);
-  EXPECT_GT(above.structured_weight_mass, 0.5);
-  EXPECT_EQ(above.structured_phase_step, 1u);
+  ASSERT_TRUE(result.has_valid_control);
+  EXPECT_EQ(result.selected_bypass_side, MppiBypassSide::Right);
+  EXPECT_EQ(result.phase_compatible_candidates, 1u);
+  EXPECT_NEAR(result.prefilter_command.wz, -0.10, 1e-12);
 }
 
-TEST(MppiControllerTest, FinalIterationStructuredMassControlsDiagnosticAndPhaseAdvance)
+TEST(MppiControllerTest, ExecutedRandomCandidateAdvancesStructuredPhase)
 {
-  auto config = makeStructuredPhaseConfig();
-  config.batch_size = 4;
-  config.structured_candidate_count = 2;
-  config.iteration_count = 2;
+  auto config = makeBypassLatchConfig();
+  config.batch_size = 1;
+  config.structured_candidate_count = 0;
+  config.time_steps = 6;
+  config.shift_control_sequence = false;
+  config.wz_max = 0.4;
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.2, 0.0});
+  controller.setDebugNoiseForTest({
+    std::vector<MppiControl>(config.time_steps, MppiControl{0.0, -0.10})});
 
-  const auto run_with_final_winner = [&](const bool final_is_structured) {
-      MppiController controller(config);
-      controller.resetControlSequence(MppiControl{0.2, 0.0});
-      std::size_t score_calls = 0;
-      const auto result = controller.optimizeBatch(
-        MppiControl{0.2, 0.0},
-        [&](const std::vector<MppiCandidate> & candidates) {
-          const bool structured_wins = (++score_calls == 2) == final_is_structured;
-          std::vector<MppiCandidateScore> scores(
-            candidates.size(), MppiCandidateScore{false, -1.0});
-          scores[structured_wins ? 0u : 2u] = MppiCandidateScore{
-            true, 0.0, MppiBypassSide::Left, true};
-          return scores;
-        },
-        []() {return true;});
-      EXPECT_EQ(score_calls, 2u);
-      return result;
-    };
+  const auto result = controller.optimizeBatch(
+    MppiControl{0.2, 0.0},
+    [](const std::vector<MppiCandidate> & candidates) {
+      return std::vector<MppiCandidateScore>(
+        candidates.size(),
+        MppiCandidateScore{true, 0.0, MppiBypassSide::Right, true});
+    },
+    []() {return true;});
 
-  const auto random_final = run_with_final_winner(false);
-  ASSERT_TRUE(random_final.has_valid_control);
-  EXPECT_DOUBLE_EQ(random_final.structured_weight_mass, 0.0);
-  EXPECT_EQ(random_final.structured_phase_step, 0u);
-
-  const auto structured_final = run_with_final_winner(true);
-  ASSERT_TRUE(structured_final.has_valid_control);
-  EXPECT_DOUBLE_EQ(structured_final.structured_weight_mass, 1.0);
-  EXPECT_EQ(structured_final.structured_phase_step, 1u);
+  ASSERT_TRUE(result.has_valid_control);
+  EXPECT_DOUBLE_EQ(result.structured_weight_mass, 0.0);
+  EXPECT_LT(result.command.wz, 0.0);
+  EXPECT_EQ(result.structured_phase_step, 1u);
 }
 
 TEST(MppiControllerTest, InactiveRebuildDiscardsStructuredMassWithoutLeavingStaleDiagnostic)
@@ -934,13 +893,13 @@ TEST(MppiControllerTest, InactiveRebuildDiscardsStructuredMassWithoutLeavingStal
     [](const std::vector<MppiCandidate> & candidates) {
       std::vector<MppiCandidateScore> scores(
         candidates.size(), MppiCandidateScore{false, -1.0});
-      scores[2] = MppiCandidateScore{true, 0.0, MppiBypassSide::Left, true};
+      scores[0] = MppiCandidateScore{true, 0.0, MppiBypassSide::Left, true};
       return scores;
     },
     []() {return true;});
   ASSERT_TRUE(latched.has_valid_control);
   ASSERT_EQ(latched.selected_bypass_side, MppiBypassSide::Left);
-  ASSERT_EQ(latched.structured_phase_step, 0u);
+  ASSERT_EQ(latched.structured_phase_step, 1u);
 
   std::size_t score_calls = 0;
   const auto inactive = controller.optimizeBatch(

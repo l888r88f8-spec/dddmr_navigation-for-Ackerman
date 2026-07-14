@@ -107,6 +107,7 @@ struct MppiResult
   std::size_t feasible_left_candidates = 0;
   std::size_t feasible_right_candidates = 0;
   std::size_t feasible_neutral_candidates = 0;
+  std::size_t phase_compatible_candidates = 0;
 };
 
 class MppiController
@@ -155,6 +156,7 @@ private:
     double neutral_weight_mass = 0.0;
     double structured_weight_mass = 0.0;
     MppiControl prefilter_command;
+    std::size_t phase_compatible_candidates = 0;
   };
 
   MppiConfig config_;
@@ -167,11 +169,18 @@ private:
   std::size_t latched_side_infeasible_cycles_ = 0;
   std::size_t structured_phase_step_ = 0;
   static constexpr std::size_t kSideSwitchConfirmCycles = 3;
+  static constexpr double kMaterialPhaseCurvatureRatio = 0.25;
 
   void normalizeConfig();
   void regenerateNoise();
   double clamp(double value, double low, double high) const;
   double ackermannWzLimit(double vx) const;
+  double expectedPhaseDirection(
+    MppiBypassSide bypass_side,
+    std::size_t structured_phase_step) const;
+  bool isPhaseCompatible(
+    const MppiControl & command,
+    double expected_direction) const;
   std::size_t activeStructuredCandidateCount(MppiBypassSide bypass_side) const;
   MppiControl constrainControl(
     const MppiControl & previous,
@@ -194,6 +203,7 @@ private:
     const std::vector<bool> & collision_free,
     const std::vector<bool> & valid_structured,
     bool select_directional_mode,
+    std::size_t structured_phase_step,
     MppiBypassSide & bypass_side,
     std::size_t & side_infeasible_cycles);
   void smoothControlSequence(const MppiControl & measured_speed);
