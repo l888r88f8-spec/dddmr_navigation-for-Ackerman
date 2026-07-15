@@ -88,7 +88,6 @@ struct MppiAvoidanceState
 {
   MppiBypassSide side = MppiBypassSide::Neutral;
   std::size_t side_infeasible_cycles = 0;
-  std::size_t structured_phase_step = 0;
   MppiAvoidanceStage stage = MppiAvoidanceStage::Neutral;
 };
 
@@ -127,7 +126,6 @@ struct MppiResult
   std::size_t structured_candidates = 0;
   MppiBypassSide selected_bypass_side = MppiBypassSide::Neutral;
   std::size_t side_infeasible_cycles = 0;
-  std::size_t structured_phase_step = 0;
   double best_critic_cost = std::numeric_limits<double>::infinity();
   double best_control_energy = 0.0;
   MppiBypassSide best_sample_side = MppiBypassSide::Neutral;
@@ -195,10 +193,9 @@ private:
   bool use_debug_noise_for_test_ = false;
   MppiBypassSide latched_bypass_side_ = MppiBypassSide::Neutral;
   std::size_t latched_side_infeasible_cycles_ = 0;
-  std::size_t structured_phase_step_ = 0;
   MppiAvoidanceStage avoidance_stage_ = MppiAvoidanceStage::Neutral;
   static constexpr std::size_t kSideSwitchConfirmCycles = 3;
-  static constexpr double kMaterialPhaseCurvatureRatio = 0.25;
+  static constexpr double kMaterialDirectionCurvatureRatio = 0.25;
 
   void normalizeConfig();
   void regenerateNoise();
@@ -208,10 +205,7 @@ private:
     MppiAvoidanceStage current,
     MppiBypassSide latched_side,
     const MppiDirectionalContext & context) const;
-  double expectedPhaseDirection(
-    MppiBypassSide bypass_side,
-    std::size_t structured_phase_step) const;
-  bool isPhaseCompatible(
+  bool isDirectionCompatible(
     const MppiControl & command,
     double expected_direction) const;
   std::size_t activeStructuredCandidateCount(MppiBypassSide bypass_side) const;
@@ -223,12 +217,12 @@ private:
     const MppiControl & measured_speed,
     std::size_t sample_index,
     MppiBypassSide bypass_side,
-    std::size_t structured_phase_step) const;
+    MppiAvoidanceStage avoidance_stage) const;
   SampledSequence buildStructuredSequence(
     const MppiControl & measured_speed,
     std::size_t sample_index,
     MppiBypassSide bypass_side,
-    std::size_t structured_phase_step) const;
+    MppiAvoidanceStage avoidance_stage) const;
   UpdateStatistics applySoftmaxUpdate(
     const std::vector<std::vector<MppiControl>> & valid_sequences,
     const std::vector<double> & valid_costs,
@@ -236,9 +230,10 @@ private:
     const std::vector<bool> & collision_free,
     const std::vector<bool> & valid_structured,
     bool select_directional_mode,
-    std::size_t structured_phase_step,
+    const MppiDirectionalContext & directional_context,
     MppiBypassSide & bypass_side,
-    std::size_t & side_infeasible_cycles);
+    std::size_t & side_infeasible_cycles,
+    MppiAvoidanceStage & avoidance_stage);
   void smoothControlSequence(const MppiControl & measured_speed);
   void updateControlHistory(const MppiControl & command);
   void shiftControlSequence();

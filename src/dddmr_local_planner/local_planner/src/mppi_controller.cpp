@@ -84,7 +84,6 @@ void MppiController::setConfig(const MppiConfig & config)
   control_history_.fill(MppiControl{});
   latched_bypass_side_ = MppiBypassSide::Neutral;
   latched_side_infeasible_cycles_ = 0;
-  structured_phase_step_ = 0;
   avoidance_stage_ = MppiAvoidanceStage::Neutral;
   regenerateNoise();
 }
@@ -116,7 +115,6 @@ MppiAvoidanceState MppiController::avoidanceState() const
   return MppiAvoidanceState{
     latched_bypass_side_,
     latched_side_infeasible_cycles_,
-    structured_phase_step_,
     avoidance_stage_};
 }
 
@@ -126,7 +124,6 @@ void MppiController::resetControlSequence(const MppiControl & command)
   control_history_.fill(command);
   latched_bypass_side_ = MppiBypassSide::Neutral;
   latched_side_infeasible_cycles_ = 0;
-  structured_phase_step_ = 0;
   avoidance_stage_ = MppiAvoidanceStage::Neutral;
 }
 
@@ -142,7 +139,6 @@ void MppiController::resetControlSequenceForRetry(
   {
     latched_bypass_side_ = MppiBypassSide::Neutral;
     latched_side_infeasible_cycles_ = 0;
-    structured_phase_step_ = 0;
     avoidance_stage_ = MppiAvoidanceStage::Neutral;
     return;
   }
@@ -151,13 +147,8 @@ void MppiController::resetControlSequenceForRetry(
   latched_side_infeasible_cycles_ = std::min(
     avoidance_state.side_infeasible_cycles,
     kSideSwitchConfirmCycles);
-  const std::size_t first_control_step =
-    config_.shift_control_sequence ? 1u : 0u;
-  const std::size_t controlled_steps = config_.time_steps - first_control_step;
-  structured_phase_step_ = std::min(
-    avoidance_state.structured_phase_step,
-    controlled_steps);
-  avoidance_stage_ = avoidance_state.stage;
+  avoidance_stage_ = avoidance_state.stage == MppiAvoidanceStage::Bypass ?
+    MppiAvoidanceStage::Bypass : MppiAvoidanceStage::Depart;
 }
 
 void MppiController::setDebugNoiseForTest(const std::vector<std::vector<MppiControl>> & noise)
@@ -174,7 +165,6 @@ MppiResult MppiController::optimize(
     MppiResult result;
     result.rejected_samples = config_.batch_size;
     result.optimal_sequence = control_sequence_;
-    result.structured_phase_step = structured_phase_step_;
     result.avoidance_stage = avoidance_stage_;
     return result;
   }
@@ -197,7 +187,6 @@ MppiResult MppiController::optimizeBatch(
   const ModeSelectionFunction & mode_selection_function)
 {
   MppiResult result;
-  result.structured_phase_step = structured_phase_step_;
   result.avoidance_stage = avoidance_stage_;
   if(!score_function){
     result.rejected_samples = config_.batch_size;
@@ -211,22 +200,14 @@ MppiResult MppiController::optimizeBatch(
   std::size_t provisional_infeasible_cycles = latched_side_infeasible_cycles_;
   MppiBypassSide settled_bypass_side = provisional_bypass_side;
   std::size_t settled_infeasible_cycles = provisional_infeasible_cycles;
+  MppiAvoidanceStage provisional_avoidance_stage = avoidance_stage_;
+  MppiAvoidanceStage settled_avoidance_stage = provisional_avoidance_stage;
   bool side_state_settled = false;
   bool directional_mode_selected = false;
   bool select_directional_mode = false;
   MppiDirectionalContext directional_context;
   MppiBypassSide generation_bypass_side = entry_bypass_side;
-  std::size_t generation_structured_phase_step = structured_phase_step_;
-  const auto reset_structured_phase_for_side_change =
-    [&](const MppiBypassSide committed_bypass_side) {
-      if(entry_bypass_side != MppiBypassSide::Neutral &&
-        committed_bypass_side != MppiBypassSide::Neutral &&
-        entry_bypass_side != committed_bypass_side)
-      {
-        structured_phase_step_ = 0;
-        avoidance_stage_ = MppiAvoidanceStage::Depart;
-      }
-    };
+  MppiAvoidanceStage generation_avoidance_stage = avoidance_stage_;
   result.structured_candidates = use_debug_noise_for_test_ ? 0 :
     activeStructuredCandidateCount(generation_bypass_side);
 
@@ -265,7 +246,7 @@ MppiResult MppiController::optimizeBatch(
               measured_speed,
               sample,
               generation_bypass_side,
-              generation_structured_phase_step));
+              generation_avoidance_stage));
           candidates.push_back(MppiCandidate{sampled_sequences.back().controls});
         }
       };
@@ -278,13 +259,11 @@ MppiResult MppiController::optimizeBatch(
       select_directional_mode = directional_context.path_blocked;
       directional_mode_selected = true;
       if(!select_directional_mode){
-        structured_phase_step_ = 0;
         avoidance_stage_ = MppiAvoidanceStage::Neutral;
-        result.structured_phase_step = 0;
         result.avoidance_stage = MppiAvoidanceStage::Neutral;
         if(generation_bypass_side != MppiBypassSide::Neutral){
           generation_bypass_side = MppiBypassSide::Neutral;
-          generation_structured_phase_step = 0;
+          generation_avoidance_stage = MppiAvoidanceStage::Neutral;
           result.structured_candidates = use_debug_noise_for_test_ ? 0 :
             activeStructuredCandidateCount(generation_bypass_side);
           generate_candidates();
@@ -351,12 +330,14 @@ MppiResult MppiController::optimizeBatch(
       collision_free,
       valid_structured,
       select_directional_mode,
-      generation_structured_phase_step,
+      directional_context,
       provisional_bypass_side,
-      provisional_infeasible_cycles);
+      provisional_infeasible_cycles,
+      provisional_avoidance_stage);
     if(side_state_was_settled){
       provisional_bypass_side = settled_bypass_side;
       provisional_infeasible_cycles = settled_infeasible_cycles;
+      provisional_avoidance_stage = settled_avoidance_stage;
     }
     else if(provisional_bypass_side != side_before_update ||
       provisional_infeasible_cycles != infeasible_cycles_before_update)
@@ -364,6 +345,7 @@ MppiResult MppiController::optimizeBatch(
       side_state_settled = true;
       settled_bypass_side = provisional_bypass_side;
       settled_infeasible_cycles = provisional_infeasible_cycles;
+      settled_avoidance_stage = provisional_avoidance_stage;
     }
     result.effective_sample_size = statistics.effective_sample_size;
     result.positive_weight_mass = statistics.positive_weight_mass;
@@ -374,17 +356,14 @@ MppiResult MppiController::optimizeBatch(
     result.phase_compatible_candidates = statistics.phase_compatible_candidates;
     result.selected_bypass_side = provisional_bypass_side;
     result.side_infeasible_cycles = provisional_infeasible_cycles;
-    avoidance_stage_ = advanceAvoidanceStage(
-      avoidance_stage_, provisional_bypass_side, directional_context);
-    result.avoidance_stage = avoidance_stage_;
+    result.avoidance_stage = provisional_avoidance_stage;
     if(!statistics.valid){
       control_sequence_ = entry_control_sequence;
       latched_bypass_side_ = provisional_bypass_side;
       latched_side_infeasible_cycles_ = provisional_infeasible_cycles;
-      reset_structured_phase_for_side_change(latched_bypass_side_);
+      avoidance_stage_ = provisional_avoidance_stage;
       result.has_valid_control = false;
       result.optimal_sequence = control_sequence_;
-      result.structured_phase_step = structured_phase_step_;
       result.avoidance_stage = avoidance_stage_;
       return result;
     }
@@ -392,6 +371,7 @@ MppiResult MppiController::optimizeBatch(
 
   latched_bypass_side_ = provisional_bypass_side;
   latched_side_infeasible_cycles_ = provisional_infeasible_cycles;
+  avoidance_stage_ = provisional_avoidance_stage;
   result.has_valid_control = true;
   smoothControlSequence(measured_speed);
   result.optimal_sequence = control_sequence_;
@@ -400,25 +380,6 @@ MppiResult MppiController::optimizeBatch(
   result.command = control_sequence_[command_index];
   updateControlHistory(result.command);
   shiftControlSequence();
-  const bool side_switched_this_batch =
-    entry_bypass_side != MppiBypassSide::Neutral &&
-    latched_bypass_side_ != MppiBypassSide::Neutral &&
-    entry_bypass_side != latched_bypass_side_;
-  if(select_directional_mode && latched_bypass_side_ != MppiBypassSide::Neutral){
-    reset_structured_phase_for_side_change(latched_bypass_side_);
-    const double expected_direction =
-      expectedPhaseDirection(latched_bypass_side_, structured_phase_step_);
-    if(!side_switched_this_batch && expected_direction != 0.0 &&
-      isPhaseCompatible(result.command, expected_direction))
-    {
-      const std::size_t first_control_step = config_.shift_control_sequence ? 1u : 0u;
-      const std::size_t controlled_steps = config_.time_steps - first_control_step;
-      if(structured_phase_step_ < controlled_steps){
-        ++structured_phase_step_;
-      }
-    }
-  }
-  result.structured_phase_step = structured_phase_step_;
   result.avoidance_stage = avoidance_stage_;
   return result;
 }
@@ -494,27 +455,7 @@ MppiAvoidanceStage MppiController::advanceAvoidanceStage(
   return MppiAvoidanceStage::Depart;
 }
 
-double MppiController::expectedPhaseDirection(
-  const MppiBypassSide bypass_side,
-  const std::size_t structured_phase_step) const
-{
-  if(bypass_side == MppiBypassSide::Neutral){
-    return 0.0;
-  }
-
-  const std::size_t first_control_step =
-    config_.shift_control_sequence ? 1u : 0u;
-  const std::size_t controlled_steps = config_.time_steps - first_control_step;
-  if(structured_phase_step >= controlled_steps){
-    return 0.0;
-  }
-
-  const double side_direction = static_cast<double>(bypass_side);
-  return structured_phase_step < controlled_steps / 2 ?
-    side_direction : -side_direction;
-}
-
-bool MppiController::isPhaseCompatible(
+bool MppiController::isDirectionCompatible(
   const MppiControl & command,
   const double expected_direction) const
 {
@@ -525,7 +466,7 @@ bool MppiController::isPhaseCompatible(
   const double first_command_dt = config_.shift_control_sequence ?
     config_.model_dt : config_.controller_period;
   const double reachable_angular_change = config_.az_max * first_command_dt;
-  const double material_angular_velocity = kMaterialPhaseCurvatureRatio *
+  const double material_angular_velocity = kMaterialDirectionCurvatureRatio *
     std::min(angular_limit, reachable_angular_change);
   return material_angular_velocity > 1e-9 &&
     expected_direction * command.wz >=
@@ -565,13 +506,13 @@ MppiController::SampledSequence MppiController::buildNoisedSequence(
   const MppiControl & measured_speed,
   const std::size_t sample_index,
   const MppiBypassSide bypass_side,
-  const std::size_t structured_phase_step) const
+  const MppiAvoidanceStage avoidance_stage) const
 {
   if(!use_debug_noise_for_test_ &&
     sample_index < activeStructuredCandidateCount(bypass_side))
   {
     return buildStructuredSequence(
-      measured_speed, sample_index, bypass_side, structured_phase_step);
+      measured_speed, sample_index, bypass_side, avoidance_stage);
   }
 
   SampledSequence sampled_sequence;
@@ -621,7 +562,7 @@ MppiController::SampledSequence MppiController::buildStructuredSequence(
   const MppiControl & measured_speed,
   const std::size_t sample_index,
   const MppiBypassSide bypass_side,
-  const std::size_t structured_phase_step) const
+  const MppiAvoidanceStage avoidance_stage) const
 {
   SampledSequence sampled_sequence;
   sampled_sequence.structured = true;
@@ -643,7 +584,6 @@ MppiController::SampledSequence MppiController::buildStructuredSequence(
     (sample_index % 2 == 0 ? 0.55 : 0.90) :
     (template_index % 2 == 0 ? 0.55 : 0.90);
   const bool s_curve = has_latched_side || template_index >= 2;
-  const std::size_t controlled_steps = config_.time_steps - first_control_step;
 
   for(std::size_t step = first_control_step; step < config_.time_steps; ++step){
     const double dt = step == 0 ? config_.controller_period : config_.model_dt;
@@ -653,19 +593,17 @@ MppiController::SampledSequence MppiController::buildStructuredSequence(
       previous,
       MppiControl{requested_vx, previous.wz},
       dt);
-    const std::size_t phase_step = step - first_control_step;
-    std::size_t absolute_phase = phase_step;
-    if(has_latched_side){
-      absolute_phase = structured_phase_step >= controlled_steps ||
-        phase_step >= controlled_steps - structured_phase_step ?
-        controlled_steps : structured_phase_step + phase_step;
-    }
     double phase_direction = direction;
-    if(s_curve && absolute_phase >= controlled_steps / 2){
-      phase_direction = -direction;
+    if(has_latched_side){
+      if(avoidance_stage == MppiAvoidanceStage::Bypass){
+        phase_direction = sample_index % 2 == 0 ? -direction : 0.0;
+      }
     }
-    if(has_latched_side && absolute_phase >= controlled_steps){
-      phase_direction = 0.0;
+    else if(s_curve &&
+      step - first_control_step >=
+      (config_.time_steps - first_control_step) / 2)
+    {
+      phase_direction = -direction;
     }
     const MppiControl requested{
       requested_vx,
@@ -683,14 +621,16 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
   const std::vector<bool> & collision_free,
   const std::vector<bool> & valid_structured,
   const bool select_directional_mode,
-  const std::size_t structured_phase_step,
+  const MppiDirectionalContext & directional_context,
   MppiBypassSide & bypass_side,
-  std::size_t & side_infeasible_cycles)
+  std::size_t & side_infeasible_cycles,
+  MppiAvoidanceStage & avoidance_stage)
 {
   UpdateStatistics statistics;
   if(!select_directional_mode){
     bypass_side = MppiBypassSide::Neutral;
     side_infeasible_cycles = 0;
+    avoidance_stage = MppiAvoidanceStage::Neutral;
   }
 
   if(valid_sequences.empty() || valid_sequences.size() != valid_costs.size() ||
@@ -825,25 +765,21 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
       side_infeasible_cycles = 0;
     }
 
-    const std::size_t selected_side_phase_step =
-      side_before_selection != MppiBypassSide::Neutral &&
-      side_before_selection != bypass_side ? 0u : structured_phase_step;
     const bool side_switched =
       side_before_selection != MppiBypassSide::Neutral &&
       side_before_selection != bypass_side;
-    const double expected_direction =
-      expectedPhaseDirection(bypass_side, selected_side_phase_step);
-    const bool phase_commitment_active =
-      config_.structured_candidate_count > 0 &&
-      expected_direction != 0.0 && !side_switched;
+    avoidance_stage = side_switched ? MppiAvoidanceStage::Depart :
+      advanceAvoidanceStage(avoidance_stage, bypass_side, directional_context);
+    const double outward_direction = static_cast<double>(bypass_side);
     for(std::size_t sample = 0; sample < valid_sequences.size(); ++sample){
       const bool physical_side_selected = collision_free[sample] &&
         valid_sides[sample] == bypass_side;
-      const bool phase_compatible = physical_side_selected &&
-        isPhaseCompatible(valid_sequences[sample][command_index], expected_direction);
+      const bool direction_compatible = physical_side_selected &&
+        isDirectionCompatible(
+          valid_sequences[sample][command_index], outward_direction);
       selected[sample] = physical_side_selected &&
-        (!phase_commitment_active || phase_compatible);
-      if(phase_compatible){
+        (avoidance_stage != MppiAvoidanceStage::Depart || direction_compatible);
+      if(direction_compatible){
         ++statistics.phase_compatible_candidates;
       }
     }

@@ -2668,7 +2668,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     mppi_clearance_candidate_checks);
   RCLCPP_INFO_THROTTLE(
     this->get_logger().get_child(name_), *clock_, 2000,
-    "MPPI debug: controller=%s, obstacle_points=%zu, scoring_ms=%.2f, trajectories=%zu, trajectory_points=%zu, %s, finite_clearances=%zu, min_clearance=%.3f, path_occupancy=%.3f, collision_trajectories=%zu, valid_scores=%zu, critic_fail=%d, rejected=%zu, best_cost=%.3f, best_vx=%.3f, best_wz=%.3f, prefilter_wz=%.3f, cmd_vx=%.3f, cmd_wz=%.3f, effective_samples=%.2f, weight_pos=%.3f, weight_neg=%.3f, weight_neutral=%.3f, structured=%zu, structured_weight=%.3f, selected_side=%s, best_side=%s, feasible_left=%zu, feasible_right=%zu, feasible_neutral=%zu, phase_compatible=%zu, side_failures=%zu, structured_phase=%zu, best_sample=%zu, best_critic_cost=%.3f, best_energy=%.3f, optimal_valid=%d, attempts=%zu, allowed_max_speed=%.3f",
+    "MPPI debug: controller=%s, obstacle_points=%zu, scoring_ms=%.2f, trajectories=%zu, trajectory_points=%zu, %s, finite_clearances=%zu, min_clearance=%.3f, path_occupancy=%.3f, collision_trajectories=%zu, valid_scores=%zu, critic_fail=%d, rejected=%zu, best_cost=%.3f, best_vx=%.3f, best_wz=%.3f, prefilter_wz=%.3f, cmd_vx=%.3f, cmd_wz=%.3f, effective_samples=%.2f, weight_pos=%.3f, weight_neg=%.3f, weight_neutral=%.3f, structured=%zu, structured_weight=%.3f, selected_side=%s, best_side=%s, feasible_left=%zu, feasible_right=%zu, feasible_neutral=%zu, phase_compatible=%zu, side_failures=%zu, avoidance_stage=%s, best_sample=%zu, best_critic_cost=%.3f, best_energy=%.3f, optimal_valid=%d, attempts=%zu, allowed_max_speed=%.3f",
     controller_name.c_str(),
     mppi_obstacle_points,
     mppi_scoring_ms,
@@ -2701,7 +2701,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     result.feasible_neutral_candidates,
     result.phase_compatible_candidates,
     result.side_infeasible_cycles,
-    result.structured_phase_step,
+    toString(result.avoidance_stage),
     result.best_sample_index,
     result.best_critic_cost,
     result.best_control_energy,
