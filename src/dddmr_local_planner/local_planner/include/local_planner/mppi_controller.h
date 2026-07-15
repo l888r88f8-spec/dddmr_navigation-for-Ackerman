@@ -33,6 +33,7 @@ struct MppiConfig
   double vx_min = 0.05;
   double vx_max = 0.8;
   double structured_min_vx = 0.20;
+  double departure_lateral_offset = 0.42;
   double wz_max = 1.2;
   double ax_min = -0.8;
   double ax_max = 0.8;
@@ -58,11 +59,37 @@ enum class MppiBypassSide : int
 
 const char * toString(MppiBypassSide side);
 
+enum class MppiAvoidanceStage : int
+{
+  Neutral = 0,
+  Depart = 1,
+  Bypass = 2
+};
+
+const char * toString(MppiAvoidanceStage stage);
+
+struct MppiDirectionalContext
+{
+  MppiDirectionalContext() = default;
+  MppiDirectionalContext(const bool blocked)
+  : path_blocked(blocked) {}
+  MppiDirectionalContext(
+    const bool blocked,
+    const double path_offset,
+    const bool valid = true)
+  : path_blocked(blocked), signed_path_offset(path_offset), offset_valid(valid) {}
+
+  bool path_blocked = false;
+  double signed_path_offset = 0.0;
+  bool offset_valid = true;
+};
+
 struct MppiAvoidanceState
 {
   MppiBypassSide side = MppiBypassSide::Neutral;
   std::size_t side_infeasible_cycles = 0;
   std::size_t structured_phase_step = 0;
+  MppiAvoidanceStage stage = MppiAvoidanceStage::Neutral;
 };
 
 struct MppiCandidateScore
@@ -108,6 +135,7 @@ struct MppiResult
   std::size_t feasible_right_candidates = 0;
   std::size_t feasible_neutral_candidates = 0;
   std::size_t phase_compatible_candidates = 0;
+  MppiAvoidanceStage avoidance_stage = MppiAvoidanceStage::Neutral;
 };
 
 class MppiController
@@ -116,7 +144,7 @@ public:
   using ScoreFunction = std::function<MppiCandidateScore(const MppiCandidate &)>;
   using BatchScoreFunction =
     std::function<std::vector<MppiCandidateScore>(const std::vector<MppiCandidate> &)>;
-  using ModeSelectionFunction = std::function<bool()>;
+  using ModeSelectionFunction = std::function<MppiDirectionalContext()>;
 
   MppiController();
   explicit MppiController(const MppiConfig & config);
@@ -168,6 +196,7 @@ private:
   MppiBypassSide latched_bypass_side_ = MppiBypassSide::Neutral;
   std::size_t latched_side_infeasible_cycles_ = 0;
   std::size_t structured_phase_step_ = 0;
+  MppiAvoidanceStage avoidance_stage_ = MppiAvoidanceStage::Neutral;
   static constexpr std::size_t kSideSwitchConfirmCycles = 3;
   static constexpr double kMaterialPhaseCurvatureRatio = 0.25;
 

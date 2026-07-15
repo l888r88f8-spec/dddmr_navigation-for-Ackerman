@@ -20,6 +20,19 @@ const char * toString(const MppiBypassSide side)
   return "neutral";
 }
 
+const char * toString(const MppiAvoidanceStage stage)
+{
+  switch(stage){
+    case MppiAvoidanceStage::Depart:
+      return "depart";
+    case MppiAvoidanceStage::Bypass:
+      return "bypass";
+    case MppiAvoidanceStage::Neutral:
+      return "neutral";
+  }
+  return "neutral";
+}
+
 bool mppiSequenceRespectsSpeedCap(
   const std::vector<MppiControl> & controls,
   const double measured_vx,
@@ -72,6 +85,7 @@ void MppiController::setConfig(const MppiConfig & config)
   latched_bypass_side_ = MppiBypassSide::Neutral;
   latched_side_infeasible_cycles_ = 0;
   structured_phase_step_ = 0;
+  avoidance_stage_ = MppiAvoidanceStage::Neutral;
   regenerateNoise();
 }
 
@@ -102,7 +116,8 @@ MppiAvoidanceState MppiController::avoidanceState() const
   return MppiAvoidanceState{
     latched_bypass_side_,
     latched_side_infeasible_cycles_,
-    structured_phase_step_};
+    structured_phase_step_,
+    avoidance_stage_};
 }
 
 void MppiController::resetControlSequence(const MppiControl & command)
@@ -112,6 +127,7 @@ void MppiController::resetControlSequence(const MppiControl & command)
   latched_bypass_side_ = MppiBypassSide::Neutral;
   latched_side_infeasible_cycles_ = 0;
   structured_phase_step_ = 0;
+  avoidance_stage_ = MppiAvoidanceStage::Neutral;
 }
 
 void MppiController::resetControlSequenceForRetry(
@@ -127,6 +143,7 @@ void MppiController::resetControlSequenceForRetry(
     latched_bypass_side_ = MppiBypassSide::Neutral;
     latched_side_infeasible_cycles_ = 0;
     structured_phase_step_ = 0;
+    avoidance_stage_ = MppiAvoidanceStage::Neutral;
     return;
   }
 
@@ -140,6 +157,7 @@ void MppiController::resetControlSequenceForRetry(
   structured_phase_step_ = std::min(
     avoidance_state.structured_phase_step,
     controlled_steps);
+  avoidance_stage_ = avoidance_state.stage;
 }
 
 void MppiController::setDebugNoiseForTest(const std::vector<std::vector<MppiControl>> & noise)
@@ -157,6 +175,7 @@ MppiResult MppiController::optimize(
     result.rejected_samples = config_.batch_size;
     result.optimal_sequence = control_sequence_;
     result.structured_phase_step = structured_phase_step_;
+    result.avoidance_stage = avoidance_stage_;
     return result;
   }
 
@@ -179,6 +198,7 @@ MppiResult MppiController::optimizeBatch(
 {
   MppiResult result;
   result.structured_phase_step = structured_phase_step_;
+  result.avoidance_stage = avoidance_stage_;
   if(!score_function){
     result.rejected_samples = config_.batch_size;
     result.optimal_sequence = control_sequence_;
@@ -194,6 +214,7 @@ MppiResult MppiController::optimizeBatch(
   bool side_state_settled = false;
   bool directional_mode_selected = false;
   bool select_directional_mode = false;
+  MppiDirectionalContext directional_context;
   MppiBypassSide generation_bypass_side = entry_bypass_side;
   std::size_t generation_structured_phase_step = structured_phase_step_;
   const auto reset_structured_phase_for_side_change =
@@ -203,6 +224,7 @@ MppiResult MppiController::optimizeBatch(
         entry_bypass_side != committed_bypass_side)
       {
         structured_phase_step_ = 0;
+        avoidance_stage_ = MppiAvoidanceStage::Depart;
       }
     };
   result.structured_candidates = use_debug_noise_for_test_ ? 0 :
@@ -251,12 +273,15 @@ MppiResult MppiController::optimizeBatch(
     auto scores = score_function(candidates);
 
     if(!directional_mode_selected){
-      select_directional_mode =
-        mode_selection_function && mode_selection_function();
+      directional_context = mode_selection_function ?
+        mode_selection_function() : MppiDirectionalContext{};
+      select_directional_mode = directional_context.path_blocked;
       directional_mode_selected = true;
       if(!select_directional_mode){
         structured_phase_step_ = 0;
+        avoidance_stage_ = MppiAvoidanceStage::Neutral;
         result.structured_phase_step = 0;
+        result.avoidance_stage = MppiAvoidanceStage::Neutral;
         if(generation_bypass_side != MppiBypassSide::Neutral){
           generation_bypass_side = MppiBypassSide::Neutral;
           generation_structured_phase_step = 0;
@@ -349,6 +374,15 @@ MppiResult MppiController::optimizeBatch(
     result.phase_compatible_candidates = statistics.phase_compatible_candidates;
     result.selected_bypass_side = provisional_bypass_side;
     result.side_infeasible_cycles = provisional_infeasible_cycles;
+    if(!select_directional_mode ||
+      provisional_bypass_side == MppiBypassSide::Neutral)
+    {
+      avoidance_stage_ = MppiAvoidanceStage::Neutral;
+    }
+    else if(avoidance_stage_ == MppiAvoidanceStage::Neutral){
+      avoidance_stage_ = MppiAvoidanceStage::Depart;
+    }
+    result.avoidance_stage = avoidance_stage_;
     if(!statistics.valid){
       control_sequence_ = entry_control_sequence;
       latched_bypass_side_ = provisional_bypass_side;
@@ -357,6 +391,7 @@ MppiResult MppiController::optimizeBatch(
       result.has_valid_control = false;
       result.optimal_sequence = control_sequence_;
       result.structured_phase_step = structured_phase_step_;
+      result.avoidance_stage = avoidance_stage_;
       return result;
     }
   }
@@ -390,6 +425,7 @@ MppiResult MppiController::optimizeBatch(
     }
   }
   result.structured_phase_step = structured_phase_step_;
+  result.avoidance_stage = avoidance_stage_;
   return result;
 }
 
@@ -410,6 +446,7 @@ void MppiController::normalizeConfig()
   config_.vx_max = std::max(config_.vx_min, config_.vx_max);
   config_.structured_min_vx = clamp(
     config_.structured_min_vx, config_.vx_min, config_.vx_max);
+  config_.departure_lateral_offset = std::max(0.0, config_.departure_lateral_offset);
   config_.wz_max = std::max(0.0, config_.wz_max);
   config_.ax_max = std::fabs(config_.ax_max);
   config_.ax_min = config_.ax_min > 0.0 ? -config_.ax_min : config_.ax_min;

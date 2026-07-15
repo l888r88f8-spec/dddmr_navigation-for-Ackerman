@@ -10,10 +10,12 @@
 using local_planner::MppiCandidate;
 using local_planner::MppiCandidateScore;
 using local_planner::MppiAvoidanceState;
+using local_planner::MppiAvoidanceStage;
 using local_planner::MppiBypassSide;
 using local_planner::MppiConfig;
 using local_planner::MppiControl;
 using local_planner::MppiController;
+using local_planner::MppiDirectionalContext;
 using local_planner::MppiPathPoint;
 using local_planner::MppiScoredTrajectory;
 using local_planner::mppiSequenceRespectsSpeedCap;
@@ -234,6 +236,26 @@ void expectLatchedStructuredSCurveCompletes(
 }
 
 }  // namespace
+
+TEST(MppiControllerTest, BlockedPathBelowOffsetReportsDepartStage)
+{
+  auto config = makeBypassLatchConfig();
+  config.departure_lateral_offset = 0.42;
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.2, 0.0});
+  controller.setDebugNoiseForTest(makeAngularNoises(config, 0.2, -0.2));
+
+  const auto result = controller.optimizeBatch(
+    MppiControl{0.2, 0.0},
+    [](const std::vector<MppiCandidate> &) {
+      return makeSideScores(0.0, true, 100.0, false);
+    },
+    []() {return MppiDirectionalContext{true, 0.05};});
+
+  ASSERT_TRUE(result.has_valid_control);
+  EXPECT_EQ(result.selected_bypass_side, MppiBypassSide::Left);
+  EXPECT_EQ(result.avoidance_stage, MppiAvoidanceStage::Depart);
+}
 
 TEST(MppiControllerTest, BypassSideDiagnosticStringsAreStable)
 {
