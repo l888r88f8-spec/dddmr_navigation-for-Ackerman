@@ -1285,6 +1285,10 @@ MppiCriticData Local_Planner::buildMppiCriticData(
   data.robot_x = trans_gbl2b_.transform.translation.x;
   data.robot_y = trans_gbl2b_.transform.translation.y;
   data.robot_yaw = getRobotYaw();
+  const auto robot_path_projection = projectPointOntoMppiPath(
+    data.path, data.robot_x, data.robot_y);
+  data.robot_path_offset = robot_path_projection.signed_offset;
+  data.robot_path_offset_valid = robot_path_projection.valid;
   data.vx_min = mppi_controller_.config().vx_min;
   data.vx_max = mppi_controller_.config().vx_max;
   data.min_turning_radius =
@@ -2535,6 +2539,8 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
   double mppi_min_clearance = std::numeric_limits<double>::infinity();
   double mppi_path_occupancy_ratio = 0.0;
   std::size_t mppi_blocked_path_points = 0;
+  double mppi_robot_path_offset = 0.0;
+  bool mppi_robot_path_offset_valid = false;
 
   MppiResult result;
   auto score_function =
@@ -2552,6 +2558,8 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
       mppi_min_clearance = std::numeric_limits<double>::infinity();
       mppi_path_occupancy_ratio = critic_data.path_obstacle_occupancy_ratio;
       mppi_blocked_path_points = critic_data.blocked_path_points;
+      mppi_robot_path_offset = critic_data.robot_path_offset;
+      mppi_robot_path_offset_valid = critic_data.robot_path_offset_valid;
       mppi_collision_node_checks += critic_data.obstacle_collision_node_checks;
       mppi_collision_candidate_checks += critic_data.obstacle_collision_point_checks;
       mppi_clearance_node_checks += critic_data.obstacle_clearance_node_checks;
@@ -2621,7 +2629,12 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     result = mppi_controller_.optimizeBatch(
       measured_speed,
       score_function,
-      [&]() {return mppi_blocked_path_points >= 3;});
+      [&]() {
+        return MppiDirectionalContext{
+          mppi_blocked_path_points >= 3,
+          mppi_robot_path_offset,
+          mppi_robot_path_offset_valid};
+      });
     if(!result.has_valid_control){
       break;
     }

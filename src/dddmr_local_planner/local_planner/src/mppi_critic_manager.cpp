@@ -53,6 +53,51 @@ MppiBypassSideClassifier::MppiBypassSideClassifier(const std::vector<MppiPathPoi
   path_valid_ = !segments_.empty();
 }
 
+MppiPathProjection MppiBypassSideClassifier::projectPoint(
+  const double x,
+  const double y) const
+{
+  if(!path_valid_ || !std::isfinite(x) || !std::isfinite(y)){
+    return MppiPathProjection{};
+  }
+
+  double closest_distance_squared = std::numeric_limits<double>::infinity();
+  double closest_signed_offset = 0.0;
+  for(const auto & segment : segments_){
+    const double projection = std::clamp(
+      ((x - segment.start_x) * segment.dx +
+      (y - segment.start_y) * segment.dy) *
+      segment.inverse_length * segment.inverse_length,
+      0.0,
+      1.0);
+    const double projected_x = segment.start_x + projection * segment.dx;
+    const double projected_y = segment.start_y + projection * segment.dy;
+    const double offset_x = x - projected_x;
+    const double offset_y = y - projected_y;
+    const double distance_squared = offset_x * offset_x + offset_y * offset_y;
+    const double signed_offset =
+      (segment.dx * offset_y - segment.dy * offset_x) * segment.inverse_length;
+
+    if(!std::isfinite(distance_squared) || !std::isfinite(signed_offset)){
+      return MppiPathProjection{};
+    }
+    if(distance_squared < closest_distance_squared){
+      closest_distance_squared = distance_squared;
+      closest_signed_offset = signed_offset;
+    }
+  }
+
+  return MppiPathProjection{closest_signed_offset, true};
+}
+
+MppiPathProjection projectPointOntoMppiPath(
+  const std::vector<MppiPathPoint> & path,
+  const double x,
+  const double y)
+{
+  return MppiBypassSideClassifier(path).projectPoint(x, y);
+}
+
 MppiBypassSide MppiBypassSideClassifier::classify(
   const MppiScoredTrajectory & trajectory) const
 {
@@ -65,39 +110,11 @@ MppiBypassSide MppiBypassSideClassifier::classify(
   double peak_offset = 0.0;
   double terminal_offset = 0.0;
   for(const auto & trajectory_point : trajectory.points){
-    if(!std::isfinite(trajectory_point.x) || !std::isfinite(trajectory_point.y)){
+    const auto projection = projectPoint(trajectory_point.x, trajectory_point.y);
+    if(!projection.valid){
       return MppiBypassSide::Neutral;
     }
-
-    double closest_distance_squared = std::numeric_limits<double>::infinity();
-    double closest_signed_offset = 0.0;
-    for(const auto & segment : segments_){
-      const double projection = std::clamp(
-        ((trajectory_point.x - segment.start_x) * segment.dx +
-        (trajectory_point.y - segment.start_y) * segment.dy) *
-        segment.inverse_length * segment.inverse_length,
-        0.0,
-        1.0);
-      const double projected_x = segment.start_x + projection * segment.dx;
-      const double projected_y = segment.start_y + projection * segment.dy;
-      const double offset_x = trajectory_point.x - projected_x;
-      const double offset_y = trajectory_point.y - projected_y;
-      const double distance_squared = offset_x * offset_x + offset_y * offset_y;
-      const double signed_offset =
-        (segment.dx * offset_y - segment.dy * offset_x) * segment.inverse_length;
-
-      if(!std::isfinite(distance_squared) || !std::isfinite(signed_offset)){
-        return MppiBypassSide::Neutral;
-      }
-      if(distance_squared < closest_distance_squared){
-        closest_distance_squared = distance_squared;
-        closest_signed_offset = signed_offset;
-      }
-    }
-
-    if(!std::isfinite(closest_signed_offset)){
-      return MppiBypassSide::Neutral;
-    }
+    const double closest_signed_offset = projection.signed_offset;
     if(std::fabs(closest_signed_offset) > std::fabs(peak_offset)){
       peak_offset = closest_signed_offset;
     }

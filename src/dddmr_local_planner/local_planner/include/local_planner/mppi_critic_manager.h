@@ -31,6 +31,12 @@ struct MppiPathPoint
   bool obstacle_free = true;
 };
 
+struct MppiPathProjection
+{
+  double signed_offset = 0.0;
+  bool valid = false;
+};
+
 struct MppiScoredTrajectory
 {
   std::vector<MppiControl> controls;
@@ -42,6 +48,7 @@ class MppiBypassSideClassifier
 public:
   explicit MppiBypassSideClassifier(const std::vector<MppiPathPoint> & path);
 
+  MppiPathProjection projectPoint(double x, double y) const;
   MppiBypassSide classify(const MppiScoredTrajectory & trajectory) const;
 
 private:
@@ -57,6 +64,11 @@ private:
   bool path_valid_ = false;
   std::vector<PathSegment> segments_;
 };
+
+MppiPathProjection projectPointOntoMppiPath(
+  const std::vector<MppiPathPoint> & path,
+  double x,
+  double y);
 
 bool isMppiTrajectoryCollisionFree(const MppiScoredTrajectory & trajectory);
 MppiBypassSide classifyMppiBypassSide(
@@ -163,6 +175,8 @@ struct MppiCriticData
   double robot_x = 0.0;
   double robot_y = 0.0;
   double robot_yaw = 0.0;
+  double robot_path_offset = 0.0;
+  bool robot_path_offset_valid = false;
   double vx_min = 0.0;
   double vx_max = 0.0;
   double min_turning_radius = 0.0;

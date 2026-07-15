@@ -32,8 +32,10 @@ using local_planner::MppiCriticData;
 using local_planner::MppiCriticManager;
 using local_planner::MppiCriticResult;
 using local_planner::MppiPathPoint;
+using local_planner::MppiPathProjection;
 using local_planner::MppiScoredTrajectory;
 using local_planner::MppiTrajectoryPoint;
+using local_planner::projectPointOntoMppiPath;
 
 namespace
 {
@@ -359,6 +361,49 @@ TEST(MppiCriticManagerTest, ClassifierRejectsDegenerateAndNonfiniteInputs)
     classifyMppiBypassSide(MppiScoredTrajectory{}, valid_path), MppiBypassSide::Neutral);
   EXPECT_EQ(
     classifyMppiBypassSide(nonfinite_trajectory, valid_path), MppiBypassSide::Neutral);
+}
+
+TEST(MppiCriticManagerTest, ProjectsPointOntoStraightPathWithSignedOffset)
+{
+  const std::vector<MppiPathPoint> path = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{1.0, 0.0, 0.0}};
+
+  const MppiPathProjection left = projectPointOntoMppiPath(path, 0.5, 0.4);
+  const MppiPathProjection right = projectPointOntoMppiPath(path, 0.5, -0.3);
+
+  ASSERT_TRUE(left.valid);
+  EXPECT_DOUBLE_EQ(left.signed_offset, 0.4);
+  ASSERT_TRUE(right.valid);
+  EXPECT_DOUBLE_EQ(right.signed_offset, -0.3);
+}
+
+TEST(MppiCriticManagerTest, PathProjectionRejectsDegeneratePath)
+{
+  const std::vector<MppiPathPoint> single_point = {
+    MppiPathPoint{0.0, 0.0, 0.0}};
+  const std::vector<MppiPathPoint> zero_length_segments = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{0.0, 0.0, 0.0}};
+
+  EXPECT_FALSE(projectPointOntoMppiPath(single_point, 0.0, 0.2).valid);
+  EXPECT_FALSE(projectPointOntoMppiPath(zero_length_segments, 0.0, 0.2).valid);
+}
+
+TEST(MppiCriticManagerTest, PathProjectionRejectsNonfiniteInput)
+{
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const std::vector<MppiPathPoint> valid_path = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{1.0, 0.0, 0.0}};
+  const std::vector<MppiPathPoint> nonfinite_path = {
+    MppiPathPoint{0.0, 0.0, 0.0},
+    MppiPathPoint{1.0, nan, 0.0}};
+
+  EXPECT_FALSE(projectPointOntoMppiPath(nonfinite_path, 0.5, 0.2).valid);
+  EXPECT_FALSE(projectPointOntoMppiPath(valid_path, nan, 0.2).valid);
+  EXPECT_FALSE(projectPointOntoMppiPath(valid_path, 0.5, nan).valid);
 }
 
 TEST(MppiCriticManagerTest, ObstaclesCriticAddsCollisionCostWithoutRejectingWholeBatch)
