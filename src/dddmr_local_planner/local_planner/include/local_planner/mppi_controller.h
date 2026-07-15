@@ -204,6 +204,10 @@ private:
   void regenerateNoise();
   double clamp(double value, double low, double high) const;
   double ackermannWzLimit(double vx) const;
+  MppiAvoidanceStage advanceAvoidanceStage(
+    MppiAvoidanceStage current,
+    MppiBypassSide latched_side,
+    const MppiDirectionalContext & context) const;
   double expectedPhaseDirection(
     MppiBypassSide bypass_side,
     std::size_t structured_phase_step) const;

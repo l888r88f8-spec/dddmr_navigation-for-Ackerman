@@ -374,14 +374,8 @@ MppiResult MppiController::optimizeBatch(
     result.phase_compatible_candidates = statistics.phase_compatible_candidates;
     result.selected_bypass_side = provisional_bypass_side;
     result.side_infeasible_cycles = provisional_infeasible_cycles;
-    if(!select_directional_mode ||
-      provisional_bypass_side == MppiBypassSide::Neutral)
-    {
-      avoidance_stage_ = MppiAvoidanceStage::Neutral;
-    }
-    else if(avoidance_stage_ == MppiAvoidanceStage::Neutral){
-      avoidance_stage_ = MppiAvoidanceStage::Depart;
-    }
+    avoidance_stage_ = advanceAvoidanceStage(
+      avoidance_stage_, provisional_bypass_side, directional_context);
     result.avoidance_stage = avoidance_stage_;
     if(!statistics.valid){
       control_sequence_ = entry_control_sequence;
@@ -478,6 +472,26 @@ double MppiController::ackermannWzLimit(const double vx) const
 {
   const double steering_limit = std::fabs(vx) * std::tan(config_.max_steer) / config_.wheelbase;
   return std::min(config_.wz_max, steering_limit);
+}
+
+MppiAvoidanceStage MppiController::advanceAvoidanceStage(
+  const MppiAvoidanceStage current,
+  const MppiBypassSide latched_side,
+  const MppiDirectionalContext & context) const
+{
+  if(!context.path_blocked || latched_side == MppiBypassSide::Neutral){
+    return MppiAvoidanceStage::Neutral;
+  }
+  if(current == MppiAvoidanceStage::Bypass){
+    return MppiAvoidanceStage::Bypass;
+  }
+  const double side = static_cast<double>(latched_side);
+  if(context.offset_valid &&
+    side * context.signed_path_offset >= config_.departure_lateral_offset)
+  {
+    return MppiAvoidanceStage::Bypass;
+  }
+  return MppiAvoidanceStage::Depart;
 }
 
 double MppiController::expectedPhaseDirection(

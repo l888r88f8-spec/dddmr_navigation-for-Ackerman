@@ -257,6 +257,93 @@ TEST(MppiControllerTest, BlockedPathBelowOffsetReportsDepartStage)
   EXPECT_EQ(result.avoidance_stage, MppiAvoidanceStage::Depart);
 }
 
+TEST(MppiControllerTest, CrossingDepartureOffsetPromotesToBypass)
+{
+  auto config = makeBypassLatchConfig();
+  config.departure_lateral_offset = 0.42;
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.2, 0.0});
+  controller.setDebugNoiseForTest(makeAngularNoises(config, 0.2, -0.2));
+  const auto score_left = [](const std::vector<MppiCandidate> &) {
+      return makeSideScores(0.0, true, 100.0, false);
+    };
+
+  const auto depart = controller.optimizeBatch(
+    MppiControl{0.2, 0.0}, score_left,
+    []() {return MppiDirectionalContext{true, 0.10};});
+  ASSERT_TRUE(depart.has_valid_control);
+  ASSERT_EQ(depart.avoidance_stage, MppiAvoidanceStage::Depart);
+
+  const auto bypass = controller.optimizeBatch(
+    MppiControl{0.2, 0.0}, score_left,
+    []() {return MppiDirectionalContext{true, 0.45};});
+  ASSERT_TRUE(bypass.has_valid_control);
+  EXPECT_EQ(bypass.selected_bypass_side, MppiBypassSide::Left);
+  EXPECT_EQ(bypass.avoidance_stage, MppiAvoidanceStage::Bypass);
+}
+
+TEST(MppiControllerTest, WrongSignOffsetCannotCompleteDeparture)
+{
+  auto config = makeBypassLatchConfig();
+  config.departure_lateral_offset = 0.42;
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.2, 0.0});
+  controller.setDebugNoiseForTest(makeAngularNoises(config, 0.2, -0.2));
+
+  const auto result = controller.optimizeBatch(
+    MppiControl{0.2, 0.0},
+    [](const std::vector<MppiCandidate> &) {
+      return makeSideScores(0.0, true, 100.0, false);
+    },
+    []() {return MppiDirectionalContext{true, -0.90};});
+
+  ASSERT_TRUE(result.has_valid_control);
+  EXPECT_EQ(result.selected_bypass_side, MppiBypassSide::Left);
+  EXPECT_EQ(result.avoidance_stage, MppiAvoidanceStage::Depart);
+}
+
+TEST(MppiControllerTest, BypassDoesNotFallBackWhileBlocked)
+{
+  auto config = makeBypassLatchConfig();
+  config.departure_lateral_offset = 0.42;
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.2, 0.0});
+  controller.setDebugNoiseForTest(makeAngularNoises(config, 0.2, -0.2));
+  const auto score_left = [](const std::vector<MppiCandidate> &) {
+      return makeSideScores(0.0, true, 100.0, false);
+    };
+
+  ASSERT_EQ(controller.optimizeBatch(
+      MppiControl{0.2, 0.0}, score_left,
+      []() {return MppiDirectionalContext{true, 0.45};})
+    .avoidance_stage, MppiAvoidanceStage::Bypass);
+
+  const auto dipped = controller.optimizeBatch(
+    MppiControl{0.2, 0.0}, score_left,
+    []() {return MppiDirectionalContext{true, 0.05};});
+  ASSERT_TRUE(dipped.has_valid_control);
+  EXPECT_EQ(dipped.avoidance_stage, MppiAvoidanceStage::Bypass);
+}
+
+TEST(MppiControllerTest, InvalidPathOffsetHoldsDepart)
+{
+  auto config = makeBypassLatchConfig();
+  config.departure_lateral_offset = 0.42;
+  MppiController controller(config);
+  controller.resetControlSequence(MppiControl{0.2, 0.0});
+  controller.setDebugNoiseForTest(makeAngularNoises(config, 0.2, -0.2));
+
+  const auto result = controller.optimizeBatch(
+    MppiControl{0.2, 0.0},
+    [](const std::vector<MppiCandidate> &) {
+      return makeSideScores(0.0, true, 100.0, false);
+    },
+    []() {return MppiDirectionalContext{true, 100.0, false};});
+
+  ASSERT_TRUE(result.has_valid_control);
+  EXPECT_EQ(result.avoidance_stage, MppiAvoidanceStage::Depart);
+}
+
 TEST(MppiControllerTest, BypassSideDiagnosticStringsAreStable)
 {
   EXPECT_STREQ(toString(MppiBypassSide::Left), "left");
