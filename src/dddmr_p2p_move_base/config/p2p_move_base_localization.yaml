@@ -65,11 +65,8 @@ global_plan_manager:
 
 global_planner:
   ros__parameters:
-    # 全局规划器公共参数
     enable_detail_log: true                                      # 是否开启详细日志
     # use_pre_graph: true
-
-    # 全局规划器后端选择
     raw_route_backend: "hybrid_a_star"                           # graph_a_star/hybrid_a_star
 
     # 全局规划器后端参数: graph_a_star
@@ -243,7 +240,7 @@ local_planner:
         critical_weight: 20.0                                   # 近碰撞/碰撞惩罚权重
         repulsion_weight: 1.5                                   # 远离障碍偏好权重
         collision_cost: 100000.0                                # 轨迹碰撞代价
-        collision_margin_distance: 0.10                         # 近碰撞边界（m）
+        collision_margin_distance: 0.20                         # 近碰撞边界（m）
         near_goal_distance: 0.5                                 # 近目标时降低远离障碍偏好
         inflation_radius: 2.2                                   # 点云障碍排斥半径（m），略大于约 1.9m 最小转弯半径以提前选边
         trajectory_point_step: 4                                # 障碍检测步长，降低每周期 KDTree 查询量
