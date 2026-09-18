@@ -3,7 +3,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 
 def generate_launch_description():
@@ -11,11 +11,10 @@ def generate_launch_description():
     mcl_share_dir = get_package_share_directory('mcl_3dl')
 
     use_sim = LaunchConfiguration('use_sim')
-    map_dir = LaunchConfiguration('map_dir')
-    ground_dir = LaunchConfiguration('ground_dir')
     rviz_config = LaunchConfiguration('rviz_config')
     use_rviz = LaunchConfiguration('use_rviz')
     global_planner_prefix = LaunchConfiguration('global_planner_prefix')
+    map_path = LaunchConfiguration("map_path")
 
     localization_config = os.path.join(
         p2p_share_dir,
@@ -35,19 +34,18 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument(
-            'use_sim',
-            default_value='false', # set true only when replaying with /clock
-            description='Set use_sim_time for launched nodes.',
+            "use_sim",
+            default_value=os.environ.get("USE_SIM_TIME") or "false",
+            description=(
+                "Use simulation clock if true. Defaults to USE_SIM_TIME from the "
+                "launch process environment, or false when unset; an explicit "
+                "use_sim:=... overrides it."
+            ),
         ),
         DeclareLaunchArgument(
-            'map_dir',
-            default_value='/home/robot/map/hesai_sim2/GlobalMap.pcd', # change this to your global map pcd file path
-            description='Path to the global map PCD file.',
-        ),
-        DeclareLaunchArgument(
-            'ground_dir',
-            default_value='/home/robot/map/hesai_sim2/GroundMap.pcd', # change this to your ground map pcd file path
-            description='Path to the ground map PCD file.',
+            "map_path",
+            default_value="/home/robot/map/hesai_outdoor_yifu",
+            description="Directory containing GlobalMap.pcd and GroundMap.pcd.",
         ),
         DeclareLaunchArgument(
             'rviz_config',
@@ -74,8 +72,8 @@ def generate_launch_description():
             parameters=[
                 pcl_publisher_config,
                 {
-                    'map_dir': map_dir,
-                    'ground_dir': ground_dir,
+                    'map_dir': PathJoinSubstitution([map_path, 'GlobalMap.pcd']),
+                    'ground_dir': PathJoinSubstitution([map_path, 'GroundMap.pcd']),
                     'use_sim_time': use_sim,
                 },
             ],

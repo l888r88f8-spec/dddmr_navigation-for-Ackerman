@@ -166,7 +166,7 @@ local_planner:
     controller_frequency: 15.0                                   # 控制循环频率（Hz）
 
     # 局部规划器后端选择
-    controller_backend: "mppi"                 # 控制后端 legacy_rollout / regulated_pure_pursuit / mppi
+    controller_backend: "regulated_pure_pursuit"                 # 控制后端 legacy_rollout / regulated_pure_pursuit / mppi
 
     # 局部规划器公共路径/目标参数
     local_reference:
