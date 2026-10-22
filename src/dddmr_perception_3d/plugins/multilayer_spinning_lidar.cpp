@@ -34,6 +34,7 @@
 #include <cmath>
 
 #include <pcl/filters/filter.h>
+#include <perception_3d/cloud_preprocessor.h>
 
 PLUGINLIB_EXPORT_CLASS(perception_3d::MultiLayerSpinningLidar, perception_3d::Sensor)
 
@@ -152,6 +153,13 @@ void MultiLayerSpinningLidar::onInitialize()
   node_->declare_parameter(name_ + ".stitcher_num", rclcpp::ParameterValue(0));
   node_->get_parameter(name_ + ".stitcher_num", stitcher_num_);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "stitcher_num: %d", stitcher_num_);  
+
+  input_preprocessed_ = node_->declare_parameter(name_ + ".input_preprocessed", false);
+  sensor_frame_ = node_->declare_parameter<std::string>(name_ + ".sensor_frame", "");
+  if(input_preprocessed_ && ((!is_local_planner_ && sensor_frame_.empty()) || stitcher_num_ != 0)){
+    throw std::invalid_argument("Preprocessed lidar requires a global sensor_frame and stitcher_num=0");
+  }
+  RCLCPP_INFO(node_->get_logger().get_child(name_), "input_preprocessed: %d", input_preprocessed_);
   
   node_->declare_parameter(name_ + ".pub_gbl_marking_frequency", rclcpp::ParameterValue(1.0));
   node_->get_parameter(name_ + ".pub_gbl_marking_frequency", pub_gbl_marking_frequency_);
@@ -188,6 +196,10 @@ void MultiLayerSpinningLidar::onInitialize()
 
 void MultiLayerSpinningLidar::cbSensor(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 {
+  if(input_preprocessed_){
+    cbPreprocessed(*msg);
+    return;
+  }
 
   //@if not stitch, save copy time
   pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_msg (new pcl::PointCloud<pcl::PointXYZ>);
@@ -321,6 +333,67 @@ void MultiLayerSpinningLidar::cbSensor(const sensor_msgs::msg::PointCloud2::Shar
 
 }
 
+void MultiLayerSpinningLidar::cbPreprocessed(const sensor_msgs::msg::PointCloud2 & msg){
+  const auto now = clock_->now();
+  if(msg.header.frame_id != gbl_utils_->getGblFrame() ||
+    !IsCloudStampFresh(msg.header.stamp, now, expected_sensor_time_))
+  {
+    RCLCPP_WARN_THROTTLE(node_->get_logger().get_child(name_), *clock_, 2000,
+      "Rejecting shared cloud: expected global frame and fresh acquisition timestamp");
+    return;
+  }
+  const rclcpp::Time stamp(msg.header.stamp, now.get_clock_type());
+  // Keep TF, cloud and freshness metadata coherent for clear/mark readers.
+  std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
+  if(have_preprocessed_observation_ && last_observation_time_ <= now &&
+    stamp <= last_observation_time_)
+  {
+    return;
+  }
+  geometry_msgs::msg::TransformStamped body_to_sensor, global_to_body;
+  try{
+    // Points have already been transformed. These poses are only for the global
+    // marking window, FOV and ray clearing, at the SAME acquisition instant.
+    if(!is_local_planner_){
+      const auto timeout = rclcpp::Duration::from_seconds(0.05);
+      body_to_sensor = gbl_utils_->tf2Buffer()->lookupTransform(
+        gbl_utils_->getRobotFrame(), sensor_frame_, stamp, timeout);
+      global_to_body = gbl_utils_->tf2Buffer()->lookupTransform(
+        gbl_utils_->getGblFrame(), gbl_utils_->getRobotFrame(), stamp, timeout);
+    }
+  }
+  catch(const tf2::TransformException & error){
+    RCLCPP_WARN_THROTTLE(node_->get_logger().get_child(name_), *clock_, 2000,
+      "Shared cloud waiting for acquisition-time TF: %s", error.what());
+    return;
+  }
+  if(!IsCloudStampFresh(msg.header.stamp, clock_->now(), expected_sensor_time_)){
+    return;
+  }
+  auto cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+  pcl::fromROSMsg(msg, *cloud);
+  // No passthrough, voxel filter or point-cloud transform in either consumer.
+  if(!is_local_planner_){
+    trans_b2s_ = body_to_sensor;
+    trans_gbl2b_ = global_to_body;
+    trans_gbl2s_af3_ = tf2::transformToEigen(global_to_body) * tf2::transformToEigen(body_to_sensor);
+    trans_gbl2s_ = tf2::eigenToTransform(trans_gbl2s_af3_);
+  }
+  pcl_msg_ = cloud;
+  // selfClear needs the new observation before selfMark appends centroids.
+  pcl_msg_gbl_ = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(*cloud);
+  if(is_local_planner_){
+    pcl::copyPointCloud(*cloud, *sensor_current_observation_);
+  }
+  last_observation_time_ = stamp;
+  have_preprocessed_observation_ = true;
+  pending_mark_ = pending_clear_ = true;
+  get_first_tf_ = true;
+  if(pub_current_observation_->get_subscription_count() > 0){
+    pub_current_observation_->publish(msg);
+  }
+}
+
 void MultiLayerSpinningLidar::updateLethalPointCloud(){
 
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
@@ -371,6 +444,10 @@ void MultiLayerSpinningLidar::selfMark(){
     return;
   }
 
+  if(input_preprocessed_ && (!pending_mark_ || !isCurrent())){
+    return;
+  }
+
   if(!pct_marking_ || !pcl_msg_ || !shared_data_->pcl_ground_ ||
     !shared_data_->kdtree_ground_ || !shared_data_->pcl_map_ ||
     !shared_data_->kdtree_map_ || shared_data_->pcl_ground_->empty() ||
@@ -380,15 +457,22 @@ void MultiLayerSpinningLidar::selfMark(){
   }
 
   if(pcl_msg_->points.size()<=5){
+    pending_mark_ = false;
     return;
   }
   //@ Transform into global frame
   pcl_msg_gbl_.reset(new pcl::PointCloud<pcl::PointXYZ>);
-  Eigen::Affine3d trans_gbl2b_af3 = tf2::transformToEigen(trans_gbl2b_);
-  pcl::transformPointCloud(*pcl_msg_, *pcl_msg_gbl_, trans_gbl2b_af3);
-  std::vector<int> finite_indices;
-  pcl::removeNaNFromPointCloud(*pcl_msg_gbl_, *pcl_msg_gbl_, finite_indices);
-  pcl_msg_gbl_->is_dense = true;
+  if(input_preprocessed_){
+    *pcl_msg_gbl_ = *pcl_msg_;
+    pending_mark_ = false;
+  }
+  else{
+    Eigen::Affine3d trans_gbl2b_af3 = tf2::transformToEigen(trans_gbl2b_);
+    pcl::transformPointCloud(*pcl_msg_, *pcl_msg_gbl_, trans_gbl2b_af3);
+    std::vector<int> finite_indices;
+    pcl::removeNaNFromPointCloud(*pcl_msg_gbl_, *pcl_msg_gbl_, finite_indices);
+    pcl_msg_gbl_->is_dense = true;
+  }
   if(pcl_msg_gbl_->points.size()<=5){
     return;
   }
@@ -580,15 +664,24 @@ void MultiLayerSpinningLidar::selfClear(){
     shared_data_->dgraph_update_request_[name_] = false;
   }
 
+  if(input_preprocessed_){
+    if(!pending_clear_ || !isCurrent()){
+      return;
+    }
+    pending_clear_ = false;
+  }
+
   pcl::KdTreeFLANN<pcl::PointXYZ>::Ptr kdtree_last_observation(new pcl::KdTreeFLANN<pcl::PointXYZ>());
   pcl::PointCloud<pcl::PointXYZ>::Ptr last_observation(new pcl::PointCloud<pcl::PointXYZ>());
   bool observation_clear = true;
 
   if(pcl_msg_gbl_ && pcl_msg_gbl_->points.size()>5){
     *last_observation = *pcl_msg_gbl_;
-    std::vector<int> finite_indices;
-    pcl::removeNaNFromPointCloud(*last_observation, *last_observation, finite_indices);
-    last_observation->is_dense = true;
+    if(!input_preprocessed_){
+      std::vector<int> finite_indices;
+      pcl::removeNaNFromPointCloud(*last_observation, *last_observation, finite_indices);
+      last_observation->is_dense = true;
+    }
     if(last_observation->points.size()>5){
       kdtree_last_observation->setInputCloud(last_observation);
       observation_clear = false;
@@ -1036,6 +1129,7 @@ void MultiLayerSpinningLidar::resetdGraph(){
   dGraph_.initial(shared_data_->static_ground_size_, gbl_utils_->getMaxObstacleDistance());
   pct_marking_ = std::make_shared<Marking>(&dGraph_, 
         gbl_utils_->getInscribedRadius(), gbl_utils_->getInflationRadius(), shared_data_, resolution_, height_resolution_);
+  pending_mark_ = pending_clear_ = have_preprocessed_observation_;
   RCLCPP_INFO(node_->get_logger().get_child(name_), "%s done dynamic graph regeneration.", name_.c_str());
 }
 
@@ -1048,6 +1142,12 @@ double MultiLayerSpinningLidar::get_dGraphValue(const unsigned int index){
 }
 
 bool MultiLayerSpinningLidar::isCurrent(){
+  std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
+  if(input_preprocessed_){
+    current_ = have_preprocessed_observation_ &&
+      IsCloudStampFresh(last_observation_time_, clock_->now(), expected_sensor_time_);
+    return current_;
+  }
   
   auto time_diff = (clock_->now() - last_observation_time_).seconds();
   if(time_diff > expected_sensor_time_)

@@ -117,6 +117,7 @@ class MultiLayerSpinningLidar: public Sensor{
 
     /*call back of the sensor*/
     void cbSensor(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
+    void cbPreprocessed(const sensor_msgs::msg::PointCloud2 & msg);
 
     /*call back of the map*/
     void cbMap(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
@@ -148,6 +149,11 @@ class MultiLayerSpinningLidar: public Sensor{
 
     /*plugin parameter*/
     std::string topic_;
+    bool input_preprocessed_ = false;
+    std::string sensor_frame_;
+    bool have_preprocessed_observation_ = false;
+    bool pending_mark_ = false;
+    bool pending_clear_ = false;
     double vertical_FOV_top_,vertical_FOV_bottom_;
     double scan_effective_positive_start_, scan_effective_positive_end_;
     double scan_effective_negative_start_, scan_effective_negative_end_;

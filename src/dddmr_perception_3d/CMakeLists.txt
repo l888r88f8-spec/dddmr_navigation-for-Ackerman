@@ -154,6 +154,13 @@ ament_target_dependencies(depth_camera_buffer
 )
 
 # layers
+add_library(cloud_preprocessor SHARED src/cloud_preprocessor.cpp)
+target_link_libraries(cloud_preprocessor ${PCL_LIBRARIES})
+ament_target_dependencies(cloud_preprocessor ${dependencies})
+add_executable(shared_cloud_preprocessor_node src/shared_cloud_preprocessor_node.cpp)
+target_link_libraries(shared_cloud_preprocessor_node cloud_preprocessor)
+ament_target_dependencies(shared_cloud_preprocessor_node ${dependencies})
+
 add_library(layers SHARED
   plugins/nothing_layer.cpp
   plugins/no_entry_layer.cpp
@@ -164,7 +171,7 @@ add_library(layers SHARED
   plugins/depth_camera/depth_camera_layer.cpp
 )
 target_link_libraries(layers
-  cluster_marking depth_camera_buffer ground_surface_filter stacked_perception_ros
+  cluster_marking depth_camera_buffer ground_surface_filter stacked_perception_ros cloud_preprocessor
 )
 ament_target_dependencies(layers
   ${dependencies}
@@ -196,6 +203,7 @@ install(TARGETS
   depth_camera_buffer
   cluster_marking
   ground_surface_filter
+  cloud_preprocessor
   layers
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -205,6 +213,7 @@ install(TARGETS
 #install node
 install(TARGETS
   perception_3d_ros_node
+  shared_cloud_preprocessor_node
   depthimg2pointcloud_node
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
@@ -226,11 +235,18 @@ install(FILES perception_3d_plugins.xml
 )
 
 ament_export_include_directories(include)
-ament_export_libraries(shared_data_sensor perception_sensor stacked_perception stacked_perception_ros cluster_marking ground_surface_filter depth_camera_buffer layers)
+ament_export_libraries(shared_data_sensor perception_sensor stacked_perception stacked_perception_ros cluster_marking ground_surface_filter cloud_preprocessor depth_camera_buffer layers)
 ament_export_dependencies(${dependencies})
 pluginlib_export_plugin_description_file(perception_3d perception_3d_plugins.xml)
 
 if(BUILD_TESTING)
+  ament_add_gtest(test_cloud_preprocessor test/test_cloud_preprocessor.cpp)
+  target_link_libraries(test_cloud_preprocessor cloud_preprocessor ${PCL_LIBRARIES})
+  ament_target_dependencies(test_cloud_preprocessor ${dependencies})
+  ament_add_gtest(test_preprocessed_lidar test/test_preprocessed_lidar.cpp)
+  target_link_libraries(test_preprocessed_lidar layers cloud_preprocessor ${PCL_LIBRARIES})
+  ament_target_dependencies(test_preprocessed_lidar ${dependencies})
+
   ament_add_gtest(test_ground_surface_filter
     test/test_ground_surface_filter.cpp
   )

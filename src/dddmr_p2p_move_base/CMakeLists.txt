@@ -195,6 +195,12 @@ ament_export_libraries(
 ament_export_dependencies(${dependencies})
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_localization_launch_parameters
+    test/test_localization_launch_parameters.py
+    ENV PYTHONDONTWRITEBYTECODE=1
+  )
+
   ament_add_gtest(test_navigation_fault_policy
     test/test_navigation_fault_policy.cpp
   )

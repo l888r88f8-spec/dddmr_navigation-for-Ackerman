@@ -13,6 +13,16 @@
 
 p2p_move_base:
   ros__parameters:
+    # 公共话题与坐标系：只在这里维护，launch 分发给各节点和插件
+    global_frame: "map"
+    robot_base_frame: "base_link"
+    sensor_frame: "hesai_lidar"
+    input_cloud_topic: "lio_sam/cloud_nonground"                  # 原始去地点云
+    preprocessed_cloud_topic: "navigation/preprocessed_cloud"     # 预处理点云
+    map_topic: "mapcloud"
+    ground_topic: "mapground"
+    odom_topic: "/odom1"                                         # 底盘真实速度反馈；定位仍由 TF 提供
+
     orchestrator_frequency: 15.0                                 # 任务编排循环频率，越高状态切换和控制消费越及时
     route_request_patience: 90.0                                 # 等待全局路径请求返回的最大时长（s）
     blocked_wait_patience: 2.0                                   # blocked wait 状态最长持续时间（s），先给局部障碍清除窗口
@@ -27,9 +37,7 @@ p2p_move_base:
     budget_warn_after_consecutive_overruns: 2                    # 连续超预算告警阈值
     budget_stop_after_consecutive_overruns: 10                   # 连续超预算安全停车阈值
     local_obstacle_layer:
-      enabled: true                                              # Phase 2.1 默认只预留，置 true 后订阅点云并发布诊断，不参与控制
-      input_cloud_topic: "lio_sam/cloud_nonground"               # 建议使用去地点云；若不是 base_frame，节点会尝试 TF 转换
-      base_frame: "base_link"                                    # 局部 ROI 和 footprint 查询坐标系
+      enabled: false                                             # 置 true 后订阅点云并发布诊断，不参与控制
       status_topic: "local_obstacle_layer/status"                # std_msgs/String，发布 raw/filtered/stale/budget 状态
       debug_cloud_topic: "local_obstacle_layer/cloud"            # sensor_msgs/PointCloud2，发布过滤后的局部障碍点
       roi_forward: 6.0                                           # 前向 ROI（m）
@@ -60,7 +68,7 @@ p2p_move_base:
 global_plan_manager:
   ros__parameters:
     route_action_name: "get_plan"                                # 全局规划 action 名称
-    route_request_frequency: -1.0                                # 路径请求采用事件触发；负值表示不周期轮询
+    route_request_frequency: -1.0                                # 路径请求采用事件触发
     freeze_route_per_goal: false
 
 global_planner:
@@ -84,15 +92,15 @@ global_planner:
 
     # 全局规划器后端参数: hybrid_a_star
     hybrid_astar:
-      wheelbase: 0.46                                             # 轴距（m）
-      max_steer: 0.238                                            # 最大转角（rad）
+      wheelbase: 0.65                                             # 轴距（m）
+      max_steer: 0.461                                            # 等效中央最大转角（rad），最小转弯半径约 1.31 m
       steer_sample_count: 5                                       # 转角采样数
       heading_bin_count: 32                                       # 航向离散 bin 数
       primitive_length: 0.8                                       # 运动原语长度（m）
       primitive_step: 0.15                                        # 原语离散步长（m）
       projection_search_radius: 0.6                               # 起终点投影搜索半径（m）
       goal_position_tolerance: 0.3                                # 终点位置容差（m）
-      goal_heading_tolerance: 0.8                                 # 终点航向容差（rad），让全局路径约束目标朝向
+      goal_heading_tolerance: 3.14                                 # 终点航向容差（rad），让全局路径约束目标朝向
       obstacle_penalty_weight: 1.0                                # 障碍代价权重
       edge_weight_penalty_weight: 6.0                             # 地面边缘权重惩罚
       edge_weight_safe_threshold: 1.2                             # 边缘权重安全阈值
@@ -103,17 +111,15 @@ global_planner:
       max_projected_vertical_jump: 0.12                           # 投影点最大垂向跳变（m）
       allow_sample_nearest_fallback: false                        # 采样投影失败时是否允许最近邻回退
 
-# 全局规划感知输入
+# 全局感知：公共话题与坐标系由 launch 从 p2p_move_base 分发
 perception_3d_global:
   ros__parameters:
     enable_detail_log: false                                     # 是否开启感知层详细日志
-    global_frame: "map"                                          # 全局坐标系
-    robot_base_frame: "base_link"                                # 机器人基坐标系
     max_obstacle_distance: 9999.0                                # 障碍最大采样距离（m）
     inscribed_radius: 0.52                                       # 小车最小外接圆半径
     inflation_descending_rate: 2.0                               # 膨胀衰减率
     inflation_radius: 0.9                                        # 全局障碍膨胀半径（m）
-    sensors_collected_frequency: 15.0                            # 传感器融合频率（Hz）
+    sensors_collected_frequency: 10.0                            # 传感器融合频率（Hz）
     plugins: ["map", "lidar"]                                    # 全局层插件列表，动态障碍参与重规划
     dgraph_publish_frequency: 1.0                                # 图结构发布频率（Hz）
 
@@ -126,8 +132,6 @@ perception_3d_global:
       intensity_search_radius: 1.0                               # 强度搜索半径（过大易误判窄通道）
       intensity_search_punish_weight: 0.3                        # 孤立点惩罚权重
       static_imposing_radius: 1.5                                # 静态图施加权重半径（m）
-      map_topic: "mapcloud"                                      # 全局地图点云 topic
-      ground_topic: "mapground"                                  # 全局地面点云 topic
 
       support:
         mapping_mode: false                                      # 建图模式；开启后通常会关闭边缘检测
@@ -140,7 +144,7 @@ perception_3d_global:
     lidar:
       plugin: "perception_3d::MultiLayerSpinningLidar"           # 多线雷达插件
       is_local_planner: false                                    # 该雷达层用于全局规划
-      topic: "lio_sam/cloud_nonground"                           # 输入去地点云 topic
+      input_preprocessed: true                                  # 跳过重复裁剪/降采样/点云坐标变换
       pub_gbl_marking_for_visualization: true                    # 是否发布全局标记点用于可视化
       vertical_FOV_top: 15.0                                     # 垂直视场上限（deg）
       vertical_FOV_bottom: -15.0                                 # 垂直视场下限（deg）
@@ -154,7 +158,7 @@ perception_3d_global:
       height_resolution: 0.05                                    # 高度分辨率（m）
       min_obstacle_height: -0.12
       marking_height: 2.0                                        # 标记障碍物高度上限（m）
-      perception_window_size: 5.0                                # 全局感知窗口（m）
+      perception_window_size: 6.0                                # 全局感知窗口（m），与公共预处理/局部一致
       segmentation_ignore_ratio: 1.1                             # 与静态图匹配比例阈值（高于该值忽略）
       expected_sensor_time: 0.5                                  # 传感器时间容忍（s），避免调度抖动导致全局动态层过期
 
@@ -162,15 +166,14 @@ perception_3d_global:
 local_planner:
   ros__parameters:
     # 局部规划器公共参数
-    odom_topic: /lio_sam/localization/odometry                   # 局部规划里程计输入
     controller_frequency: 15.0                                   # 控制循环频率（Hz）
 
     # 局部规划器后端选择
-    controller_backend: "regulated_pure_pursuit"                 # 控制后端 legacy_rollout / regulated_pure_pursuit / mppi
+    controller_backend: "mppi"                 # 控制后端 legacy_rollout / regulated_pure_pursuit / mppi
 
     # 局部规划器公共路径/目标参数
     local_reference:
-      forward_distance: 4.0                                     # 前向参考窗口长度（m），决定 blocked_wait 的前向检测距离
+      forward_distance: 6.0                                     # 前向参考窗口（m），覆盖 1.0 m/s 下 5 s 的预测行程
       backward_distance: 1.0                                    # 后向保留窗口长度（m）
 
     # 剪裁锚点
@@ -201,9 +204,9 @@ local_planner:
       max_lateral_accel: 1.5                                    # 曲率调速横向加速度上限（m/s^2）
       prediction_horizon_sec: 6.0                               # 单候选轨迹预测时长（s）
       prediction_step_sec: 0.1                                  # 预测离散步长（s）
-      wheelbase: 0.46                                           # Ackermann 轴距（m）
-      max_steer: 0.238                                          # 最大转角（rad）等效自行车模型前轮转角，atan(wheelbase / min_turning_radius)
-      max_angular_velocity: 0.158                               # 输出角速度上限（rad/s），linear_speed / min_turning_radius
+      wheelbase: 0.65                                           # Hunter V2 轴距（m）
+      max_steer: 0.461                                          # 等效中央最大转角（rad），最小转弯半径约 1.31 m
+      max_angular_velocity: 0.230                               # 输出角速度上限（rad/s），覆盖 0.3 m/s 巡航时约 0.229 rad/s 的满舵角速度
 
     # 局部控制后端参数: mppi
     mppi:
@@ -219,17 +222,17 @@ local_planner:
       vx_std: 0.2                                               # 线速度高斯噪声标准差
       wz_std: 0.08                                              # Ackermann 可行域内角速度噪声，避免大量样本裁成正负满舵
       vx_min: 0.05                                              # Ackermann 平台默认只前进
-      vx_max: 0.5                                               # 最大前进速度；过低会同步压低 Ackermann 可用角速度
+      vx_max: 1.0                                               # 空旷直线路段速度上限（m/s），实际速度由轨迹优化决定
       wz_max: 0.526                                             # 角速度硬上限，最终还会被 steering 几何约束裁剪
       ax_min: -3.0                                              # 最大减速度
       ax_max: 3.0                                               # 最大加速度，避免启动时速度被钳在 vx_min
       az_max: 3.5                                               # 最大角加速度，保持初始转向采样有足够响应
-      wheelbase: 0.46                                           # 轴距
-      max_steer: 0.238                                          # 最大前轮转角（rad）
+      wheelbase: 0.65                                           # Hunter V2 轴距（m）
+      max_steer: 0.461                                          # 等效中央最大转角（rad），最小转弯半径约 1.31 m
       seed: 7                                                   # 固定 seed，保证离线测试可复现
       regenerate_noises: false                                  # 与 Nav2 默认一致，跨周期复用噪声以稳定绕障方向
       use_perception_blocked_preemption: false                  # MPPI 避障时不让路径阻塞意见提前触发重规划，由 critic 体系判断是否可绕行
-      critics: ["ConstraintCritic", "ObstaclesCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic"]  # 官方 MPPI critic 顺序
+      critics: ["ConstraintCritic", "ObstaclesCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic"]
 
       ConstraintCritic:
         cost_weight: 4.0                                        # 运动约束惩罚权重
@@ -242,7 +245,7 @@ local_planner:
         collision_cost: 100000.0                                # 轨迹碰撞代价
         collision_margin_distance: 0.20                         # 近碰撞边界（m）
         near_goal_distance: 0.5                                 # 近目标时降低远离障碍偏好
-        inflation_radius: 2.2                                   # 点云障碍排斥半径（m），略大于约 1.9m 最小转弯半径以提前选边
+        inflation_radius: 2.2                                   # 点云障碍排斥半径（m），用于提前选边
         trajectory_point_step: 4                                # 障碍检测步长，降低每周期 KDTree 查询量
 
       GoalCritic:
@@ -266,7 +269,7 @@ local_planner:
         use_path_orientations: false
 
       PathFollowCritic:
-        cost_weight: 5.0                                        # 终端点向前跟随路径权重
+        cost_weight: 10.0                                       # 终端点向前跟随路径权重，提高空旷路段的推进偏好
         cost_power: 1
         threshold_to_consider: 1.4
         offset_from_furthest: 6
@@ -321,8 +324,8 @@ trajectory_generators:
       wheel_diameter: 0.16                                       # 轮径（m）
       gear_ratio: 1.0                                            # 减速比
       robot_radius: 0.25                                         # 机器人近似半径（m）
-      wheelbase: 0.46                                            # 轴距（m）
-      max_steer: 0.238                                           # 最大转角（rad）
+      wheelbase: 0.65                                            # Hunter V2 轴距（m），与全局/局部规划保持一致
+      max_steer: 0.461                                           # 等效中央最大转角（rad），最小转弯半径约 1.31 m
       controller_frequency: 15.0                                 # 采样控制频率（Hz）
       sim_time: 1.5                                              # 单轨迹前向仿真时长（s）
       min_sim_distance: 2.0                                      # 低速候选也至少检查该前向距离，避免只减速不绕障
@@ -335,8 +338,6 @@ trajectory_generators:
 perception_3d_local:
   ros__parameters:
     enable_detail_log: false                                     # 是否开启感知层详细日志
-    global_frame: "map"                                          # 全局坐标系
-    robot_base_frame: "base_link"                                # 机器人基坐标系
     max_obstacle_distance: 9999.0                                # 障碍最大采样距离（m）
     inscribed_radius: 0.52                                       # 车体内切安全半径（m）
     inflation_descending_rate: 2.0                               # 膨胀衰减率
@@ -348,13 +349,11 @@ perception_3d_local:
       plugin: "perception_3d::StaticLayer"                       # 静态地图层
       is_local_planner: true                                     # 该层用于局部规划
       mapping_mode: false                                        # 建图模式
-      map_topic: "mapcloud"                                      # 地图点云 topic
-      ground_topic: "mapground"                                  # 地面点云 topic
 
     lidar:
       plugin: "perception_3d::MultiLayerSpinningLidar"           # 多线雷达插件
       is_local_planner: true                                     # 该雷达层用于局部规划
-      topic: "lio_sam/cloud_nonground"                           # 局部避障输入去地点云
+      input_preprocessed: true                                  # 直接使用 map 坐标观测
       pub_gbl_marking_for_visualization: false                   # 是否发布可视化标记点
       vertical_FOV_top: 15.0                                     # 垂直视场上限（deg）
       vertical_FOV_bottom: -15.0                                 # 垂直视场下限（deg）
@@ -366,7 +365,7 @@ perception_3d_local:
       height_resolution: 0.05                                    # 高度分辨率（m）
       min_obstacle_height: -0.12                                 # 障碍最低高度阈值（m）
       marking_height: 2.0                                        # 标记障碍高度上限（m）
-      perception_window_size: 5.0                                # 局部障碍感知窗口（m）
+      perception_window_size: 6.0                                # 局部感知窗口（m），覆盖 5 m 预测行程及车体/近障碍裕度
       segmentation_ignore_ratio: 0.5                             # 与静态图匹配比例阈值（高于该值忽略）
       expected_sensor_time: 0.5                                  # 传感器时间容忍（s），避免偶发点云/调度延迟导致感知误判失效
 

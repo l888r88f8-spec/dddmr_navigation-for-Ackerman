@@ -1,10 +1,56 @@
 import os
+import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+
+
+def build_navigation_wiring(config):
+    """Distribute the p2p section's common names to the actual ROS consumers."""
+    common = config['p2p_move_base']['ros__parameters']
+    for key in (
+        'global_frame', 'robot_base_frame', 'sensor_frame', 'input_cloud_topic',
+        'preprocessed_cloud_topic', 'map_topic', 'ground_topic', 'odom_topic',
+    ):
+        if not isinstance(common.get(key), str) or not common[key].strip():
+            raise ValueError(f'p2p_move_base.ros__parameters.{key} must be a nonempty string')
+
+    global_lidar = config['perception_3d_global']['ros__parameters']['lidar']
+    local_lidar = config['perception_3d_local']['ros__parameters']['lidar']
+    for key in ('perception_window_size', 'min_obstacle_height', 'marking_height'):
+        if global_lidar[key] != local_lidar[key]:
+            raise ValueError(f'Shared cloud requires matching lidar.{key} in both perception layers')
+
+    return {
+        'perception': {
+            'global_frame': common['global_frame'],
+            'robot_base_frame': common['robot_base_frame'],
+            'map.map_topic': common['map_topic'],
+            'map.ground_topic': common['ground_topic'],
+            'lidar.topic': common['preprocessed_cloud_topic'],
+            'lidar.sensor_frame': common['sensor_frame'],
+        },
+        'preprocessor': {
+            **{key: common[key] for key in ('global_frame', 'robot_base_frame', 'sensor_frame')},
+            'input_topic': common['input_cloud_topic'],
+            'output_topic': common['preprocessed_cloud_topic'],
+            **{key: local_lidar[key] for key in (
+                'perception_window_size', 'min_obstacle_height', 'marking_height')},
+            'expected_sensor_time': min(
+                global_lidar['expected_sensor_time'], local_lidar['expected_sensor_time']),
+        },
+        'local': {
+            'odom_topic': common['odom_topic'],
+            'local_obstacle_layer.input_cloud_topic': common['input_cloud_topic'],
+            'local_obstacle_layer.base_frame': common['robot_base_frame'],
+        },
+        'map_publisher': {'global_frame': common['global_frame']},
+        'map_remappings': [('mapcloud', common['map_topic']), ('mapground', common['ground_topic'])],
+    }
+
 
 def generate_launch_description():
     p2p_share_dir = get_package_share_directory('p2p_move_base')
@@ -32,6 +78,10 @@ def generate_launch_description():
         'p2p_move_base_localization.rviz',
     )
 
+    with open(localization_config, encoding='utf-8') as config_file:
+        config = yaml.safe_load(config_file)
+    wiring = build_navigation_wiring(config)
+
     return LaunchDescription([
         DeclareLaunchArgument(
             "use_sim",
@@ -54,7 +104,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'use_rviz',
-            default_value='true',
+            default_value='false',
             description='Start RViz.',
         ),
         DeclareLaunchArgument(
@@ -71,12 +121,22 @@ def generate_launch_description():
             emulate_tty=True,
             parameters=[
                 pcl_publisher_config,
+                wiring['map_publisher'],
                 {
-                    'map_dir': PathJoinSubstitution([map_path, 'GlobalMap.pcd']),
+                    'map_dir': PathJoinSubstitution([map_path, 'GroundMap.pcd']),
                     'ground_dir': PathJoinSubstitution([map_path, 'GroundMap.pcd']),
                     'use_sim_time': use_sim,
                 },
             ],
+            remappings=wiring['map_remappings'],
+        ),
+        Node(
+            package='perception_3d',
+            executable='shared_cloud_preprocessor_node',
+            name='shared_cloud_preprocessor',
+            output='screen',
+            respawn=False,
+            parameters=[wiring['preprocessor'], {'use_sim_time': use_sim}],
         ),
         Node(
             package='global_planner',
@@ -87,6 +147,7 @@ def generate_launch_description():
             prefix=global_planner_prefix,
             parameters=[
                 localization_config,
+                wiring['perception'],
                 {'use_sim_time': use_sim},
             ],
         ),
@@ -98,10 +159,9 @@ def generate_launch_description():
             emulate_tty=True,
             parameters=[
                 localization_config,
+                wiring['perception'],
+                wiring['local'],
                 {'use_sim_time': use_sim},
-            ],
-            remappings=[
-                ('/odom', '/lio_sam/localization/odometry'),
             ],
         ),
         Node(
