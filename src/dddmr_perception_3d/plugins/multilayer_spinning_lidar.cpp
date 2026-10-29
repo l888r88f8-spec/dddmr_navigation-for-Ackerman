@@ -35,6 +35,7 @@
 
 #include <pcl/filters/filter.h>
 #include <perception_3d/cloud_preprocessor.h>
+#include <perception_3d/parameter_utils.h>
 
 PLUGINLIB_EXPORT_CLASS(perception_3d::MultiLayerSpinningLidar, perception_3d::Sensor)
 
@@ -75,8 +76,11 @@ void MultiLayerSpinningLidar::onInitialize()
   std::string node_name = std::string{node_->get_name()};
   node_->get_parameter("enable_detail_log", enable_detail_log_);
 
-  node_->declare_parameter(name_ + ".topic", rclcpp::ParameterValue(""));
-  node_->get_parameter(name_ + ".topic", topic_);
+  input_preprocessed_ = node_->declare_parameter(
+    name_ + ".input_preprocessed", false);
+  topic_ = getStringParameter(
+    *node_, name_ + ".topic",
+    input_preprocessed_ ? "preprocessed_cloud_topic" : "input_cloud_topic", "");
   RCLCPP_INFO(node_->get_logger().get_child(name_), "topic: %s", topic_.c_str());
 
   node_->declare_parameter(name_ + ".vertical_FOV_top", rclcpp::ParameterValue(0.0));
@@ -122,16 +126,16 @@ void MultiLayerSpinningLidar::onInitialize()
   node_->get_parameter(name_ + ".height_resolution", height_resolution_);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "height_resolution: %.2f", height_resolution_);
 
-  node_->declare_parameter(name_ + ".marking_height", rclcpp::ParameterValue(0.0));
-  node_->get_parameter(name_ + ".marking_height", marking_height_);
+  marking_height_ = getDoubleParameter(
+    *node_, name_ + ".marking_height", "marking_height", 0.0);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "marking_height: %.2f", marking_height_);
 
-  node_->declare_parameter(name_ + ".min_obstacle_height", rclcpp::ParameterValue(0.0));
-  node_->get_parameter(name_ + ".min_obstacle_height", min_obstacle_height_);
+  min_obstacle_height_ = getDoubleParameter(
+    *node_, name_ + ".min_obstacle_height", "min_obstacle_height", 0.0);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "min_obstacle_height: %.2f", min_obstacle_height_);
 
-  node_->declare_parameter(name_ + ".perception_window_size", rclcpp::ParameterValue(0.0));
-  node_->get_parameter(name_ + ".perception_window_size", perception_window_size_);
+  perception_window_size_ = getDoubleParameter(
+    *node_, name_ + ".perception_window_size", "perception_window_size", 0.0);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "perception_window_size: %.2f", perception_window_size_);
 
   node_->declare_parameter(name_ + ".segmentation_ignore_ratio", rclcpp::ParameterValue(0.0));
@@ -142,8 +146,8 @@ void MultiLayerSpinningLidar::onInitialize()
   node_->get_parameter(name_ + ".is_local_planner", is_local_planner_);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "is_local_planner: %d", is_local_planner_);
 
-  node_->declare_parameter(name_ + ".expected_sensor_time", rclcpp::ParameterValue(0.0));
-  node_->get_parameter(name_ + ".expected_sensor_time", expected_sensor_time_);
+  expected_sensor_time_ = getDoubleParameter(
+    *node_, name_ + ".expected_sensor_time", "expected_sensor_time", 0.0);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "expected_sensor_time: %.2f", expected_sensor_time_);
 
   node_->declare_parameter(name_ + ".pub_gbl_marking_for_visualization", rclcpp::ParameterValue(false));
@@ -154,8 +158,8 @@ void MultiLayerSpinningLidar::onInitialize()
   node_->get_parameter(name_ + ".stitcher_num", stitcher_num_);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "stitcher_num: %d", stitcher_num_);  
 
-  input_preprocessed_ = node_->declare_parameter(name_ + ".input_preprocessed", false);
-  sensor_frame_ = node_->declare_parameter<std::string>(name_ + ".sensor_frame", "");
+  sensor_frame_ = getStringParameter(
+    *node_, name_ + ".sensor_frame", "sensor_frame", "");
   if(input_preprocessed_ && ((!is_local_planner_ && sensor_frame_.empty()) || stitcher_num_ != 0)){
     throw std::invalid_argument("Preprocessed lidar requires a global sensor_frame and stitcher_num=0");
   }

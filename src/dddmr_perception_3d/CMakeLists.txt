@@ -247,6 +247,13 @@ if(BUILD_TESTING)
   target_link_libraries(test_preprocessed_lidar layers cloud_preprocessor ${PCL_LIBRARIES})
   ament_target_dependencies(test_preprocessed_lidar ${dependencies})
 
+  ament_add_gtest(test_parameter_utils test/test_parameter_utils.cpp)
+  ament_target_dependencies(test_parameter_utils ${dependencies})
+
+  ament_add_gtest(test_static_layer_parameters test/test_static_layer_parameters.cpp)
+  target_link_libraries(test_static_layer_parameters layers ${PCL_LIBRARIES})
+  ament_target_dependencies(test_static_layer_parameters ${dependencies})
+
   ament_add_gtest(test_ground_surface_filter
     test/test_ground_surface_filter.cpp
   )

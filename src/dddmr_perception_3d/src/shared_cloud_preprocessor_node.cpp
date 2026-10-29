@@ -1,4 +1,5 @@
 #include <perception_3d/cloud_preprocessor.h>
+#include <perception_3d/parameter_utils.h>
 
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_eigen/tf2_eigen.hpp>
@@ -17,8 +18,10 @@ public:
   SharedCloudPreprocessor()
   : Node("shared_cloud_preprocessor"), buffer_(get_clock()), listener_(buffer_)
   {
-    const auto input = declare_parameter<std::string>("input_topic", "lio_sam/cloud_nonground");
-    const auto output = declare_parameter<std::string>("output_topic", "navigation/preprocessed_cloud");
+    const auto input = getStringParameter(
+      *this, "input_topic", "input_cloud_topic", "lio_sam/cloud_nonground");
+    const auto output = getStringParameter(
+      *this, "output_topic", "preprocessed_cloud_topic", "navigation/preprocessed_cloud");
     sensor_frame_ = declare_parameter<std::string>("sensor_frame", "hesai_lidar");
     body_frame_ = declare_parameter<std::string>("robot_base_frame", "base_link");
     global_frame_ = declare_parameter<std::string>("global_frame", "map");

@@ -29,6 +29,7 @@
 * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #include <perception_3d/static_layer.h>
+#include <perception_3d/parameter_utils.h>
 
 PLUGINLIB_EXPORT_CLASS(perception_3d::StaticLayer, perception_3d::Sensor)
 
@@ -84,12 +85,11 @@ void StaticLayer::onInitialize()
   node_->get_parameter(name_ + ".is_local_planner", is_local_planner_);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "is_local_planner: %d", is_local_planner_);      
 
-  node_->declare_parameter(name_ + ".map_topic", rclcpp::ParameterValue("mapcloud"));
-  node_->get_parameter(name_ + ".map_topic", map_topic_);
+  map_topic_ = getStringParameter(*node_, name_ + ".map_topic", "map_topic", "mapcloud");
   RCLCPP_INFO(node_->get_logger().get_child(name_), "map_topic: %s", map_topic_.c_str());     
 
-  node_->declare_parameter(name_ + ".ground_topic", rclcpp::ParameterValue("mapground"));
-  node_->get_parameter(name_ + ".ground_topic", ground_topic_);
+  ground_topic_ = getStringParameter(
+    *node_, name_ + ".ground_topic", "ground_topic", "mapground");
   RCLCPP_INFO(node_->get_logger().get_child(name_), "ground_topic: %s", ground_topic_.c_str());     
 
   node_->declare_parameter(name_ + ".support.mapping_mode", rclcpp::ParameterValue(false));

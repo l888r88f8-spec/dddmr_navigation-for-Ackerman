@@ -1,6 +1,5 @@
 pcl_publisher:
   ros__parameters:
-    global_frame: "map"
     map_rotate_around_x: 0.0
     map_rotate_around_y: 0.0
     map_rotate_around_z: 0.0

@@ -29,6 +29,7 @@
 * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #include <p2p_move_base/p2p_move_base.h>
+#include <p2p_move_base/parameter_utils.h>
 
 #include <algorithm>
 #include <chrono>
@@ -258,10 +259,9 @@ void P2PMoveBase::initial(
 void P2PMoveBase::initializeLocalObstacleLayer()
 {
   this->declare_parameter("local_obstacle_layer.enabled", rclcpp::ParameterValue(false));
-  this->declare_parameter(
-    "local_obstacle_layer.input_cloud_topic",
-    rclcpp::ParameterValue("lio_sam/cloud_nonground"));
-  this->declare_parameter("local_obstacle_layer.base_frame", rclcpp::ParameterValue("base_link"));
+  const std::string input_cloud_topic = getStringParameter(
+    *this, "local_obstacle_layer.input_cloud_topic", "input_cloud_topic",
+    "lio_sam/cloud_nonground");
   this->declare_parameter("local_obstacle_layer.status_topic", rclcpp::ParameterValue("local_obstacle_layer/status"));
   this->declare_parameter("local_obstacle_layer.debug_cloud_topic", rclcpp::ParameterValue("local_obstacle_layer/cloud"));
   this->declare_parameter("local_obstacle_layer.roi_forward", rclcpp::ParameterValue(6.0));
@@ -304,15 +304,13 @@ void P2PMoveBase::initializeLocalObstacleLayer()
   local_obstacle_layer_enabled_ =
     this->get_parameter("local_obstacle_layer.enabled").as_bool();
   local_obstacle_debug_cloud_enabled_ = config.publish_debug_cloud;
-  local_obstacle_base_frame_ =
-    this->get_parameter("local_obstacle_layer.base_frame").as_string();
+  local_obstacle_base_frame_ = getStringParameter(
+    *this, "local_obstacle_layer.base_frame", "robot_base_frame", "base_link");
   if (!local_obstacle_layer_enabled_) {
     RCLCPP_INFO(this->get_logger(), "local_obstacle_layer disabled; diagnostics subscription not created");
     return;
   }
 
-  const std::string input_cloud_topic =
-    this->get_parameter("local_obstacle_layer.input_cloud_topic").as_string();
   const std::string status_topic =
     this->get_parameter("local_obstacle_layer.status_topic").as_string();
   const std::string debug_cloud_topic =

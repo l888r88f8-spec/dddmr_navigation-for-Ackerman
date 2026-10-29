@@ -60,6 +60,7 @@ class PCLPublisherNode : public rclcpp::Node {
     double map_down_sample_, ground_down_sample_;
 
     std::string package_share_directory_, map_dir_, ground_dir_, global_frame_;
+    std::string map_topic_, ground_topic_;
 };
 
 PCLPublisherNode::PCLPublisherNode(std::string name): Node(name){
@@ -76,10 +77,18 @@ PCLPublisherNode::PCLPublisherNode(std::string name): Node(name){
   ground_dir_ = ground_dir.as_string();
   RCLCPP_INFO(this->get_logger(), "ground_dir: %s", ground_dir_.c_str());
 
-  this->declare_parameter("global_frame", rclcpp::ParameterValue(""));
+  this->declare_parameter("global_frame", rclcpp::ParameterValue("map"));
   rclcpp::Parameter global_frame = this->get_parameter("global_frame");
   global_frame_ = global_frame.as_string();
   RCLCPP_INFO(this->get_logger(), "global_frame: %s", global_frame_.c_str());
+
+  this->declare_parameter("map_topic", rclcpp::ParameterValue("mapcloud"));
+  map_topic_ = this->get_parameter("map_topic").as_string();
+  this->declare_parameter("ground_topic", rclcpp::ParameterValue("mapground"));
+  ground_topic_ = this->get_parameter("ground_topic").as_string();
+  RCLCPP_INFO(
+    this->get_logger(), "map_topic: %s, ground_topic: %s",
+    map_topic_.c_str(), ground_topic_.c_str());
 
   this->declare_parameter("map_rotate_around_x", rclcpp::ParameterValue(0.0));
   rclcpp::Parameter map_rotate_around_x = this->get_parameter("map_rotate_around_x");
@@ -152,10 +161,10 @@ PCLPublisherNode::PCLPublisherNode(std::string name): Node(name){
   RCLCPP_INFO(this->get_logger(), "ground_down_sample: %.2f", ground_down_sample_);
   
   //@ Latched topic, Create a publisher using the QoS settings to emulate a ROS1 latched topic
-  pub_map_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("mapcloud",
+  pub_map_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(map_topic_,
               rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());  
 
-  pub_ground_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("mapground",
+  pub_ground_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(ground_topic_,
                 rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());  
 
   pcl::PointCloud<pcl::PointXYZ>::Ptr map_cloud (new pcl::PointCloud<pcl::PointXYZ>);

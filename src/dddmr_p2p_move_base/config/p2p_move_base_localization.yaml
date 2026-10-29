@@ -1,5 +1,19 @@
 /**:
   ros__parameters:
+    # 公共坐标系、话题与预处理窗口：所有节点/插件直接读取这份公共参数
+    global_frame: "map"
+    robot_base_frame: "base_link"
+    sensor_frame: "hesai_lidar"
+    input_cloud_topic: "lio_sam/cloud_nonground"                  # 原始去地点云
+    preprocessed_cloud_topic: "navigation/preprocessed_cloud"     # 预处理点云
+    map_topic: "mapcloud"
+    ground_topic: "mapground"
+    odom_topic: "/odom1"                                         # 底盘真实速度反馈；定位仍由 TF 提供
+    perception_window_size: 6.0                                  # 共享预处理/感知窗口（m）
+    min_obstacle_height: -0.12                                   # 共享障碍最低高度阈值（m）
+    marking_height: 2.0                                          # 共享标记障碍高度上限（m）
+    expected_sensor_time: 0.5                                    # 共享传感器时间容忍（s）
+
     # 车体包络（碰撞检测），所有节点和 trajectory generator 复用这一份
     cuboid:
       flb: [0.50, 0.32, -0.32]                                  # front-left-bottom
@@ -13,16 +27,6 @@
 
 p2p_move_base:
   ros__parameters:
-    # 公共话题与坐标系：只在这里维护，launch 分发给各节点和插件
-    global_frame: "map"
-    robot_base_frame: "base_link"
-    sensor_frame: "hesai_lidar"
-    input_cloud_topic: "lio_sam/cloud_nonground"                  # 原始去地点云
-    preprocessed_cloud_topic: "navigation/preprocessed_cloud"     # 预处理点云
-    map_topic: "mapcloud"
-    ground_topic: "mapground"
-    odom_topic: "/odom1"                                         # 底盘真实速度反馈；定位仍由 TF 提供
-
     orchestrator_frequency: 15.0                                 # 任务编排循环频率，越高状态切换和控制消费越及时
     route_request_patience: 90.0                                 # 等待全局路径请求返回的最大时长（s）
     blocked_wait_patience: 2.0                                   # blocked wait 状态最长持续时间（s），先给局部障碍清除窗口
@@ -111,7 +115,7 @@ global_planner:
       max_projected_vertical_jump: 0.12                           # 投影点最大垂向跳变（m）
       allow_sample_nearest_fallback: false                        # 采样投影失败时是否允许最近邻回退
 
-# 全局感知：公共话题与坐标系由 launch 从 p2p_move_base 分发
+# 全局感知：公共话题与坐标系直接读取文件顶部的 /** 参数
 perception_3d_global:
   ros__parameters:
     enable_detail_log: false                                     # 是否开启感知层详细日志
@@ -156,11 +160,7 @@ perception_3d_global:
       euclidean_cluster_extraction_min_cluster_size: 1           # 欧式聚类最小点数
       xy_resolution: 0.05                                        # 栅格 XY 分辨率（m）
       height_resolution: 0.05                                    # 高度分辨率（m）
-      min_obstacle_height: -0.12
-      marking_height: 2.0                                        # 标记障碍物高度上限（m）
-      perception_window_size: 6.0                                # 全局感知窗口（m），与公共预处理/局部一致
       segmentation_ignore_ratio: 1.1                             # 与静态图匹配比例阈值（高于该值忽略）
-      expected_sensor_time: 0.5                                  # 传感器时间容忍（s），避免调度抖动导致全局动态层过期
 
 # 局部规划：控制后端选择与公共约束
 local_planner:
@@ -363,11 +363,7 @@ perception_3d_local:
       scan_effective_negative_end: -180.0                          # 反向扫描有效终止角（deg）
       xy_resolution: 0.05                                        # 栅格 XY 分辨率（m）
       height_resolution: 0.05                                    # 高度分辨率（m）
-      min_obstacle_height: -0.12                                 # 障碍最低高度阈值（m）
-      marking_height: 2.0                                        # 标记障碍高度上限（m）
-      perception_window_size: 6.0                                # 局部感知窗口（m），覆盖 5 m 预测行程及车体/近障碍裕度
       segmentation_ignore_ratio: 0.5                             # 与静态图匹配比例阈值（高于该值忽略）
-      expected_sensor_time: 0.5                                  # 传感器时间容忍（s），避免偶发点云/调度延迟导致感知误判失效
 
 # 恢复行为
 recovery_behaviors:

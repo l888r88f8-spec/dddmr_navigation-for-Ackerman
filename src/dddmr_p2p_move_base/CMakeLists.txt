@@ -201,6 +201,23 @@ if(BUILD_TESTING)
     ENV PYTHONDONTWRITEBYTECODE=1
   )
 
+  ament_add_pytest_test(test_navigation_parameter_integration
+    test/test_navigation_parameter_integration.py
+    ENV PYTHONDONTWRITEBYTECODE=1
+        ROS_DOMAIN_ID=187
+        ROS_LOCALHOST_ONLY=1
+        ROS_LOG_DIR=/tmp/dddmr_verify_ros_logs
+    TIMEOUT 180
+  )
+  set_tests_properties(test_navigation_parameter_integration PROPERTIES RUN_SERIAL TRUE)
+
+  ament_add_gtest(test_parameter_utils
+    test/test_parameter_utils.cpp
+  )
+  ament_target_dependencies(test_parameter_utils
+    rclcpp
+  )
+
   ament_add_gtest(test_navigation_fault_policy
     test/test_navigation_fault_policy.cpp
   )

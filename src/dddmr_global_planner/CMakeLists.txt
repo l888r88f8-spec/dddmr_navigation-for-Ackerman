@@ -170,6 +170,7 @@ install(DIRECTORY
 install(PROGRAMS
   script/example_client.py
   script/dwa_global_planner_client.py
+  script/static_transform_from_params.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
