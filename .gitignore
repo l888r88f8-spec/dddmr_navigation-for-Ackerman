@@ -24,3 +24,7 @@ htmlcov/
 # C++
 *.o
 *.obj
+
+# Local test directories (existing tracked files remain tracked)
+**/test/
+**/tests/

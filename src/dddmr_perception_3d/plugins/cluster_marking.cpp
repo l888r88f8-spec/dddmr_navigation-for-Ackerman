@@ -31,10 +31,30 @@
 #include <perception_3d/cluster_marking.h>
 
 #include <cmath>
+#include <limits>
 
 
 namespace perception_3d
 {
+
+namespace
+{
+//@ Per-thread dense scratch indexed by ground-point id. Writing an array slot is
+//@ much cheaper than hash-inserting the same node once per obstacle point, and
+//@ the materialised map keeps exactly the same min-distance values. Each calling
+//@ thread has its own scratch, and touched slots are reset after each computation.
+struct NodeDistanceScratch
+{
+  std::vector<float> distance;
+  std::vector<int> touched;
+};
+
+NodeDistanceScratch & node_distance_scratch()
+{
+  static thread_local NodeDistanceScratch scratch;
+  return scratch;
+}
+}// namespace
 
 Marking::~Marking(){
   //@ loop marking_ map to reset all ptr
@@ -77,6 +97,15 @@ void Marking::computeMinDistanceFromObstacle2GroundNodes(
   sor.setLeafSize (0.1f, 0.1f, 0.1f);
   sor.filter (*projected_cloud_cluster);
 
+  NodeDistanceScratch & scratch = node_distance_scratch();
+  const std::size_t ground_size = shared_data_->pcl_ground_->points.size();
+  if(scratch.distance.size() != ground_size){
+    scratch.distance.assign(ground_size, std::numeric_limits<float>::infinity());
+    scratch.touched.clear();
+  }
+
+  std::vector<int> id_tmp;
+  std::vector<float> sqdist_tmp;
   for(auto prj_pt_it=projected_cloud_cluster->points.begin();prj_pt_it!=projected_cloud_cluster->points.end();prj_pt_it++){
     if(!std::isfinite((*prj_pt_it).x) ||
       !std::isfinite((*prj_pt_it).y) ||
@@ -89,33 +118,47 @@ void Marking::computeMinDistanceFromObstacle2GroundNodes(
     pt.y = (*prj_pt_it).y;
     pt.z = (*prj_pt_it).z;
 
-    std::vector<int> id_tmp;
-    std::vector<float> sqdist_tmp;
+    id_tmp.clear();
+    sqdist_tmp.clear();
     //@ We mark lethal
     if(shared_data_->kdtree_ground_->radiusSearch(pt, inflation_radius_, id_tmp, sqdist_tmp)){
       for(int i=0;i<id_tmp.size();i++){
-        if(id_tmp[i] < 0 ||
-          static_cast<size_t>(id_tmp[i]) >= shared_data_->pcl_ground_->points.size())
+        const int node_id = id_tmp[i];
+        if(node_id < 0 ||
+          static_cast<size_t>(node_id) >= ground_size)
         {
           continue;
         }
-        float dx = pt.x - shared_data_->pcl_ground_->points[id_tmp[i]].x;
-        float dy = pt.y - shared_data_->pcl_ground_->points[id_tmp[i]].y;
-        float dz = pt.z - shared_data_->pcl_ground_->points[id_tmp[i]].z;
+        float dx = pt.x - shared_data_->pcl_ground_->points[node_id].x;
+        float dy = pt.y - shared_data_->pcl_ground_->points[node_id].y;
         //@ Remove z value (see issue 8), we might have to review this assumption.
         float distance = sqrt(dx*dx + dy* dy);
-        //RCLCPP_DEBUG(rclcpp::get_logger("cluster_marking"),"Distance xyz: %.2f, distance xy: %.2f", sqrt(sqdist_tmp[i]), distance);
-        //if(nodes_of_min_distance.insert(std::make_pair(id_tmp[i], sqrt(sqdist_tmp[i]))).second == false)
-        if(nodes_of_min_distance.insert(std::make_pair(id_tmp[i], distance)).second == false)
-        {
-          //@ key was presented
-          //nodes_of_min_distance[id_tmp[i]] = std::min(nodes_of_min_distance[id_tmp[i]], sqrt(sqdist_tmp[i]));
-          nodes_of_min_distance[id_tmp[i]] = std::min(nodes_of_min_distance[id_tmp[i]], distance);
+        float & slot = scratch.distance[node_id];
+        if(std::isinf(slot)){
+          scratch.touched.push_back(node_id);
+          slot = distance;
         }
-
+        else if(distance < slot){
+          slot = distance;
+        }
       }
-      
     }
+  }
+
+  if(!scratch.touched.empty()){
+    nodes_of_min_distance.reserve(nodes_of_min_distance.size() + scratch.touched.size());
+    for(int node_id : scratch.touched){
+      const float distance = scratch.distance[node_id];
+      auto found = nodes_of_min_distance.find(node_id);
+      if(found == nodes_of_min_distance.end()){
+        nodes_of_min_distance.emplace(node_id, distance);
+      }
+      else if(distance < found->second){
+        found->second = distance;
+      }
+      scratch.distance[node_id] = std::numeric_limits<float>::infinity();
+    }
+    scratch.touched.clear();
   }
 
 }

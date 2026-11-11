@@ -177,4 +177,5 @@ install(PROGRAMS
 ament_export_include_directories(include)
 ament_export_libraries(a_star_on_graph forward_hybrid_a_star global_planner dynamic_window_aware_global_planner)
 ament_export_dependencies(${dependencies})
+
 ament_package()

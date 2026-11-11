@@ -30,6 +30,19 @@
 */
 #include <global_planner/a_star_on_pc.h>
 
+#include <chrono>
+#include <mutex>
+#include <vector>
+
+namespace
+{
+double ElapsedMs(const std::chrono::steady_clock::time_point & started_at)
+{
+  return std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - started_at).count();
+}
+}  // namespace
+
 AstarList::AstarList(pcl::PointCloud<pcl::PointXYZI>::Ptr& pc_original_z_up){
   pc_original_z_up_ = pc_original_z_up;
   kdtree_ground_.reset(new nanoflann::KdTreeFLANN<pcl::PointXYZI>());
@@ -203,7 +216,12 @@ bool A_Star_on_Graph::isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::Point
 
 void A_Star_on_Graph::getPath(
   unsigned int start, unsigned int goal,
-  std::vector<unsigned int>& path){
+  std::vector<unsigned int>& path,
+  GraphPlanDiagnostics * diagnostics){
+
+  if(diagnostics){
+    diagnostics->reset();
+  }
 
   //RCLCPP_DEBUG(rclcpp::get_logger("astar"),"Start: %u, Goal: %u", start, goal);
   if(!pc_original_z_up_ || pc_original_z_up_->points.empty() ||
@@ -230,7 +248,11 @@ void A_Star_on_Graph::getPath(
   double inflation_descending_rate = perception_ros_->getGlobalUtils()->getInflationDescendingRate();
   double max_obstacle_distance = perception_ros_->getGlobalUtils()->getMaxObstacleDistance();
   
+  const auto aggregate_lethal_started_at = std::chrono::steady_clock::now();
   perception_ros_->getStackedPerception()->aggregateLethal();
+  if(diagnostics){
+    diagnostics->aggregate_lethal_ms = ElapsedMs(aggregate_lethal_started_at);
+  }
   //@ generate kd-tree and handle no point cloud edge case
   kdtree_lethal_.reset(new nanoflann::KdTreeFLANN<pcl::PointXYZI>());
   
@@ -280,6 +302,47 @@ void A_Star_on_Graph::getPath(
     }
     avg_intensity = avg_intensity/valid_neighbor_count;
 
+    // One short shared-map read lock for this expanded node's neighbor batch.
+    // Only the dGraph and static node-weight reads need the production guard;
+    // LOS, cost math and A* bookkeeping run after it is released.
+    const std::size_t neighbor_count = pointIdxRadiusSearch.size();
+    std::vector<double> neighbor_dgraph(neighbor_count, 0.0);
+    std::vector<float> neighbor_weight(neighbor_count, 0.0f);
+    {
+      auto shared_data = perception_ros_->getSharedDataPtr();
+      std::unique_lock<std::recursive_mutex> batch_lock;
+      if(shared_data){
+        const auto batch_lock_started_at = std::chrono::steady_clock::now();
+        batch_lock = std::unique_lock<std::recursive_mutex>(
+          shared_data->ground_kdtree_cb_mutex_);
+        if(diagnostics){
+          diagnostics->recordBatchLock(ElapsedMs(batch_lock_started_at));
+        }
+      }
+
+      for(unsigned int it = 0; it!=pointIdxRadiusSearch.size(); it++){
+        int current_expanding_index = pointIdxRadiusSearch[it];
+        if(current_expanding_index < 0 ||
+          static_cast<std::size_t>(current_expanding_index) >= pc_original_z_up_->points.size())
+        {
+          continue;
+        }
+
+        //@ dGraphValue is the distance to lethal
+        const auto dgraph_query_started_at = std::chrono::steady_clock::now();
+        neighbor_dgraph[it] = perception_ros_->get_min_dGraphValue(current_expanding_index);
+        if(diagnostics){
+          diagnostics->recordDGraphQuery(ElapsedMs(dgraph_query_started_at));
+        }
+
+        // Static node weights are O(1) in production. Only non-lethal
+        // neighbours need a weight; LOS-rejected reads stay unused.
+        if(shared_data && neighbor_dgraph[it] >= inscribed_radius){
+          neighbor_weight[it] = shared_data->sGraph_ptr_->getNodeWeight(current_expanding_index);
+        }
+      }
+    }
+
     for(unsigned int it = 0; it!=pointIdxRadiusSearch.size(); it++){
       
       int current_expanding_index = pointIdxRadiusSearch[it];
@@ -291,7 +354,7 @@ void A_Star_on_Graph::getPath(
       float current_expanding_g = sqrt(pointRadiusSquaredDistance[it]);
 
       //@ dGraphValue is the distance to lethal
-      double dGraphValue = perception_ros_->get_min_dGraphValue(current_expanding_index);
+      double dGraphValue = neighbor_dgraph[it];
 
       /*This is for lethal*/
       if(dGraphValue<inscribed_radius){
@@ -318,7 +381,7 @@ void A_Star_on_Graph::getPath(
       //  continue;
       
       float ground_edge_weight = avg_intensity;
-      float node_weight = perception_ros_->getSharedDataPtr()->sGraph_ptr_->getNodeWeight(current_expanding_index);
+      float node_weight = neighbor_weight[it];
       float new_g = current_node.g + current_expanding_g + factor * 1.0 + node_weight + theta*turning_weight_ + ground_edge_weight;
       float new_h = sqrt(pcl::geometry::squaredDistance(pcl_expanding, pcl_goal));
       float new_f = new_g + new_h;

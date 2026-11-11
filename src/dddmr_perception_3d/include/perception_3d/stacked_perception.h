@@ -31,11 +31,18 @@
 #ifndef PERCEPTION_3D_STACKED_PERCEPTION_H_
 #define PERCEPTION_3D_STACKED_PERCEPTION_H_
 
+#include <perception_3d/perception_snapshot.h>
 #include <perception_3d/sensor.h>
 
 /*Debug*/
 #include <sys/time.h>
 #include <time.h>
+
+/*Compatibility snapshot export cross-thread state.*/
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <string>
 
 /*To iterate the ymal for plugins and also for mutex lock*/
 #include <pluginlib/class_loader.hpp>
@@ -90,7 +97,33 @@ class StackedPerception{
 
     /*Check sensors are publish topics*/
     bool isSensorOK();
-    
+
+    /*
+    Compatibility-only immutable observation export.
+
+    configureSnapshotExport() is called once during node initialization from
+    parameters whose default is OFF, so an old node keeps its original path.
+    exportSnapshot() must be called only AFTER the complete clear/mark cycle; it
+    briefly takes the existing locks to deep-copy current plugin observations
+    into vectors, then publishes the frozen object. It performs no terrain
+    building, graph scan, distance-field work or plugin callback.
+    */
+    void configureSnapshotExport(bool enabled, std::string static_source_name);
+    bool snapshotExportEnabled() const noexcept;
+    // Freezes the current plugin observations. cycle_stamp_ns is the perception
+    // update-cycle stamp and is kept separate from each source's acquisition
+    // stamp: a source stamp is read from its frozen PCL header when present and
+    // is marked unknown (zero) otherwise. The configured map frame is used only
+    // for observations whose points were already transformed into it; a source
+    // header naming a different frame is dropped rather than relabelled.
+    std::shared_ptr<const PerceptionSnapshot> exportSnapshot(
+      const std::string & frame_id,
+      std::int64_t cycle_stamp_ns,
+      std::int64_t received_steady_ns,
+      std::uint64_t terrain_revision,
+      bool terrain_revision_known);
+    std::shared_ptr<const PerceptionSnapshot> latestSnapshot() const noexcept;
+
   private:
     std::vector<std::shared_ptr<Sensor>> plugins_;
 
@@ -102,6 +135,13 @@ class StackedPerception{
     std::shared_ptr<SharedData> shared_data_;
 
     rclcpp::node_interfaces::NodeLoggingInterface::SharedPtr logger_;
+
+    /*Compatibility export state. latest_snapshot_ is read with std::atomic_load
+    so consumers never take the perception lock just to inspect the snapshot.*/
+    std::atomic<bool> snapshot_export_enabled_{false};
+    std::string snapshot_static_source_name_{"map"};
+    std::uint64_t snapshot_sequence_{0};
+    std::shared_ptr<const PerceptionSnapshot> latest_snapshot_;
 };
 
 }//end of name space

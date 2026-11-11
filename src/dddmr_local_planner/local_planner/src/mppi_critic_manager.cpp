@@ -98,6 +98,237 @@ MppiPathProjection projectPointOntoMppiPath(
   return MppiBypassSideClassifier(path).projectPoint(x, y);
 }
 
+namespace
+{
+
+// Longest contiguous run of free lateral probe cells. Each sample represents
+// a vehicle-centre position, so a run of k samples gives the centre roughly k
+// steps of lateral freedom. The start index is the innermost sample of that
+// run, which is where the usable band begins relative to the route.
+struct FreeRun
+{
+  std::size_t length = 0;
+  std::size_t start = 0;
+};
+
+FreeRun longestFreeRun(const std::vector<bool> & blocked)
+{
+  FreeRun longest;
+  std::size_t run = 0;
+  for(std::size_t i = 0; i < blocked.size(); ++i){
+    if(blocked[i]){
+      run = 0;
+      continue;
+    }
+    ++run;
+    if(run > longest.length){
+      longest.length = run;
+      longest.start = i + 1 - run;
+    }
+  }
+  return longest;
+}
+
+}  // namespace
+
+MppiLateralOccupancyProfile measureMppiLateralOccupancyProfile(
+  const std::vector<MppiPathPoint> & path,
+  const MppiBlockedProbe & probe_blocked,
+  const MppiLateralProfileConfig & config)
+{
+  MppiLateralOccupancyProfile profile;
+  if(!probe_blocked || path.empty() || config.max_lateral_offset <= 0.0 ||
+    config.lateral_step <= 0.0 || config.max_blocked_points == 0)
+  {
+    return profile;
+  }
+
+  std::vector<std::size_t> blocked_indices;
+  for(std::size_t i = 0; i < path.size(); ++i){
+    if(!path[i].obstacle_free){
+      blocked_indices.push_back(i);
+    }
+  }
+  if(blocked_indices.empty()){
+    return profile;
+  }
+
+  const std::size_t stride = std::max<std::size_t>(
+    1, (blocked_indices.size() + config.max_blocked_points - 1) /
+    config.max_blocked_points);
+  const int samples_per_side = std::max(
+    0, static_cast<int>(std::floor(
+      config.max_lateral_offset / config.lateral_step + 1e-9)));
+
+  double offset_sum = 0.0;
+  std::size_t offset_count = 0;
+  for(std::size_t k = 0; k < blocked_indices.size(); k += stride){
+    const auto & anchor = path[blocked_indices[k]];
+    if(!std::isfinite(anchor.x) || !std::isfinite(anchor.y) ||
+      !std::isfinite(anchor.yaw))
+    {
+      continue;
+    }
+    // Left normal of the route direction.
+    const double normal_x = -std::sin(anchor.yaw);
+    const double normal_y = std::cos(anchor.yaw);
+    // Tangential direction, used to sweep the probe band over the footprint
+    // that extends ahead of and behind the anchor.
+    const double tangent_x = std::cos(anchor.yaw);
+    const double tangent_y = std::sin(anchor.yaw);
+    const int longitudinal_samples =
+      (config.max_longitudinal_offset > 0.0 && config.longitudinal_step > 0.0) ?
+      static_cast<int>(std::lround(
+        config.max_longitudinal_offset / config.longitudinal_step)) : 0;
+    std::vector<bool> left_blocked(
+      static_cast<std::size_t>(samples_per_side), false);
+    std::vector<bool> right_blocked(
+      static_cast<std::size_t>(samples_per_side), false);
+    for(double offset = -config.max_lateral_offset;
+      offset <= config.max_lateral_offset + 1e-9;
+      offset += config.lateral_step)
+    {
+      if(std::fabs(offset) < config.lateral_step * 0.5){
+        continue;
+      }
+      MppiPathPoint probe = anchor;
+      probe.x = anchor.x + normal_x * offset;
+      probe.y = anchor.y + normal_y * offset;
+      bool blocked = probe_blocked(probe);
+      for(int step = 1; !blocked && step <= longitudinal_samples; ++step){
+        for(int direction = -1; direction <= 1 && !blocked; direction += 2){
+          MppiPathPoint along = probe;
+          along.x = probe.x +
+            tangent_x * static_cast<double>(direction * step) * config.longitudinal_step;
+          along.y = probe.y +
+            tangent_y * static_cast<double>(direction * step) * config.longitudinal_step;
+          blocked = probe_blocked(along);
+        }
+      }
+      if(!blocked){
+        continue;
+      }
+      offset_sum += offset;
+      ++offset_count;
+      const int side_index = static_cast<int>(std::lround(
+        std::fabs(offset) / config.lateral_step)) - 1;
+      if(side_index >= 0 && side_index < samples_per_side){
+        if(offset > 0.0){
+          left_blocked[static_cast<std::size_t>(side_index)] = true;
+        }
+        else{
+          right_blocked[static_cast<std::size_t>(side_index)] = true;
+        }
+      }
+      if(offset > 0.0){
+        profile.left_clearance = std::min(profile.left_clearance, offset);
+      }
+      else{
+        profile.right_clearance = std::min(profile.right_clearance, -offset);
+      }
+    }
+    // The free span on the pass side is what the vehicle can actually use;
+    // take the narrowest anchor so a pinch point anywhere cannot be averaged
+    // away by wider sections of the blocked run. Keep the band edge from the
+    // same anchor so the detour cost measures the room this scan actually saw.
+    const FreeRun left_run = longestFreeRun(left_blocked);
+    const FreeRun right_run = longestFreeRun(right_blocked);
+    const double left_span =
+      static_cast<double>(left_run.length) * config.lateral_step;
+    if(left_span < profile.left_free_span){
+      profile.left_free_span = left_span;
+      profile.left_band_offset = left_run.length == 0 ?
+        std::numeric_limits<double>::quiet_NaN() :
+        static_cast<double>(left_run.start + 1) * config.lateral_step;
+    }
+    const double right_span =
+      static_cast<double>(right_run.length) * config.lateral_step;
+    if(right_span < profile.right_free_span){
+      profile.right_free_span = right_span;
+      profile.right_band_offset = right_run.length == 0 ?
+        std::numeric_limits<double>::quiet_NaN() :
+        -static_cast<double>(right_run.start + 1) * config.lateral_step;
+    }
+  }
+
+  if(offset_count == 0){
+    return profile;
+  }
+  profile.valid = true;
+  profile.obstacle_offset = offset_sum / static_cast<double>(offset_count);
+  return profile;
+}
+
+MppiBypassSide selectMppiGeometricBypassSide(
+  const MppiLateralOccupancyProfile & profile,
+  const double min_decisive_offset,
+  const double required_width)
+{
+  if(!profile.valid || !std::isfinite(profile.obstacle_offset)){
+    return MppiBypassSide::Neutral;
+  }
+  // An obstacle centred on the route blocks both sides; a tiny asymmetry is
+  // measurement noise, not a reason to commit to a side.
+  if(std::fabs(profile.obstacle_offset) < std::max(0.0, min_decisive_offset)){
+    return MppiBypassSide::Neutral;
+  }
+  const bool obstacle_on_left = profile.obstacle_offset > 0.0;
+  const MppiBypassSide side =
+    obstacle_on_left ? MppiBypassSide::Right : MppiBypassSide::Left;
+  // The pass side needs a contiguous free lateral band, not merely distance
+  // from the centreline to the obstacle influence: an obstacle whose footprint
+  // crosses the centreline can still leave a wide free band farther out.
+  const double pass_free_span =
+    obstacle_on_left ? profile.right_free_span : profile.left_free_span;
+  // Infinity means nothing was observed in the sampled band on that side.
+  if(std::isfinite(pass_free_span) && pass_free_span < required_width){
+    return MppiBypassSide::Neutral;
+  }
+  return side;
+}
+
+double mppiBypassBandDetour(
+  const MppiLateralOccupancyProfile & profile,
+  const MppiBypassSide side,
+  const double vehicle_offset)
+{
+  if(!profile.valid || !std::isfinite(vehicle_offset)){
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  // Bands are signed: the left band runs outward from its inner edge, the
+  // right band inward (towards more negative offsets).
+  double low = 0.0;
+  double high = 0.0;
+  if(side == MppiBypassSide::Left){
+    if(!std::isfinite(profile.left_band_offset) ||
+      !std::isfinite(profile.left_free_span))
+    {
+      return std::numeric_limits<double>::quiet_NaN();
+    }
+    low = profile.left_band_offset;
+    high = low + profile.left_free_span;
+  }
+  else if(side == MppiBypassSide::Right){
+    if(!std::isfinite(profile.right_band_offset) ||
+      !std::isfinite(profile.right_free_span))
+    {
+      return std::numeric_limits<double>::quiet_NaN();
+    }
+    high = profile.right_band_offset;
+    low = high - profile.right_free_span;
+  }
+  else{
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  if(vehicle_offset < low){
+    return low - vehicle_offset;
+  }
+  if(vehicle_offset > high){
+    return vehicle_offset - high;
+  }
+  return 0.0;
+}
+
 MppiBypassSide MppiBypassSideClassifier::classify(
   const MppiScoredTrajectory & trajectory) const
 {
@@ -153,13 +384,16 @@ bool annotateMppiCandidateMetadata(
       score.valid = false;
       score.bypass_side = MppiBypassSide::Neutral;
       score.collision_free = false;
+      score.signed_lateral_progress = std::numeric_limits<double>::quiet_NaN();
     }
     return false;
   }
 
   const MppiBypassSideClassifier classifier(data.path);
+  const auto start = classifier.projectPoint(data.robot_x, data.robot_y);
   for(std::size_t i = 0; i < data.trajectories.size(); ++i){
     auto & score = result->scores[i];
+    score.signed_lateral_progress = std::numeric_limits<double>::quiet_NaN();
     if(!score.valid){
       score.bypass_side = MppiBypassSide::Neutral;
       score.collision_free = false;
@@ -167,6 +401,20 @@ bool annotateMppiCandidateMetadata(
     }
     score.bypass_side = classifier.classify(data.trajectories[i]);
     score.collision_free = isMppiTrajectoryCollisionFree(data.trajectories[i]);
+    const auto & points = data.trajectories[i].points;
+    if(start.valid && score.collision_free &&
+      std::isfinite(data.model_dt) && data.model_dt > 0.0)
+    {
+      // Rollout point zero is already one model step into the future. Use the
+      // actual robot pose as the origin, not the first predicted position.
+      const double horizon_steps = std::min(
+        static_cast<double>(points.size()), std::max(1.0, std::ceil(1.0 / data.model_dt)));
+      const auto index = static_cast<std::size_t>(horizon_steps) - 1;
+      const auto future = classifier.projectPoint(points[index].x, points[index].y);
+      if(future.valid){
+        score.signed_lateral_progress = future.signed_offset - start.signed_offset;
+      }
+    }
   }
   return true;
 }
@@ -529,10 +777,64 @@ void MppiCriticManager::scorePathFollowCritic(
   while(target_index < data.path.size() && !data.path[target_index].obstacle_free){
     ++target_index;
   }
-  if(target_index >= data.path.size()){
-    return;
+  MppiPathPoint target;
+  if(target_index < data.path.size()){
+    target = data.path[target_index];
   }
-  const auto & target = data.path[target_index];
+  else{
+    // The scan ran off the far end of the window because the blocked region
+    // reaches the end of the local path. Returning here silently removes the
+    // only critic that rewards forward progress: PathAlign is already gated off
+    // by the blocked-path occupancy check. The averaged obstacle repulsion is
+    // then the only motion-dependent term left, and it is lowest for the
+    // trajectory that travels least, so a near-stationary sample becomes
+    // strictly cheapest and the vehicle creeps at vx_min until the geometry
+    // closes and reverse recovery has to unwedge it. Keep a progress target by
+    // extrapolating the route past the window end along its final heading.
+    // No target is invented when the route directly ahead of the vehicle is
+    // blocked as well: a fully closed corridor has nothing to progress toward.
+    const std::size_t robot_index =
+      nearestPathIndex(data.path, data.robot_x, data.robot_y, 0);
+    double free_route_ahead = 0.0;
+    std::size_t free_index = robot_index;
+    while(data.path[free_index].obstacle_free &&
+      free_index + 1 < data.path.size() && data.path[free_index + 1].obstacle_free)
+    {
+      free_route_ahead += distance(
+        data.path[free_index].x, data.path[free_index].y,
+        data.path[free_index + 1].x, data.path[free_index + 1].y);
+      ++free_index;
+    }
+    if(!data.path[robot_index].obstacle_free ||
+      free_route_ahead < config_.path_follow.threshold_to_consider)
+    {
+      return;
+    }
+
+    target = data.path.back();
+    double tangent_x = 0.0;
+    double tangent_y = 0.0;
+    if(data.path.size() >= 2){
+      const auto & before = data.path[data.path.size() - 2];
+      tangent_x = data.path.back().x - before.x;
+      tangent_y = data.path.back().y - before.y;
+    }
+    const double tangent_length = std::hypot(tangent_x, tangent_y);
+    const double spacing = tangent_length > 1e-6 ? tangent_length : 0.1;
+    if(tangent_length > 1e-6){
+      tangent_x /= tangent_length;
+      tangent_y /= tangent_length;
+    }
+    else{
+      tangent_x = std::cos(data.path.back().yaw);
+      tangent_y = std::sin(data.path.back().yaw);
+    }
+    const double extension =
+      static_cast<double>(std::max<std::size_t>(
+        1, config_.path_follow.offset_from_furthest)) * spacing;
+    target.x += tangent_x * extension;
+    target.y += tangent_y * extension;
+  }
   for(std::size_t i = 0; i < data.trajectories.size(); ++i){
     if(data.trajectories[i].points.empty()){
       continue;

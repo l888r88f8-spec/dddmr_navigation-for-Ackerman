@@ -16,6 +16,7 @@ def generate_launch_description():
     rviz_config = LaunchConfiguration('rviz_config')
     use_rviz = LaunchConfiguration('use_rviz')
     global_planner_prefix = LaunchConfiguration('global_planner_prefix')
+    start_global_planner = LaunchConfiguration('start_global_planner')
     map_path = LaunchConfiguration("map_path")
 
     localization_config = os.path.join(
@@ -46,7 +47,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "map_path",
-            default_value="/home/robot/map/hesai_outdoor_yifu",
+            default_value="/home/robot/map/hesai_sim2",
             description="Directory containing GlobalMap.pcd and GroundMap.pcd.",
         ),
         DeclareLaunchArgument(
@@ -63,6 +64,12 @@ def generate_launch_description():
             'global_planner_prefix',
             default_value='',
             description='Optional command prefix for global_planner_node, e.g. gdb.',
+        ),
+        DeclareLaunchArgument(
+            'start_global_planner',
+            default_value='true',
+            description='Start the legacy global_planner_node. Set false when a '
+                        'unified launch starts exactly one selected planner.',
         ),
         SetEnvironmentVariable('RCUTILS_COLORIZED_OUTPUT', '1'),
         Node(
@@ -96,6 +103,7 @@ def generate_launch_description():
             respawn=False,
             emulate_tty=True,
             prefix=global_planner_prefix,
+            condition=IfCondition(start_global_planner),
             parameters=[localization_config, {'use_sim_time': use_sim}],
         ),
         Node(

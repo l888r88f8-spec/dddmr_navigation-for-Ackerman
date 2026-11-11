@@ -43,6 +43,10 @@
 /*voxel*/
 #include <pcl/filters/voxel_grid.h>
 
+#include <cmath>
+#include <stdexcept>
+#include <string>
+
 class PCLPublisherNode : public rclcpp::Node {
 
   public:
@@ -159,7 +163,24 @@ PCLPublisherNode::PCLPublisherNode(std::string name): Node(name){
   rclcpp::Parameter ground_down_sample = this->get_parameter("ground_down_sample");
   ground_down_sample_ = ground_down_sample.as_double();
   RCLCPP_INFO(this->get_logger(), "ground_down_sample: %.2f", ground_down_sample_);
-  
+
+  // Down-sample policy is explicit and fail-closed:
+  //   0.0          keep the native PCD density (no VoxelGrid call);
+  //   > 0.0        apply that leaf size;
+  //   < 0.0, NaN   reject the configuration instead of silently keeping or
+  //                inventing a density.
+  const auto validate_down_sample = [](double value,
+                                       const char* parameter_name) {
+    if (!std::isfinite(value) || value < 0.0) {
+      throw std::invalid_argument(
+          std::string(parameter_name) +
+          " must be a finite, non-negative leaf size (0 keeps native "
+          "density); got " + std::to_string(value));
+    }
+  };
+  validate_down_sample(map_down_sample_, "map_down_sample");
+  validate_down_sample(ground_down_sample_, "ground_down_sample");
+
   //@ Latched topic, Create a publisher using the QoS settings to emulate a ROS1 latched topic
   pub_map_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(map_topic_,
               rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());  
@@ -196,11 +217,20 @@ PCLPublisherNode::PCLPublisherNode(std::string name): Node(name){
     // You can either apply transform_1 or transform_2; they are the same
     pcl::transformPointCloud(*map_cloud, *map_cloud, transform_2);
     RCLCPP_INFO(this->get_logger(), "Map pointcloud size: %lu", map_cloud->points.size());
-    pcl::VoxelGrid<pcl::PointXYZ> sor;
-    sor.setInputCloud (map_cloud);
-    sor.setLeafSize (map_down_sample_, map_down_sample_, map_down_sample_);
-    sor.filter (*map_cloud);
-    map_cloud->is_dense = false;
+    if (std::isfinite(map_down_sample_) && map_down_sample_ > 0.0) {
+      pcl::VoxelGrid<pcl::PointXYZ> sor;
+      sor.setInputCloud (map_cloud);
+      sor.setLeafSize (map_down_sample_, map_down_sample_, map_down_sample_);
+      sor.filter (*map_cloud);
+      map_cloud->is_dense = false;
+    }
+    else {
+      // Validation above guarantees this branch is exactly 0.0: the explicit
+      // "keep native density" spelling. PCL VoxelGrid is not run.
+      RCLCPP_INFO(
+        this->get_logger(),
+        "map_down_sample is 0.0; keeping native map density");
+    }
     
     pcl::PointCloud<pcl::PointXYZI>::Ptr map_cloud_intensity (new pcl::PointCloud<pcl::PointXYZI>);
     pcl::copyPointCloud(*map_cloud, *map_cloud_intensity);
@@ -236,11 +266,20 @@ PCLPublisherNode::PCLPublisherNode(std::string name): Node(name){
     // You can either apply transform_1 or transform_2; they are the same
     pcl::transformPointCloud (*map_ground, *map_ground, transform_2);
     RCLCPP_INFO(this->get_logger(), "Ground pointcloud size: %lu", map_ground->points.size());
-    pcl::VoxelGrid<pcl::PointXYZ> sor;
-    sor.setInputCloud (map_ground);
-    sor.setLeafSize (ground_down_sample_, ground_down_sample_, ground_down_sample_);
-    sor.filter (*map_ground);
-    map_ground->is_dense = false;
+    if (std::isfinite(ground_down_sample_) && ground_down_sample_ > 0.0) {
+      pcl::VoxelGrid<pcl::PointXYZ> sor;
+      sor.setInputCloud (map_ground);
+      sor.setLeafSize (ground_down_sample_, ground_down_sample_, ground_down_sample_);
+      sor.filter (*map_ground);
+      map_ground->is_dense = false;
+    }
+    else {
+      // Validation above guarantees this branch is exactly 0.0: the explicit
+      // "keep native density" spelling. PCL VoxelGrid is not run.
+      RCLCPP_INFO(
+        this->get_logger(),
+        "ground_down_sample is 0.0; keeping native ground density");
+    }
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr map_ground_intensity (new pcl::PointCloud<pcl::PointXYZI>);
     pcl::copyPointCloud(*map_ground, *map_ground_intensity);

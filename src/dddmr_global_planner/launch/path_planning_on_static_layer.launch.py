@@ -41,12 +41,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'map_dir',
-            default_value='/home/robot/map/hesai_outdoor_wuyuehua1/GroundMap.pcd',
+            default_value='/home/robot/map/hesai_indoor/GroundMap.pcd',
             description='Path to the global map PCD file.',
         ),
         DeclareLaunchArgument(
             'ground_dir',
-            default_value='/home/robot/map/hesai_outdoor_wuyuehua1/GroundMap.pcd',
+            default_value='/home/robot/map/hesai_indoor/GroundMap.pcd',
             description='Path to the ground map PCD file.',
         ),
         DeclareLaunchArgument(
@@ -90,8 +90,8 @@ def generate_launch_description():
             respawn=False,
             emulate_tty=True,
             arguments=[
-                '--x', '-3.73',
-                '--y', '-3.18',
+                '--x', '3.0',
+                '--y', '0.1',
                 '--z', '-0.5',
                 '--roll', '0.0',
                 '--pitch', '0.0',

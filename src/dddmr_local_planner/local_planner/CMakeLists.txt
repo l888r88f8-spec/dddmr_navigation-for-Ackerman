@@ -26,6 +26,7 @@ find_package(perception_3d REQUIRED)
 find_package(mpc_critics REQUIRED)
 find_package(trajectory_generators REQUIRED)
 find_package(dddmr_sys_core REQUIRED)
+find_package(dddmr_local_map REQUIRED)
 
 find_package(PCL REQUIRED)
 
@@ -54,6 +55,7 @@ set(dependencies
   mpc_critics
   trajectory_generators
   dddmr_sys_core
+  dddmr_local_map
 )
 
 include_directories(
@@ -76,7 +78,10 @@ endfunction()
 add_library(local_planner_mppi_controller SHARED
   src/mppi_critic_manager.cpp
   src/mppi_controller.cpp
+  src/mppi_directed_retreat.cpp
   src/mppi_obstacle_geometry.cpp
+  src/mppi_local_map_rollout.cpp
+  src/mppi_measured_travel.cpp
 )
 target_include_directories(local_planner_mppi_controller PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -85,6 +90,10 @@ target_include_directories(local_planner_mppi_controller PUBLIC
 )
 target_link_libraries(local_planner_mppi_controller
   ${PCL_LIBRARIES}
+  dddmr_local_map::dddmr_local_map_core
+)
+ament_target_dependencies(local_planner_mppi_controller
+  ${dependencies}
 )
 enable_default_optimized_runtime(local_planner_mppi_controller)
 
@@ -94,6 +103,7 @@ add_library(local_planner SHARED
 )
 target_link_libraries(local_planner
   local_planner_mppi_controller
+  dddmr_local_map::dddmr_local_map_ros
   ${PCL_LIBRARIES}
 )
 ament_target_dependencies(local_planner
@@ -134,6 +144,34 @@ install(TARGETS
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
 
+  # Test-only cross-check against the authoritative driver conversion helper.
+  # Production navigation does not link or depend on the driver package.
+  set(HUNTER_DRIVER_INCLUDE_DIR
+    "$ENV{HOME}/hunterse_ws/src/hunter_ros2/hunter_base/include"
+    CACHE PATH "Optional Hunter driver include directory for cross-checks")
+  if(EXISTS "${HUNTER_DRIVER_INCLUDE_DIR}/hunter_base/hunter_command.hpp")
+    ament_add_gtest(test_driver_nav_geometry
+      test/test_driver_nav_geometry.cpp
+    )
+    target_include_directories(test_driver_nav_geometry PRIVATE
+      ${HUNTER_DRIVER_INCLUDE_DIR}
+    )
+    target_link_libraries(test_driver_nav_geometry
+      local_planner_mppi_controller
+    )
+  else()
+    message(STATUS
+      "Skipping test_driver_nav_geometry: ${HUNTER_DRIVER_INCLUDE_DIR} "
+      "does not contain hunter_base/hunter_command.hpp")
+  endif()
+
+  ament_add_gtest(test_mppi_directed_retreat
+    test/test_mppi_directed_retreat.cpp
+  )
+  target_link_libraries(test_mppi_directed_retreat
+    local_planner_mppi_controller
+  )
+
   ament_add_gtest(test_mppi_controller
     test/test_mppi_controller.cpp
   )
@@ -147,6 +185,52 @@ if(BUILD_TESTING)
   target_link_libraries(test_mppi_critic_manager
     local_planner_mppi_controller
   )
+  ament_add_gtest(test_mppi_measured_travel
+    test/test_mppi_measured_travel.cpp
+  )
+  target_link_libraries(test_mppi_measured_travel
+    local_planner_mppi_controller
+  )
+
+  ament_add_gtest(test_mppi_local_map_rollout
+    test/test_mppi_local_map_rollout.cpp
+  )
+  target_link_libraries(test_mppi_local_map_rollout
+    local_planner_mppi_controller
+  )
+
+  # Diagnostic aggregated_pc publish-cache decision (header-only helper).
+  ament_add_gtest(test_published_cloud_cache
+    test/test_published_cloud_cache.cpp
+  )
+  target_include_directories(test_published_cloud_cache PRIVATE
+    include
+    ${PCL_INCLUDE_DIRS}
+  )
+  target_link_libraries(test_published_cloud_cache
+    ${PCL_LIBRARIES}
+  )
+
+  # Diagnostic topic gate: publish only while a subscriber exists.
+  ament_add_gtest(test_debug_publish
+    test/test_debug_publish.cpp
+  )
+  target_include_directories(test_debug_publish PRIVATE
+    include
+  )
+
+  # Deterministic model-in-the-loop simulation of the bypass strategy. It runs
+  # the production controller/critic/classifier code against a synthetic world
+  # and a bicycle model; it is not a hardware or ROS-stack validation.
+  ament_add_gtest(test_mppi_bypass_simulation
+    test/test_mppi_bypass_simulation.cpp
+    TIMEOUT 900
+  )
+  target_link_libraries(test_mppi_bypass_simulation
+    local_planner_mppi_controller
+  )
+  enable_default_optimized_runtime(test_mppi_local_map_rollout)
+
   enable_default_optimized_runtime(test_mppi_critic_manager)
 endif()
 

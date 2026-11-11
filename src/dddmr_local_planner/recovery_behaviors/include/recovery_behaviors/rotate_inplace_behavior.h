@@ -48,9 +48,8 @@ class RotateInPlaceBehavior: public RobotBehavior{
     void trans2Pose(geometry_msgs::msg::TransformStamped& trans, geometry_msgs::msg::PoseStamped& pose);
     double frequency_;
     double tolerance_;
-    pcl::PointCloud<pcl::PointXYZ> cuboid_;
     void trajectory2posearray_cuboids(const base_trajectory::Trajectory& a_traj, 
-                                      geometry_msgs::msg::PoseArray& pose_arr, pcl::PointCloud<pcl::PointXYZ>& cuboids_pcl);
+                                      geometry_msgs::msg::PoseArray& pose_arr);
 
     void getBestTrajectory(std::string traj_gen_name, base_trajectory::Trajectory& best_traj);
 

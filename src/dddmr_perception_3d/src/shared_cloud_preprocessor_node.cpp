@@ -39,41 +39,76 @@ public:
     publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>(output, 1);
     subscription_ = create_subscription<sensor_msgs::msg::PointCloud2>(
       input, rclcpp::SensorDataQoS().keep_last(1),
-      [this](sensor_msgs::msg::PointCloud2::ConstSharedPtr message) {process(*message);});
+      [this](sensor_msgs::msg::PointCloud2::ConstSharedPtr message) {accept(message);});
+    // A scan whose acquisition-time TF is still in flight must be retried from
+    // outside the sensor callback: with a timeout inside it, the TF listener
+    // needs the same single-threaded executor that is blocked waiting, so the
+    // wait always expires and the whole scan is lost.
+    retry_timer_ = create_wall_timer(
+      std::chrono::milliseconds(20), [this]() {deliverPending();});
     RCLCPP_INFO(get_logger(), "Shared cloud: %s -> %s, XY +/-%.1f m, voxel %.2f m",
       input.c_str(), output.c_str(), config_.window, config_.voxel_size);
   }
 
 private:
-  void process(const sensor_msgs::msg::PointCloud2 & message)
+  void accept(const sensor_msgs::msg::PointCloud2::ConstSharedPtr & message)
   {
+    if (!message) {return;}
     const auto now = get_clock()->now();
-    if (message.header.frame_id != sensor_frame_ ||
-      !IsCloudStampFresh(message.header.stamp, now, max_age_))
+    if (message->header.frame_id != sensor_frame_ ||
+      !IsCloudStampFresh(message->header.stamp, now, max_age_))
     {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
         "Dropping nonground cloud with unexpected frame or stale/invalid acquisition stamp");
       return;
     }
-    const rclcpp::Time stamp(message.header.stamp, now.get_clock_type());
+    const rclcpp::Time stamp(message->header.stamp, now.get_clock_type());
     // A clock rewind (e.g. a bag restart) starts a new observation sequence.
     if (have_stamp_ && last_stamp_ <= now && stamp <= last_stamp_) {return;}
+    // Keep the newest acceptable scan, replacing one that is still waiting
+    // for its pose, and try to deliver it right away.
+    pending_ = message;
+    pending_stamp_ = stamp;
+    have_stamp_ = true;
+    last_stamp_ = stamp;
+    deliverPending();
+  }
+
+  void deliverPending()
+  {
+    if (!pending_) {return;}
+    const auto now = get_clock()->now();
+    if (!IsCloudStampFresh(pending_->header.stamp, now, max_age_)) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "Dropping nonground cloud: acquisition stamp aged out before its pose arrived");
+      pending_.reset();
+      return;
+    }
+    Eigen::Affine3d sensor_to_body;
+    Eigen::Affine3d body_to_global;
     try {
-      const auto timeout = rclcpp::Duration::from_seconds(0.05);
-      const auto sensor_to_body = buffer_.lookupTransform(body_frame_, sensor_frame_, stamp, timeout);
-      const auto body_to_global = buffer_.lookupTransform(global_frame_, body_frame_, stamp, timeout);
-      pcl::PointCloud<pcl::PointXYZ> input;
-      pcl::fromROSMsg(message, input);
-      const auto cloud = PreprocessCloud(
-        input, tf2::transformToEigen(sensor_to_body), tf2::transformToEigen(body_to_global), config_);
-      if (!IsCloudStampFresh(message.header.stamp, get_clock()->now(), max_age_)) {return;}
-      publisher_->publish(MakePreprocessedCloudMessage(cloud, message.header, global_frame_));
-      last_stamp_ = stamp;
-      have_stamp_ = true;
+      // Never block here. A transform that the listener has not stored yet is
+      // simply retried by the timer until the scan ages out or a newer one
+      // arrives, which keeps this executor free to process /tf and /tf_static.
+      const auto no_wait = rclcpp::Duration::from_seconds(0.0);
+      sensor_to_body = tf2::transformToEigen(
+        buffer_.lookupTransform(body_frame_, sensor_frame_, pending_stamp_, no_wait));
+      body_to_global = tf2::transformToEigen(
+        buffer_.lookupTransform(global_frame_, body_frame_, pending_stamp_, no_wait));
     } catch (const tf2::TransformException & error) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
         "Shared cloud waiting for acquisition-time TF: %s", error.what());
+      return;
     }
+    pcl::PointCloud<pcl::PointXYZ> input;
+    pcl::fromROSMsg(*pending_, input);
+    const auto cloud = PreprocessCloud(input, sensor_to_body, body_to_global, config_);
+    if (!IsCloudStampFresh(pending_->header.stamp, get_clock()->now(), max_age_)) {
+      pending_.reset();
+      return;
+    }
+    publisher_->publish(MakePreprocessedCloudMessage(cloud, pending_->header, global_frame_));
+    pending_.reset();
   }
 
   CloudPreprocessorConfig config_;
@@ -83,8 +118,11 @@ private:
   tf2_ros::TransformListener listener_;
   bool have_stamp_ = false;
   rclcpp::Time last_stamp_{0, 0, RCL_ROS_TIME};
+  sensor_msgs::msg::PointCloud2::ConstSharedPtr pending_;
+  rclcpp::Time pending_stamp_{0, 0, RCL_ROS_TIME};
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr subscription_;
+  rclcpp::TimerBase::SharedPtr retry_timer_;
 };
 }  // namespace perception_3d
 

@@ -49,6 +49,24 @@ public:
     std::size_t expansions = 0;
     double planning_time_sec = 0.0;
     std::size_t path_pose_count = 0;
+
+    // Diagnostic-only per-plan accumulation. dgraph_query_ms wraps the actual
+    // get_min_dGraphValue() call and therefore includes wait + lookup work; it
+    // is not a direct mutex-lock-wait measurement. dgraph_over_1ms is a coarse
+    // blocked/slow-query bucket, not proof of contention.
+    double projection_ms = 0.0;
+    double aggregate_lethal_ms = 0.0;
+    double graph_search_ms = 0.0;
+    std::size_t dgraph_calls = 0;
+    double dgraph_query_ms = 0.0;
+    double dgraph_max_ms = 0.0;
+    std::size_t dgraph_over_1ms = 0;
+    // Time to acquire the batched shared-map read guard. This is the measured
+    // wait that moved out of dgraph_query_ms; total planning time must be read
+    // together with it.
+    std::size_t batch_lock_calls = 0;
+    double batch_lock_wait_ms = 0.0;
+    double batch_lock_max_ms = 0.0;
   };
   using ProgressCallback = std::function<void(const SearchDiagnostics &)>;
 
@@ -56,8 +74,8 @@ public:
   // collision/ground validation. It is not a strictly graph-constrained Hybrid A*.
   struct Config
   {
-    double wheelbase = 0.549185;
-    double max_steer = 0.69;
+    double wheelbase = 0.550;
+    double max_steer = 0.3270520925102273;  // HunterSEParams virtual central angle (22 deg inner wheel)
     int steer_sample_count = 5;
     int heading_bin_count = 72;
     double primitive_length = 0.6;
@@ -181,6 +199,24 @@ private:
     double * dgraph_value,
     std::size_t previous_ground_index,
     bool allow_nearest_fallback) const;
+
+  // Geometry-only projection/validation against the planner's private ground
+  // copy. No shared-map reads, so callers may run it outside the shared guard.
+  bool ProjectSample(
+    double x,
+    double y,
+    double yaw,
+    double z_hint,
+    std::size_t * ground_index,
+    double * projected_z,
+    std::size_t previous_ground_index,
+    bool allow_nearest_fallback) const;
+
+  // Shared-map dGraph read/check only; caller must hold or accept the
+  // production recursive mutex.
+  bool ReadSampleDGraph(
+    std::size_t ground_index,
+    double * dgraph_value) const;
 
   bool IsGroundIndexInWeightMap(std::size_t ground_index) const;
 

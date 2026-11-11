@@ -31,6 +31,7 @@
 #include <perception_3d/perception_3d_ros.h>
 
 #include <algorithm>
+#include <chrono>
 
 namespace perception_3d
 {
@@ -83,6 +84,22 @@ void Perception3D_ROS::initial(){
   declare_parameter("dgraph_publish_frequency", rclcpp::ParameterValue(0.0));
   this->get_parameter("dgraph_publish_frequency", dgraph_publish_frequency_);
   RCLCPP_INFO(this->get_logger(), "dgraph_publish_frequency: %.2f", dgraph_publish_frequency_);//5.0
+
+  //@ Compatibility-only observation export. The default is OFF so old nodes
+  //@ keep the original interfaces, topics and behavior. The grid planner's
+  //@ perception instance enables it explicitly and is named
+  //@ dddmr_grid_perception through a launch-time node-name remap.
+  declare_parameter("export_perception_snapshot", rclcpp::ParameterValue(false));
+  this->get_parameter("export_perception_snapshot", export_perception_snapshot_);
+  declare_parameter(
+    "perception_snapshot_static_plugin", rclcpp::ParameterValue("map"));
+  std::string perception_snapshot_static_plugin;
+  this->get_parameter(
+    "perception_snapshot_static_plugin", perception_snapshot_static_plugin);
+  RCLCPP_INFO(
+    this->get_logger(), "export_perception_snapshot: %d (static plugin: %s)",
+    export_perception_snapshot_ ? 1 : 0,
+    perception_snapshot_static_plugin.c_str());
 
   
   clock_ = this->get_clock();
@@ -150,6 +167,11 @@ void Perception3D_ROS::initial(){
                       shared_from_this(),
                       gbl_utils_); //ex: send "map" to plugin for param reader
   }
+
+  //@ Apply the compatibility export switch once. When false this is a no-op
+  //@ for the rest of the node; when true it only changes the post-mark hook.
+  stacked_perception_->configureSnapshotExport(
+    export_perception_snapshot_, perception_snapshot_static_plugin);
   
   //@ if perception is under clearing, timer should stop update.
   //@ leverage same group to save mutex lock
@@ -184,6 +206,17 @@ Perception3D_ROS::~Perception3D_ROS()
 
 std::shared_ptr<perception_3d::SharedData> Perception3D_ROS::getSharedDataPtr(){
   return stacked_perception_->getSharedDataPtr();
+}
+
+std::shared_ptr<const PerceptionSnapshot>
+Perception3D_ROS::getLatestPerceptionSnapshot() const
+{
+  if(!stacked_perception_){
+    return nullptr;
+  }
+  //@ Atomic load only: the consumer must not take the perception lock or touch
+  //@ mutable plugin/PCL storage.
+  return stacked_perception_->latestSnapshot();
 }
 
 
@@ -234,12 +267,42 @@ void Perception3D_ROS::sensorsUpdateLoop()
   gettimeofday(&start, NULL);
   #endif
 
+  const auto do_clear_started_at = std::chrono::steady_clock::now();
   stacked_perception_->doClear_then_Mark();
+  const auto do_clear_finished_at = std::chrono::steady_clock::now();
   stacked_perception_->refreshObservationCache();
+  const auto refresh_finished_at = std::chrono::steady_clock::now();
+  {
+    const double clear_ms = std::chrono::duration<double, std::milli>(
+      do_clear_finished_at - do_clear_started_at).count();
+    const double refresh_ms = std::chrono::duration<double, std::milli>(
+      refresh_finished_at - do_clear_finished_at).count();
+    if(clear_ms + refresh_ms > 5.0){
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 2000,
+        "writer-timing sensorsUpdateLoop doClear=%.3fms refreshCache=%.3fms total=%.3fms",
+        clear_ms, refresh_ms, clear_ms + refresh_ms);
+    }
+  }
 
+  //@ Compatibility export runs only after the complete clear/mark cycle and
+  //@ the aggregate cache refresh. The exporter deep-copies current observations
+  //@ under the existing locks and publishes an immutable object; it performs no
+  //@ terrain building or graph scan. terrain_revision is unknown here because
+  //@ the downstream planner owns revision assignment.
+  if(export_perception_snapshot_ && stacked_perception_){
+    //@ The loop start is the export CYCLE stamp, not a sensor acquisition
+    //@ stamp. Each source keeps its own PCL-header acquisition provenance (or
+    //@ unknown zero); the cycle stamp is never substituted for it.
+    const std::int64_t cycle_stamp_ns =
+      mark_and_clear_start_time_.nanoseconds();
+    const std::int64_t received_steady_ns = std::chrono::duration_cast<
+      std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+    stacked_perception_->exportSnapshot(
+      global_frame_, cycle_stamp_ns, received_steady_ns, 0, false);
+  }
 
   #ifdef HAVE_SYS_TIME_H
-  gettimeofday(&end, NULL);
   start_t = start.tv_sec + double(start.tv_usec) / 1e6;
   end_t = end.tv_sec + double(end.tv_usec) / 1e6;
   t_diff = end_t - start_t;

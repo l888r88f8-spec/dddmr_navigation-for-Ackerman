@@ -87,6 +87,11 @@ class SharedData{
     std::recursive_mutex ground_kdtree_cb_mutex_;
     
     bool mapping_mode_;
+
+    //@ Appended to preserve the offsets of the existing shared fields.
+    //@ Written with aggregate_observation_/aggregate_observation_kdtree_ and
+    //@ read under the same lock as those snapshots.
+    bool aggregate_observation_stale_{true};
   private:
 
 

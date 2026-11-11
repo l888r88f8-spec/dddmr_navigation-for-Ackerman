@@ -338,6 +338,7 @@ void MultiLayerSpinningLidar::cbSensor(const sensor_msgs::msg::PointCloud2::Shar
 }
 
 void MultiLayerSpinningLidar::cbPreprocessed(const sensor_msgs::msg::PointCloud2 & msg){
+  const auto cb_started_at = std::chrono::steady_clock::now();
   const auto now = clock_->now();
   if(msg.header.frame_id != gbl_utils_->getGblFrame() ||
     !IsCloudStampFresh(msg.header.stamp, now, expected_sensor_time_))
@@ -348,7 +349,9 @@ void MultiLayerSpinningLidar::cbPreprocessed(const sensor_msgs::msg::PointCloud2
   }
   const rclcpp::Time stamp(msg.header.stamp, now.get_clock_type());
   // Keep TF, cloud and freshness metadata coherent for clear/mark readers.
+  const auto cb_lock_before = std::chrono::steady_clock::now();
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
+  const auto cb_lock_acquired = std::chrono::steady_clock::now();
   if(have_preprocessed_observation_ && last_observation_time_ <= now &&
     stamp <= last_observation_time_)
   {
@@ -396,10 +399,23 @@ void MultiLayerSpinningLidar::cbPreprocessed(const sensor_msgs::msg::PointCloud2
   if(pub_current_observation_->get_subscription_count() > 0){
     pub_current_observation_->publish(msg);
   }
+  {
+    const auto finished_at = std::chrono::steady_clock::now();
+    const double total_ms = std::chrono::duration<double, std::milli>(finished_at - cb_started_at).count();
+    if(total_ms > 5.0){
+      RCLCPP_INFO_THROTTLE(node_->get_logger().get_child(name_), *clock_, 2000,
+        "writer-timing cbPreprocessed total=%.3fms lock_wait=%.3fms held=%.3fms points=%zu",
+        total_ms,
+        std::chrono::duration<double, std::milli>(cb_lock_acquired - cb_lock_before).count(),
+        std::chrono::duration<double, std::milli>(finished_at - cb_lock_acquired).count(),
+        cloud->points.size());
+    }
+  }
 }
 
 void MultiLayerSpinningLidar::updateLethalPointCloud(){
 
+  const auto lethal_started_at = std::chrono::steady_clock::now();
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
   
   current_lethal_.reset(new pcl::PointCloud<pcl::PointXYZI>);
@@ -426,6 +442,14 @@ void MultiLayerSpinningLidar::updateLethalPointCloud(){
     pcl::toROSMsg(*current_lethal_, ros_pc2_msg);
     pub_lethal_->publish(ros_pc2_msg);
   }
+  {
+    const double total_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - lethal_started_at).count();
+    if(total_ms > 5.0){
+      RCLCPP_INFO_THROTTLE(node_->get_logger().get_child(name_), *clock_, 2000,
+        "writer-timing updateLethal total=%.3fms lethal=%zu", total_ms, current_lethal_->points.size());
+    }
+  }
   
 }
 
@@ -434,7 +458,10 @@ void MultiLayerSpinningLidar::selfMark(){
   if(!shared_data_){
     return;
   }
+  const auto done_mark_started_at = std::chrono::steady_clock::now();
+  const auto done_mark_lock_before = std::chrono::steady_clock::now();
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
+  const auto done_mark_lock_acquired = std::chrono::steady_clock::now();
 
   if(is_local_planner_){
     return;
@@ -480,6 +507,7 @@ void MultiLayerSpinningLidar::selfMark(){
   if(pcl_msg_gbl_->points.size()<=5){
     return;
   }
+  const auto done_mark_transformed = std::chrono::steady_clock::now();
 
   pcl::search::KdTree<pcl::PointXYZ>::Ptr pc_kdtree (new pcl::search::KdTree<pcl::PointXYZ>);
   pc_kdtree->setInputCloud (pcl_msg_gbl_);
@@ -497,6 +525,8 @@ void MultiLayerSpinningLidar::selfMark(){
   float intensity_cnt = 100;
   pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_clusters (new pcl::PointCloud<pcl::PointXYZI>);
   pcl::PointCloud<pcl::PointXYZI>::Ptr projected_cloud_clusters (new pcl::PointCloud<pcl::PointXYZI>);
+  const auto done_mark_clustered = std::chrono::steady_clock::now();
+  double add_ms = 0.0;
   for (std::vector<pcl::PointIndices>::const_iterator it = cluster_indices_segmentation.begin (); it != cluster_indices_segmentation.end (); ++it)
   {
     if(it->indices.empty()){
@@ -616,15 +646,33 @@ void MultiLayerSpinningLidar::selfMark(){
       pcl_msg_gbl_->push_back(pt_centroid);
       cloud_cluster->push_back(centroid);
 
-      if(isinLidarObservation(voxelized_centroid))
+      if(isinLidarObservation(voxelized_centroid)){
+          const auto add_started_at = std::chrono::steady_clock::now();
           pct_marking_->addPCPtr(centroid.x, centroid.y, centroid.z, cloud_cluster, coefficients);
-
+          add_ms += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - add_started_at).count();
+      }
 
     }
     else{
       RCLCPP_DEBUG(node_->get_logger().get_child(name_), "Reject cluster with size: %lu at %f,%f,%f, because it is located in the static layer", cloud_cluster->points.size(), centroid.x, centroid.y, centroid.z);
     }
     
+  }
+
+  {
+    const auto finished_at = std::chrono::steady_clock::now();
+    const double total_ms = std::chrono::duration<double, std::milli>(finished_at - done_mark_started_at).count();
+    if(total_ms > 5.0){
+      RCLCPP_INFO_THROTTLE(node_->get_logger().get_child(name_), *clock_, 2000,
+        "writer-timing selfMark total=%.3fms lock_wait=%.3fms xform=%.3fms cluster=%.3fms loop=%.3fms add=%.3fms clusters=%zu points=%zu",
+        total_ms,
+        std::chrono::duration<double, std::milli>(done_mark_lock_acquired - done_mark_lock_before).count(),
+        std::chrono::duration<double, std::milli>(done_mark_transformed - done_mark_lock_acquired).count(),
+        std::chrono::duration<double, std::milli>(done_mark_clustered - done_mark_transformed).count(),
+        std::chrono::duration<double, std::milli>(finished_at - done_mark_clustered).count(),
+        add_ms, cluster_indices_segmentation.size(), pcl_msg_gbl_->points.size());
+    }
   }
 
   if(pub_current_projected_->get_subscription_count()>0){
@@ -648,7 +696,10 @@ void MultiLayerSpinningLidar::selfClear(){
   if(!shared_data_){
     return;
   }
+  const auto clear_started_at = std::chrono::steady_clock::now();
+  const auto clear_lock_before = std::chrono::steady_clock::now();
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
+  const auto clear_lock_acquired = std::chrono::steady_clock::now();
 
   if(is_local_planner_){
     return;
@@ -887,6 +938,18 @@ void MultiLayerSpinningLidar::selfClear(){
     pcl::toROSMsg(*pc_current_window_, ros_pc2_msg);
     pub_current_window_marking_->publish(ros_pc2_msg);     
   }
+  {
+    const auto finished_at = std::chrono::steady_clock::now();
+    const double total_ms = std::chrono::duration<double, std::milli>(finished_at - clear_started_at).count();
+    if(total_ms > 5.0){
+      RCLCPP_INFO_THROTTLE(node_->get_logger().get_child(name_), *clock_, 2000,
+        "writer-timing selfClear total=%.3fms lock_wait=%.3fms work=%.3fms cleared=%zu window_pts=%zu",
+        total_ms,
+        std::chrono::duration<double, std::milli>(clear_lock_acquired - clear_lock_before).count(),
+        std::chrono::duration<double, std::milli>(finished_at - clear_lock_acquired).count(),
+        cleared_cnt, pc_current_window_->points.size());
+    }
+  }
 }
 
 void MultiLayerSpinningLidar::getCastingPointCloud(pcl::PointXYZ& cluster_center, pcl::PointCloud<pcl::PointXYZI>& pc_for_check){
@@ -1042,7 +1105,10 @@ void MultiLayerSpinningLidar::pubUpdateLoop()
     return;
   }
 
+  const auto pub_started_at = std::chrono::steady_clock::now();
+  const auto pub_lock_before = std::chrono::steady_clock::now();
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
+  const auto pub_lock_acquired = std::chrono::steady_clock::now();
 
   if(shared_data_->dgraph_update_request_[name_]){
     return;
@@ -1095,6 +1161,18 @@ void MultiLayerSpinningLidar::pubUpdateLoop()
     pcl::toROSMsg(*pcl_msg2, ros_pc2_msg2);
     pub_dGraph_->publish(ros_pc2_msg2);
   }
+  {
+    const auto finished_at = std::chrono::steady_clock::now();
+    const double total_ms = std::chrono::duration<double, std::milli>(finished_at - pub_started_at).count();
+    if(total_ms > 5.0){
+      RCLCPP_INFO_THROTTLE(node_->get_logger().get_child(name_), *clock_, 2000,
+        "writer-timing pubUpdate total=%.3fms lock_wait=%.3fms work=%.3fms ground=%zu",
+        total_ms,
+        std::chrono::duration<double, std::milli>(pub_lock_acquired - pub_lock_before).count(),
+        std::chrono::duration<double, std::milli>(finished_at - pub_lock_acquired).count(),
+        shared_data_->pcl_ground_ ? shared_data_->pcl_ground_->points.size() : 0u);
+    }
+  }
 }
 
 void MultiLayerSpinningLidar::addCastingMarker(const pcl::PointXYZ& pt, size_t id, visualization_msgs::msg::MarkerArray& markerArray){
@@ -1127,6 +1205,7 @@ void MultiLayerSpinningLidar::addCastingMarker(const pcl::PointXYZ& pt, size_t i
 
 
 void MultiLayerSpinningLidar::resetdGraph(){
+  const auto reset_started_at = std::chrono::steady_clock::now();
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "%s starts to reset dynamic graph.", name_.c_str());
   dGraph_.clear();
@@ -1134,7 +1213,8 @@ void MultiLayerSpinningLidar::resetdGraph(){
   pct_marking_ = std::make_shared<Marking>(&dGraph_, 
         gbl_utils_->getInscribedRadius(), gbl_utils_->getInflationRadius(), shared_data_, resolution_, height_resolution_);
   pending_mark_ = pending_clear_ = have_preprocessed_observation_;
-  RCLCPP_INFO(node_->get_logger().get_child(name_), "%s done dynamic graph regeneration.", name_.c_str());
+  RCLCPP_INFO(node_->get_logger().get_child(name_), "%s done dynamic graph regeneration (%.3f ms).", name_.c_str(),
+    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - reset_started_at).count());
 }
 
 double MultiLayerSpinningLidar::get_dGraphValue(const unsigned int index){

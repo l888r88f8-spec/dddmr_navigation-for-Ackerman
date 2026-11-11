@@ -108,6 +108,15 @@ MppiObstacleScoringWork estimateMppiObstacleScoringWork(
   std::size_t trajectory_point_step,
   std::size_t obstacle_count);
 
+// True when any obstacle point lies within `radius` of `centre`. Uses the
+// compatibility kd-tree only when it has an input cloud; snapshots built with
+// build_compatibility_kdtree=false fall back to a linear scan. The snapshot
+// always owns a kdtree object, so checking the pointer alone is not enough.
+bool mppiObstacleSnapshotHasPointWithin(
+  const MppiObstacleSnapshot & snapshot,
+  const pcl::PointXYZI & centre,
+  double radius);
+
 double computeMppiCuboidCollisionQueryRadius(
   const pcl::PointCloud<pcl::PointXYZ> & cuboid,
   const pcl::PointXYZ & pose_center);

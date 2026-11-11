@@ -30,6 +30,7 @@
 */
 #include <p2p_move_base/p2p_move_base.h>
 #include <p2p_move_base/parameter_utils.h>
+#include <p2p_move_base/publish_feedback_if_active.h>
 
 #include <algorithm>
 #include <chrono>
@@ -91,6 +92,10 @@ rclcpp_action::GoalResponse P2PMoveBase::handle_goal(
   std::shared_ptr<const dddmr_sys_core::action::PToPMoveBase::Goal> goal)
 {
   (void)uuid;
+  if(stop_requested_.load()){
+    RCLCPP_WARN(this->get_logger(), "Rejecting navigation goal because execution is stopping.");
+    return rclcpp_action::GoalResponse::REJECT;
+  }
   return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
 
@@ -104,17 +109,46 @@ rclcpp_action::CancelResponse P2PMoveBase::handle_cancel(
 
 void P2PMoveBase::handle_accepted(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> goal_handle)
 {
-  if (is_active(current_handle_)){
-    RCLCPP_DEBUG(this->get_logger(), "An older goal is active, cancelling current one.");
-    auto result = std::make_shared<dddmr_sys_core::action::PToPMoveBase::Result>();
-    current_handle_->abort(result);
-    return;
-  }
-  else{
+  std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> previous_handle;
+  {
+    std::lock_guard<std::mutex> lock(current_handle_mutex_);
+    previous_handle = current_handle_;
     current_handle_ = goal_handle;
   }
-  // this needs to return quickly to avoid blocking the executor, so spin up a new thread
-  std::thread{std::bind(&P2PMoveBase::executeCb, this, std::placeholders::_1), goal_handle}.detach();
+
+  if(previous_handle && previous_handle != goal_handle){
+    RCLCPP_DEBUG(this->get_logger(), "An older goal is active, cancelling current one.");
+    abortGoalBestEffort(previous_handle, "preempted by newer goal");
+  }
+
+  if(stop_requested_.load()){
+    abortGoalBestEffort(goal_handle, "navigation is stopping");
+    publishZeroVelocityBestEffort();
+    clearCurrentHandleIf(goal_handle);
+    return;
+  }
+
+  ExecutionWorker::Task task;
+  task.run = [this, goal_handle]() {
+      executeCb(goal_handle);
+      clearCurrentHandleIf(goal_handle);
+    };
+  task.on_replaced = [this, goal_handle]() {
+      abortGoalBestEffort(goal_handle, "goal replaced by newer goal");
+      clearCurrentHandleIf(goal_handle);
+    };
+  task.on_failed = [this, goal_handle](std::exception_ptr error) {
+      handleExecutionException(goal_handle, error);
+    };
+
+  if(!execution_worker_.submit(std::move(task))){
+    RCLCPP_WARN(
+      this->get_logger(),
+      "Rejecting navigation goal because the execution worker is stopping.");
+    abortGoalBestEffort(goal_handle, "execution worker stopped");
+    publishZeroVelocityBestEffort();
+    clearCurrentHandleIf(goal_handle);
+  }
 }
 
 void P2PMoveBase::initial(
@@ -125,6 +159,8 @@ void P2PMoveBase::initial(
   route_manager_ = route_manager;
 
   FSM_ = std::make_shared<p2p_move_base::FSM>(this->get_node_logging_interface(), this->get_node_parameters_interface());
+  oscillation_watchdog_.setPatience(FSM_->oscillation_patience_);
+  blocked_wait_watchdog_.setPatience(FSM_->blocked_wait_patience_);
   
   if(FSM_->use_twist_stamped_){
     stamped_cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::TwistStamped>("cmd_vel_stamped", 1);
@@ -405,10 +441,197 @@ void P2PMoveBase::localObstacleCloudCallback(const sensor_msgs::msg::PointCloud2
   }
 }
 
+void P2PMoveBase::stopExecution()
+{
+  stop_requested_.store(true);
+  // A join failure is a fatal teardown condition. Let it reach main (and the
+  // destructor fail-fast) instead of returning while the worker is still alive.
+  execution_worker_.stop();
+}
+
+bool P2PMoveBase::shouldStopExecution() const
+{
+  return stop_requested_.load() || !rclcpp::ok();
+}
+
+void P2PMoveBase::abortGoalBestEffort(
+  const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> & goal_handle,
+  const std::string & reason)
+{
+  if(!goal_handle){
+    return;
+  }
+
+  try{
+    auto result = std::make_shared<dddmr_sys_core::action::PToPMoveBase::Result>();
+    if(goal_handle->is_canceling()){
+      goal_handle->canceled(result);
+      RCLCPP_DEBUG(this->get_logger(), "navigation goal canceled: %s", reason.c_str());
+    }
+    else if(goal_handle->is_active()){
+      goal_handle->abort(result);
+      RCLCPP_DEBUG(this->get_logger(), "navigation goal aborted: %s", reason.c_str());
+    }
+  }
+  catch(const std::exception & ex){
+    RCLCPP_WARN(
+      this->get_logger(),
+      "could not terminate navigation goal (%s): %s",
+      reason.c_str(),
+      ex.what());
+  }
+  catch(...){
+    RCLCPP_WARN(
+      this->get_logger(),
+      "could not terminate navigation goal (%s): unknown exception",
+      reason.c_str());
+  }
+}
+
+void P2PMoveBase::handleExecutionException(
+  const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> & goal_handle,
+  std::exception_ptr error)
+{
+  std::string message = "unknown exception";
+  try{
+    if(error){
+      std::rethrow_exception(error);
+    }
+  }
+  catch(const std::exception & ex){
+    message = ex.what();
+  }
+  catch(...){
+  }
+
+  const bool stopping = stop_requested_.load() || !rclcpp::ok();
+  try{
+    if(stopping){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "navigation execution stopped with exception during shutdown: %s",
+        message.c_str());
+    }
+    else{
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "navigation execution failed with uncaught exception: %s",
+        message.c_str());
+    }
+  }
+  catch(...){
+  }
+
+  terminal_goal_reason_ = stopping ? "goal stopped" : "goal failed";
+  abortGoalBestEffort(goal_handle, stopping ? "navigation stopped" : "navigation execution failed");
+  publishZeroVelocityBestEffort();
+
+  try{
+    if(route_manager_){
+      route_manager_->stop(terminal_goal_reason_);
+    }
+  }
+  catch(const std::exception & ex){
+    try{
+      RCLCPP_WARN(
+        this->get_logger(),
+        "route manager cleanup after execution failure did not complete: %s",
+        ex.what());
+    }
+    catch(...){
+    }
+  }
+  catch(...){
+  }
+
+  clearCurrentHandleIf(goal_handle);
+}
+
+void P2PMoveBase::publishZeroVelocityBestEffort()
+{
+  if(!rclcpp::ok() || !FSM_){
+    return;
+  }
+
+  try{
+    publishZeroVelocity();
+  }
+  catch(const std::exception & ex){
+    try{
+      RCLCPP_WARN(this->get_logger(), "could not publish zero velocity during shutdown: %s", ex.what());
+    }
+    catch(...){
+    }
+  }
+  catch(...){
+  }
+}
+
+void P2PMoveBase::cancelRecoveryBehaviorsBestEffort()
+{
+  if(!rclcpp::ok() || !recovery_behaviors_client_ptr_){
+    return;
+  }
+
+  try{
+    recovery_behaviors_client_ptr_->async_cancel_all_goals();
+  }
+  catch(const std::exception & ex){
+    RCLCPP_WARN(
+      this->get_logger(),
+      "could not cancel recovery behaviors during shutdown: %s",
+      ex.what());
+  }
+  catch(...){
+    RCLCPP_WARN(
+      this->get_logger(),
+      "could not cancel recovery behaviors during shutdown: unknown exception");
+  }
+}
+
+void P2PMoveBase::clearCurrentHandleIf(
+  const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> & goal_handle)
+{
+  std::lock_guard<std::mutex> lock(current_handle_mutex_);
+  if(current_handle_ == goal_handle){
+    current_handle_.reset();
+  }
+}
+
 P2PMoveBase::~P2PMoveBase(){
+  try{
+    stopExecution();
+  }
+  catch(const std::exception & ex){
+    try{
+      RCLCPP_FATAL(
+        this->get_logger(),
+        "failed to join navigation execution worker during teardown: %s; terminating instead of releasing active dependencies",
+        ex.what());
+    }
+    catch(...){
+    }
+    std::terminate();
+  }
+  catch(...){
+    try{
+      RCLCPP_FATAL(
+        this->get_logger(),
+        "failed to join navigation execution worker during teardown: unknown exception; terminating instead of releasing active dependencies");
+    }
+    catch(...){
+    }
+    std::terminate();
+  }
+  {
+    std::lock_guard<std::mutex> lock(current_handle_mutex_);
+    current_handle_.reset();
+  }
   FSM_.reset();
-  tf2Buffer_.reset();
+  // TransformListener keeps a buffer reference and owns a dedicated thread.
+  // Stop the listener before releasing the buffer it references.
   tfl_.reset();
+  tf2Buffer_.reset();
   route_controller_.reset();
   route_manager_.reset();
 }
@@ -533,24 +756,33 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
     return;
   }
 
+  if(shouldStopExecution()){
+    abortGoalBestEffort(goal_handle, "navigation stopped before execution");
+    publishZeroVelocityBestEffort();
+    return;
+  }
+
   rclcpp::Rate r(FSM_->orchestrator_frequency_);
 
   //@ if we dont initialize oscillation pose here, the first controlling entry will cause recovery behavior.
   //@ the rclcpp::Time initial are all done in FSM class
-  FSM_->initialParams(route_controller_->getGlobalPose(), clock_->now());
+  const auto goal_started_at = clock_->now();
+  FSM_->initialParams(route_controller_->getGlobalPose(), goal_started_at);
+  oscillation_watchdog_.reset(goal_started_at.seconds());
+  blocked_wait_watchdog_.reset(goal_started_at.seconds());
   FSM_->current_goal_ = move_base_goal->target_pose;
   route_manager_->setGoal(FSM_->current_goal_);
   route_manager_->resume();
   terminal_goal_reason_ = "goal failed";
   current_route_result_class_ = "unknown";
 
-  while(rclcpp::ok()){
+  while(!shouldStopExecution()){
 
     if(!goal_handle->is_active()){
       
       if(FSM_->isPhase(FSM::NavigationPhase::kRecoveryAction)){
         RCLCPP_DEBUG(this->get_logger(), "navigation is in recovery action state, cancel recovery behaviors.");
-        recovery_behaviors_client_ptr_->async_cancel_all_goals();
+        cancelRecoveryBehaviorsBestEffort();
       }
 
       RCLCPP_DEBUG(this->get_logger(), "P2P move base preempted.");
@@ -564,7 +796,7 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
 
       if(FSM_->isPhase(FSM::NavigationPhase::kRecoveryAction)){
         RCLCPP_DEBUG(this->get_logger(), "navigation is in recovery action state, cancel recovery behaviors.");
-        recovery_behaviors_client_ptr_->async_cancel_all_goals();
+        cancelRecoveryBehaviorsBestEffort();
       }
 
       goal_handle->canceled(result);
@@ -577,17 +809,34 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
 
     //the real work on pursuing a goal is done here
     bool done = executeCycle(goal_handle);
+
+    // A completed goal must stop its route and leave before any feedback is
+    // attempted; a newly accepted goal may already have terminated this handle.
+    if(done){
+      route_manager_->stop(terminal_goal_reason_);
+      return;
+    }
+
+    // The ROS context or the execution token can become invalid during a cycle.
+    if(shouldStopExecution()){
+      break;
+    }
     
     auto feedback = std::make_shared<dddmr_sys_core::action::PToPMoveBase::Feedback>();
     feedback->base_position = FSM_->global_pose_;
     feedback->last_decision = FSM_->getLastDecision();
     feedback->current_decision = FSM_->getCurrentDecision();
-    goal_handle->publish_feedback(feedback);
-
-    //if we're done, then we'll return from execute
-    if(done){
-      route_manager_->stop(terminal_goal_reason_);
-      return;
+    if(!PublishFeedbackIfActive(
+        goal_handle,
+        [this]() {return shouldStopExecution();},
+        [&goal_handle, &feedback]() {goal_handle->publish_feedback(feedback);}))
+    {
+      // A preemption/cancellation/shutdown raced the guard. Continue at the
+      // loop head so the existing termination cleanup owns the handle.
+      if(shouldStopExecution()){
+        break;
+      }
+      continue;
     }
     
     r.sleep();
@@ -595,6 +844,16 @@ void P2PMoveBase::executeCb(const std::shared_ptr<rclcpp_action::ServerGoalHandl
     //if(FSM_->isCurrentDecision("d_controlling") && r.cycleTime() > ros::Duration(1 / FSM_->controller_frequency_))
     //  ROS_WARN("Control loop missed its desired rate of %.4fHz... the loop actually took %.4f seconds", FSM_->controller_frequency_, r.cycleTime().toSec());
   }
+
+  if(stop_requested_.load()){
+    RCLCPP_DEBUG(this->get_logger(), "navigation execution stopped by shutdown request");
+  }
+  else{
+    RCLCPP_DEBUG(this->get_logger(), "navigation execution stopped because the ROS context is invalid");
+  }
+  abortGoalBestEffort(goal_handle, "navigation stopped");
+  publishZeroVelocityBestEffort();
+  terminal_goal_reason_ = "goal stopped";
   route_manager_->stop(terminal_goal_reason_);
 }
 
@@ -672,15 +931,25 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
   const auto wait_for_clearance =
     [&](const std::string & reason) {
       publishZeroVelocity();
-      FSM_->waiting_time_ = clock_->now();
+      const auto wait_started_at = clock_->now();
+      FSM_->waiting_time_ = wait_started_at;
+      blocked_wait_watchdog_.reset(wait_started_at.seconds());
       FSM_->setPhase(FSM::NavigationPhase::kBlockedWait, reason);
       return continue_cycle();
     };
 
   const auto reset_oscillation_watchdog =
     [&]() {
+      const auto reset_at = clock_->now();
       FSM_->oscillation_pose_ = FSM_->global_pose_;
-      FSM_->last_oscillation_reset_ = clock_->now();
+      FSM_->last_oscillation_reset_ = reset_at;
+      oscillation_watchdog_.reset(reset_at.seconds());
+    };
+
+  const auto is_data_availability_fault =
+    [](dddmr_sys_core::PlannerState planner_state) {
+      return planner_state == dddmr_sys_core::PlannerState::PERCEPTION_MALFUNCTION ||
+             planner_state == dddmr_sys_core::PlannerState::TF_FAIL;
     };
 
   const bool update_oscillation_progress =
@@ -831,9 +1100,17 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       return true;
     }
 
-    if(FSM_->oscillation_patience_ > 0 &&
-       (clock_->now()-FSM_->last_oscillation_reset_).seconds() >= FSM_->oscillation_patience_)
-    {
+    geometry_msgs::msg::Twist cmd_vel;
+    const auto planner_state =
+      route_controller_->computeControlCommand(alignment_controller_name_, &cmd_vel);
+    const auto oscillation_update = oscillation_watchdog_.update(
+      is_data_availability_fault(planner_state), clock_->now().seconds());
+    if(oscillation_update.resumed){
+      reset_oscillation_watchdog();
+      FSM_->last_valid_control_ = clock_->now();
+      navigation_fault_policy_.reset();
+    }
+    if(oscillation_update.expired){
       const auto diff = (clock_->now()-FSM_->last_oscillation_reset_).seconds();
       RCLCPP_WARN(
         this->get_logger(),
@@ -842,10 +1119,6 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
         FSM_->getDistance(FSM_->global_pose_, FSM_->oscillation_pose_));
       return start_recovery_or_abort("goal_alignment_unsatisfied: oscillation timeout");
     }
-
-    geometry_msgs::msg::Twist cmd_vel;
-    const auto planner_state =
-      route_controller_->computeControlCommand(alignment_controller_name_, &cmd_vel);
     if(planner_state == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
       FSM_->last_valid_control_ = clock_->now();
       publishVelocity(cmd_vel);
@@ -867,9 +1140,17 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
       return route_refresh("route_invalid: frozen route unavailable during tracking");
     }
 
-    if(FSM_->oscillation_patience_ > 0 &&
-       (clock_->now()-FSM_->last_oscillation_reset_).seconds() >= FSM_->oscillation_patience_)
-    {
+    geometry_msgs::msg::Twist cmd_vel;
+    const auto planner_state =
+      route_controller_->computeControlCommand(tracking_controller_name_, &cmd_vel);
+    const auto oscillation_update = oscillation_watchdog_.update(
+      is_data_availability_fault(planner_state), clock_->now().seconds());
+    if(oscillation_update.resumed){
+      reset_oscillation_watchdog();
+      FSM_->last_valid_control_ = clock_->now();
+      navigation_fault_policy_.reset();
+    }
+    if(oscillation_update.expired){
       const auto diff = (clock_->now()-FSM_->last_oscillation_reset_).seconds();
       RCLCPP_WARN(
         this->get_logger(),
@@ -878,10 +1159,6 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
         FSM_->getDistance(FSM_->global_pose_, FSM_->oscillation_pose_));
       return start_recovery_or_route_refresh("route tracking oscillation timeout");
     }
-
-    geometry_msgs::msg::Twist cmd_vel;
-    const auto planner_state =
-      route_controller_->computeControlCommand(tracking_controller_name_, &cmd_vel);
     if(planner_state == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
       FSM_->last_valid_control_ = clock_->now();
       publishVelocity(cmd_vel);
@@ -924,14 +1201,6 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
   }
 
   if(FSM_->isPhase(FSM::NavigationPhase::kBlockedWait)){
-    if((clock_->now()-FSM_->waiting_time_).seconds() >= FSM_->blocked_wait_patience_){
-      RCLCPP_WARN(
-        this->get_logger(),
-        "blocked wait exceeded %.2f seconds, request a fresh route",
-        FSM_->blocked_wait_patience_);
-      return route_refresh("route_blocked: blocked wait timeout");
-    }
-
     if(!syncRouteReferenceFromManager("blocked_wait") && !route_manager_->hasRoute()){
       return route_refresh("route_invalid: frozen route unavailable during blocked wait");
     }
@@ -939,9 +1208,25 @@ bool P2PMoveBase::executeCycle(const std::shared_ptr<rclcpp_action::ServerGoalHa
     geometry_msgs::msg::Twist cmd_vel;
     const auto planner_state =
       route_controller_->computeControlCommand(tracking_controller_name_, &cmd_vel);
+    const auto wait_update = blocked_wait_watchdog_.update(
+      is_data_availability_fault(planner_state), clock_->now().seconds());
+    if(wait_update.resumed){
+      FSM_->waiting_time_ = clock_->now();
+      FSM_->last_valid_control_ = clock_->now();
+      navigation_fault_policy_.reset();
+    }
+    if(wait_update.expired){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "blocked wait exceeded %.2f seconds, request a fresh route",
+        FSM_->blocked_wait_patience_);
+      return route_refresh("route_blocked: blocked wait timeout");
+    }
+
     if(planner_state == dddmr_sys_core::PlannerState::TRAJECTORY_FOUND){
       FSM_->last_valid_control_ = clock_->now();
       reset_oscillation_watchdog();
+      blocked_wait_watchdog_.reset(clock_->now().seconds());
       FSM_->setPhase(FSM::NavigationPhase::kRouteTracking, "blocked wait cleared");
       publishVelocity(cmd_vel);
       return continue_cycle();
@@ -968,8 +1253,10 @@ bool P2PMoveBase::startRecoveryAction(const std::string & trigger_reason){
       trigger_reason.c_str());
     is_recoverying_ = false;
     is_recoverying_succeed_ = false;
+    const auto reset_at = clock_->now();
     FSM_->oscillation_pose_ = FSM_->global_pose_;
-    FSM_->last_oscillation_reset_ = clock_->now();
+    FSM_->last_oscillation_reset_ = reset_at;
+    oscillation_watchdog_.reset(reset_at.seconds());
     publishZeroVelocity();
     return false;
   }
@@ -986,12 +1273,29 @@ bool P2PMoveBase::startRecoveryAction(const std::string & trigger_reason){
   
   is_recoverying_ = true;
   is_recoverying_succeed_ = false;
+  if(!rclcpp::ok() || !recovery_behaviors_client_ptr_){
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "skip recovery action '%s' because the ROS context is invalid",
+      recovery_action_name_.c_str());
+    is_recoverying_ = false;
+    publishZeroVelocityBestEffort();
+    return false;
+  }
+
   RCLCPP_WARN(
     this->get_logger(),
     "start recovery action '%s' because %s",
     recovery_action_name_.c_str(),
     trigger_reason.c_str());
-  recovery_behaviors_client_ptr_->async_send_goal(goal_msg, send_goal_options);
+  try{
+    recovery_behaviors_client_ptr_->async_send_goal(goal_msg, send_goal_options);
+  }
+  catch(...){
+    is_recoverying_ = false;
+    is_recoverying_succeed_ = false;
+    throw;
+  }
   return true;
 }
 

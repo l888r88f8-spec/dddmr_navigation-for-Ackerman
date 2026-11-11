@@ -107,11 +107,11 @@ void AckermannSimpleTrajectoryGeneratorTheory::onInitialize(){
   node_->get_parameter(name_ + ".robot_radius", limits_->robot_radius);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "robot_radius: %.2f", limits_->robot_radius);
 
-  node_->declare_parameter(name_ + ".wheelbase", rclcpp::ParameterValue(0.55));
+  node_->declare_parameter(name_ + ".wheelbase", rclcpp::ParameterValue(0.550));
   node_->get_parameter(name_ + ".wheelbase", wheelbase_);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "wheelbase: %.2f", wheelbase_);
 
-  node_->declare_parameter(name_ + ".max_steer", rclcpp::ParameterValue(0.69));
+  node_->declare_parameter(name_ + ".max_steer", rclcpp::ParameterValue(0.3270520925102273));
   node_->get_parameter(name_ + ".max_steer", max_steer_);
   RCLCPP_INFO(node_->get_logger().get_child(name_), "max_steer: %.2f", max_steer_);
 

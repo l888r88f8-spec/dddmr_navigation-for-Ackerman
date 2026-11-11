@@ -29,8 +29,10 @@
 * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #include <p2p_move_base/p2p_global_plan_manager.h>
+#include <p2p_move_base/rpc_call_guard.h>
 
 #include <cmath>
+#include <exception>
 #include <limits>
 #include <sstream>
 
@@ -137,8 +139,10 @@ P2PGlobalPlanManager::P2PGlobalPlanManager(std::string name)
 }
 
 P2PGlobalPlanManager::~P2PGlobalPlanManager(){
-  tf2Buffer_.reset();
+  // TransformListener keeps a buffer reference and owns a dedicated thread.
+  // Stop the listener before releasing the buffer it references.
   tfl_.reset();
+  tf2Buffer_.reset();
 }
 
 void P2PGlobalPlanManager::initial(){
@@ -311,12 +315,38 @@ void P2PGlobalPlanManager::cancelActiveRouteRequest(const std::string & reason)
   }
 
   if(goal_handle_to_cancel){
-    global_planner_client_ptr_->async_cancel_goal(goal_handle_to_cancel);
+    if(!global_planner_client_ptr_){
+      RCLCPP_DEBUG(
+        this->get_logger(),
+        "skip planner cancel RPC because the action client is unavailable; local route state was cleared");
+      return;
+    }
+
+    const auto context = this->get_node_base_interface()->get_context();
+    const bool attempted = p2p_move_base::invokeRpcIfContextValid(
+      [context]() {return context && context->is_valid();},
+      [this, &goal_handle_to_cancel]() {
+        global_planner_client_ptr_->async_cancel_goal(goal_handle_to_cancel);
+      });
+    if(!attempted){
+      RCLCPP_DEBUG(
+        this->get_logger(),
+        "skip planner cancel RPC because the ROS context is invalid; local route state was cleared");
+    }
   }
 }
 
 void P2PGlobalPlanManager::stop(const std::string & reason){
-  cancelActiveRouteRequest(reason);
+  // cancelActiveRouteRequest() clears the local request bookkeeping before it
+  // invokes the RPC. Capture a failure instead of returning early so the timer,
+  // route and goal state below are always cleared before the fault propagates.
+  std::exception_ptr cancel_error;
+  try{
+    cancelActiveRouteRequest(reason);
+  }
+  catch(...){
+    cancel_error = std::current_exception();
+  }
 
   bool should_deactivate_threading = false;
   bool should_log_release = false;
@@ -362,7 +392,8 @@ void P2PGlobalPlanManager::stop(const std::string & reason){
     }
   }
 
-  if(should_deactivate_threading){
+  std::exception_ptr deactivation_error;
+  if(should_deactivate_threading && global_planner_client_ptr_){
     auto goal_msg = dddmr_sys_core::action::GetPlan::Goal();
     goal_msg.activate_threading = false;
     auto send_goal_options = rclcpp_action::Client<dddmr_sys_core::action::GetPlan>::SendGoalOptions();
@@ -379,10 +410,33 @@ void P2PGlobalPlanManager::stop(const std::string & reason){
       {
         global_planner_client_result_callback(result, false, request_goal_seq, request_id);
       };
-    global_planner_client_ptr_->async_send_goal(goal_msg, send_goal_options);
+
+    const auto context = this->get_node_base_interface()->get_context();
+    try{
+      const bool attempted = p2p_move_base::invokeRpcIfContextValid(
+        [context]() {return context && context->is_valid();},
+        [this, &goal_msg, &send_goal_options]() {
+          global_planner_client_ptr_->async_send_goal(goal_msg, send_goal_options);
+        });
+      if(!attempted){
+        RCLCPP_DEBUG(
+          this->get_logger(),
+          "skip route manager deactivation request because the ROS context is invalid");
+      }
+    }
+    catch(...){
+      deactivation_error = std::current_exception();
+    }
   }
 
   RCLCPP_DEBUG(this->get_logger(), "route manager stopped");
+
+  if(cancel_error){
+    std::rethrow_exception(cancel_error);
+  }
+  if(deactivation_error){
+    std::rethrow_exception(deactivation_error);
+  }
 }
 
 void P2PGlobalPlanManager::queryThread(){

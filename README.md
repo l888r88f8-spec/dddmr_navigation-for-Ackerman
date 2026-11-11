@@ -2,6 +2,70 @@
 
 本仓库是基于[dddmr_navigation](https://github.com/dfl-rlab/dddmr_navigation)改造的 Ackermann 车型三维导航包，适配了hybrid_a_star+RPP。
 
+## MLS 测量证据与独立 PCD 地形（2026-11-10）
+
+本仓库的 `dddmr_grid_global_planner` 新增了可独立于在线雷达/定位运行的静态
+PCD 地形入口。数据流是：
+
+```text
+原始真实 XYZ 点
+  → 去重/排序后的 canonical 测量点表
+  → 每格每层 MeasurementPatch（保留 base/own/attempt 真实索引）
+  → 通过门限的 TerrainNode + 同层连接 + 独立静态障碍记录
+  → 不可变 MapSnapshot
+  → WheelSupportEvaluator / AckermannHybridAStar / PathValidator
+  → RViz 地形面 + 网格边 + 灰色测量证据线框
+```
+
+关键边界：
+
+- 唯一离线 YAML 使用 fine `0.20 m`、实测邻域 `R=0.35 m`。一次有界同层扩展
+  使用 `evidence_expansion_step_m=0.10`，即实际半径 `0.45 m`。`0.55 m` 未采用：
+  它超过 `R + max_sampling_gap/2`，也没有救回 20,-140 / 27,-130。
+- 扩展只允许在证据不足（点数、采样间隙、支撑凸包）时进行一次；RMS、内点、
+  退化、局部凹陷、坡度失败绝不靠放大邻域“变绿”。20,-140（高 RMS）和
+  27,-130（本格凹陷）保持 unknown/rejected，不产生 supported upper node。
+- `14,-128` 的 3 个 base 点经真实 `0.45 m` 环恢复为 9 点、z≈`1.352526 m`、
+  RMS≈`0.0466126 m`。其最大正残差约 `0.075658 m`，小于现有
+  `ground_duplicate_tolerance_m=0.08`，因此**不**制造 occupied；
+  14,-130 正控制保持 `0.35 m` 五点拟合（z≈`1.369639 m`）。
+- 灰色测量线框只画真实 own-cell 观测的 rejected/observed patch 的实际
+  own Z 范围，不是拟合平面、不是邻域范围、也不代表可通行。supported 面
+  同样只是几何证据；GroundMap-only 不推断完整自由体积、天花板厚度或净空。
+- 静态障碍占用放在真实测量点的 XY；不会沿拟合半径扩散，也不会把无关楼层
+  设为 occupied。显式 obstacle PCD 仍使用原有最近表面关联和物理阈值。
+- RViz 二维选点不能选择楼层；`base_link` 参考高度由现有 bridge 的固定 Z
+  （默认 `-0.5`，与显示 TF 一致）决定。多层入口必须显式设置目标楼层高度，
+  bridge 不从地形自动推断。`base_link` 底面相对轮胎接地点为
+  `base_contact_height_m=0.22 m`；这是现有模型约定，不是新的车辆能力声明。
+
+构建和 CPU 验收（不启动 ROS/RViz）：
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon build --packages-select dddmr_grid_global_planner \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release
+source install/setup.bash
+ctest --test-dir build/dddmr_grid_global_planner --output-on-failure
+
+# 当前精确 GroundMap + YAML 0.20/R.35/.45 profile；默认空障碍数组
+./build/dddmr_grid_global_planner/offline_static_pcd_smoke \
+  /home/robot/map/hesai_sim2/GroundMap.pcd
+```
+
+真实地图验收会校验 GroundMap SHA-256
+`19bbfbf01f4c9b6fe6e07c02dc1fef105b6ec4f607f4305e30d16cd4d03246d7`，
+打印四格证据、全图 metrics、固定正/负整条路径、RSS 和构建时间。该 smoke
+只声明 CPU 地图连通性/运动学校验，不声明真实四轮接触、悬挂、净空或实车安全。
+
+设计思想和 API 参考了以下公开项目，但**没有复制上游源码，也没有新增依赖**：
+[slam-maps](https://github.com/dfki-ric/slam-maps)、
+[traversability_generator3d](https://github.com/dfki-ric/traversability_generator3d)、
+[PCT_planner](https://github.com/byangw/PCT_planner)、
+[vox_nav](https://github.com/NMBURobotics/vox_nav)。更详细的中文说明见
+`src/dddmr_grid_global_planner/docs/offline_planning.md` 和
+`src/dddmr_grid_global_planner/docs/implementation_status.md`。
+
 ## 环境要求
 
 推荐环境：
@@ -137,6 +201,13 @@ max_angular_velocity ~= max_linear_speed / min_turning_radius
 ```
 
 ## 更新日志
+
+### 2026-11-10
+
+- 增加 MLS 测量证据层、一次有界同层恢复、灰色 rejected/observed 线框、
+  真实 PCD 四格与固定整条路径 CPU 验收、唯一 YAML 新键和中文说明。
+- 保持 fine `0.20 m`、`R=0.35 m`、车辆几何和既有物理门限不变；新增扩展实际
+  半径 `0.45 m`，`0.55 m` 未采用。
 
 ### 2026-05-29
 - 适配Ubuntu 24.04相关编译环境，调整部分包依赖和构建配置。

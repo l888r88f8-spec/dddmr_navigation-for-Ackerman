@@ -73,9 +73,8 @@ private:
   //@ function
   void parseCuboid();
   void cbClickedPoint(const geometry_msgs::msg::PointStamped::SharedPtr clicked_goal);
-  void trajectory2posearray_cuboids(const base_trajectory::Trajectory& a_traj, 
-                                      geometry_msgs::msg::PoseArray& pose_arr,
-                                      pcl::PointCloud<pcl::PointXYZ>& cuboids_pcl);
+  void trajectory2posearray_cuboids(const base_trajectory::Trajectory& a_traj,
+                                    geometry_msgs::msg::PoseArray& pose_arr);
   void getBestTrajectory(std::string traj_gen_name, base_trajectory::Trajectory& best_traj);
 }; 
 
@@ -143,14 +142,11 @@ void PlayGround::parseCuboid(){
 }
 
 void PlayGround::trajectory2posearray_cuboids(const base_trajectory::Trajectory& a_traj, 
-                                      geometry_msgs::msg::PoseArray& pose_arr,
-                                      pcl::PointCloud<pcl::PointXYZ>& cuboids_pcl){
+                                      geometry_msgs::msg::PoseArray& pose_arr){
 
   for(unsigned int i=0;i<a_traj.getPointsSize();i++){
       auto p = a_traj.getPoint(i);
       pose_arr.poses.push_back(p.pose);
-      //@ For cuboids debug
-      //cuboids_pcl += a_traj.getCuboid(i);       
   }
 
 }
@@ -162,7 +158,6 @@ void PlayGround::getBestTrajectory(std::string traj_gen_name, base_trajectory::T
 
   double minimum_cost = 9999999;
   geometry_msgs::msg::PoseArray accepted_pose_arr;
-  pcl::PointCloud<pcl::PointXYZ> cuboids_pcl;
 
   for(auto traj_it=trajectories_->begin();traj_it!=trajectories_->end();traj_it++){
 
@@ -174,7 +169,7 @@ void PlayGround::getBestTrajectory(std::string traj_gen_name, base_trajectory::T
     }
 
     if((*traj_it).cost_>=0){
-      trajectory2posearray_cuboids((*traj_it), accepted_pose_arr, cuboids_pcl);
+      trajectory2posearray_cuboids((*traj_it), accepted_pose_arr);
     }
 
   }
@@ -183,7 +178,7 @@ void PlayGround::getBestTrajectory(std::string traj_gen_name, base_trajectory::T
   pub_accepted_trajectory_pose_array_->publish(accepted_pose_arr);
 
   geometry_msgs::msg::PoseArray best_pose_arr;
-  trajectory2posearray_cuboids(best_traj, best_pose_arr, cuboids_pcl);
+  trajectory2posearray_cuboids(best_traj, best_pose_arr);
   best_pose_arr.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
   best_pose_arr.header.stamp = clock_->now();
   pub_best_trajectory_pose_->publish(best_pose_arr);
@@ -242,7 +237,6 @@ void PlayGround::cbClickedPoint(const geometry_msgs::msg::PointStamped::SharedPt
   trajectory_generators_ros_->initializeTheories_wi_Shared_data();
 
   geometry_msgs::msg::PoseArray pose_arr;
-  pcl::PointCloud<pcl::PointXYZ> cuboids_pcl;
 
   trajectories_ = std::make_shared<std::vector<base_trajectory::Trajectory>>();
 
@@ -252,7 +246,7 @@ void PlayGround::cbClickedPoint(const geometry_msgs::msg::PointStamped::SharedPt
     if(trajectory_generators_ros_->nextTrajectory("differential_drive_simple", a_traj)){
       //@ collected all trajectories here, for later scoring
       trajectories_->push_back(a_traj);
-      trajectory2posearray_cuboids(a_traj, pose_arr, cuboids_pcl);
+      trajectory2posearray_cuboids(a_traj, pose_arr);
     }
 
   }

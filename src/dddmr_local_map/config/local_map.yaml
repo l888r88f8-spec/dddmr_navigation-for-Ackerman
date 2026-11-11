@@ -1,0 +1,88 @@
+# Shadow local-map adapter parameters.
+#
+# This file is passed directly to `ros2 launch`/Node as a ROS parameter file,
+# so it must use the ROS node-selector wrapper. `/**` selects every node in
+# every namespace; the `local_map.` prefix is part of each parameter name and
+# avoids the shared root `global_frame` used by other planner backends.
+/**:
+  ros__parameters:
+    local_map:
+      cloud_topic: "/lio_sam/deskew/cloud_deskewed"
+
+      frames:
+        map: "odom"
+        base: "base_link"
+        sensor: "hesai_lidar"
+
+      # 12.8 x 12.8 x 4.0 m at 0.1 m. size_* m ust be an integer multiple of
+      # voxel_size. The cloud is cropped to this full 3-D window (ground
+      # included); max ray clipping stays in the core.
+      map:
+        voxel_size: 0.1
+        size_x: 12.8
+        size_y: 12.8
+        size_z: 4.0
+        max_range: 8.0
+        max_voxels: 4000000
+        inflation_radius: 0.0
+        hit_log_odds: 0.85
+        miss_log_odds: -0.85
+        occupied_threshold: 0.4
+        free_threshold: -0.4
+        min_log_odds: -3.0
+        max_log_odds: 3.0
+
+      terrain:
+        contact_patch_radius: 0.18
+        max_contact_search_z: 0.35
+        max_drop: 0.30
+        max_step: 0.12
+        max_slope_rad: 0.40
+        max_cross_slope_rad: 0.30
+        max_warp: 0.05
+        min_patch_coverage: 0.60
+        min_plane_confidence: 0.10
+        max_snapshot_age: 0.50
+        cluster_max_dz: 0.22
+        plane_inlier_tol: 0.06
+        max_patches: 20000
+        unknown_body_policy: "reject"
+        # Optional. Defaults are max_observation_age=0.50 s and
+        # obstacle_search_margin=0.30 m. Override only with measured or
+        # replay-validated values.
+
+      # Geometry is intentionally unset for shadow mapping. With geometry
+      # absent the map still runs and publishes, self filtering stays disabled,
+      # and AdapterStatus.control_ready is false. Fill every field with values
+      # measured for this exact vehicle before a controller uses the map:
+      #
+      #   geometry.wheel_contacts     12 numbers: four base-frame x,y,z contacts,
+      #                               ordered front-left, front-right,
+      #                               rear-left, rear-right; each z must equal
+      #                               -geometry.base_contact_height
+      #   geometry.body_min           3 numbers: base-frame AABB minimum
+      #   geometry.body_max           3 numbers: base-frame AABB maximum,
+      #                               strictly greater than body_min per axis
+      #   geometry.base_contact_height  positive wheel-contact height above the
+      #                               support plane
+      #   geometry.body_clearance       non-negative required ground clearance
+      #
+      # There are no measured values in this repository. Do not treat the
+      # synthetic numbers in the unit tests as a vehicle measurement.
+
+      # Self filtering is derived only from validated geometry.body_min/max.
+      # It removes points strictly inside that rigid-body AABB above
+      # body_min.z; floor and wheel-contact points at/below body_min.z are
+      # always retained. With geometry unset, setting this true has no effect;
+      # with valid geometry, false disables the filter explicitly.
+      self_filter:
+        enabled: true
+
+      tf_timeout_sec: 0.10
+      max_stamp_age_sec: 0.50
+      future_tolerance_sec: 0.05
+      clock_rewind_tolerance_sec: 0.10
+      use_steady_receipt_age: true
+
+      log_status: true
+      status_log_period_sec: 2.00

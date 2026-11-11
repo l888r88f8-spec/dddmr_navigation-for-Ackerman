@@ -125,6 +125,36 @@ MppiObstacleSnapshot makeMppiObstacleSnapshot(
   return makeMppiObstacleSnapshot(obstacles, true);
 }
 
+bool mppiObstacleSnapshotHasPointWithin(
+  const MppiObstacleSnapshot & snapshot,
+  const pcl::PointXYZI & centre,
+  double radius)
+{
+  if(!snapshot.cloud || snapshot.cloud->points.empty() ||
+    !std::isfinite(radius) || radius <= 0.0)
+  {
+    return false;
+  }
+  // An uninitialised KdTreeFLANN dereferences a null FLANN index; the snapshot
+  // always allocates the object, so the input cloud is the readiness check.
+  if(snapshot.kdtree && snapshot.kdtree->getInputCloud()){
+    std::vector<int> indices;
+    std::vector<float> squared_distances;
+    return snapshot.kdtree->radiusSearch(
+      centre, radius, indices, squared_distances, 1) > 0;
+  }
+  const double radius_squared = radius * radius;
+  for(const auto & point : snapshot.cloud->points){
+    const double dx = point.x - centre.x;
+    const double dy = point.y - centre.y;
+    const double dz = point.z - centre.z;
+    if(dx * dx + dy * dy + dz * dz <= radius_squared){
+      return true;
+    }
+  }
+  return false;
+}
+
 namespace
 {
 

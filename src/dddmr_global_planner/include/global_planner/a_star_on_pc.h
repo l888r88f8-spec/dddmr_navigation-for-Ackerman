@@ -34,6 +34,7 @@
 #include <set>
 #include <queue> 
 #include <cmath>
+#include <cstddef>
 
 /*For pcl::PointXYZ*/
 #include <pcl/common/geometry.h>
@@ -55,6 +56,56 @@ typedef struct {
   unsigned int parent_index; 
   bool is_closed, is_opened;
 } Node_t;
+
+// Diagnostic-only per-plan accumulation. The dGraph timer wraps the actual
+// get_min_dGraphValue() call, so it includes both mutex wait and lookup work.
+// It is deliberately not named lock_wait_ms: it does not measure the lock directly.
+struct GraphPlanDiagnostics
+{
+  std::size_t dgraph_calls = 0;
+  double dgraph_query_ms = 0.0;
+  double dgraph_max_ms = 0.0;
+  std::size_t dgraph_over_1ms = 0;
+  double aggregate_lethal_ms = 0.0;
+  // Time to acquire the batched shared-map read guard. Kept separate from
+  // dgraph_query_ms so a getter-time reduction cannot hide moved lock wait.
+  std::size_t batch_lock_calls = 0;
+  double batch_lock_wait_ms = 0.0;
+  double batch_lock_max_ms = 0.0;
+
+  void reset()
+  {
+    dgraph_calls = 0;
+    dgraph_query_ms = 0.0;
+    dgraph_max_ms = 0.0;
+    dgraph_over_1ms = 0;
+    aggregate_lethal_ms = 0.0;
+    batch_lock_calls = 0;
+    batch_lock_wait_ms = 0.0;
+    batch_lock_max_ms = 0.0;
+  }
+
+  void recordBatchLock(double elapsed_ms)
+  {
+    ++batch_lock_calls;
+    batch_lock_wait_ms += elapsed_ms;
+    if (elapsed_ms > batch_lock_max_ms) {
+      batch_lock_max_ms = elapsed_ms;
+    }
+  }
+
+  void recordDGraphQuery(double elapsed_ms)
+  {
+    ++dgraph_calls;
+    dgraph_query_ms += elapsed_ms;
+    if (elapsed_ms > dgraph_max_ms) {
+      dgraph_max_ms = elapsed_ms;
+    }
+    if (elapsed_ms > 1.0) {
+      ++dgraph_over_1ms;
+    }
+  }
+};
 
 typedef std::pair<double, unsigned int> f_p_;
 
@@ -100,7 +151,8 @@ class A_Star_on_Graph{
       
       void updateGraph(pcl::PointCloud<pcl::PointXYZI>::Ptr pc_original_z_up);
 
-      void getPath( unsigned int start, unsigned int goal, std::vector<unsigned int>& path);
+      void getPath( unsigned int start, unsigned int goal, std::vector<unsigned int>& path,
+        GraphPlanDiagnostics * diagnostics = nullptr);
       
       void setupTurningWeight(double m_weight){turning_weight_ = m_weight;}
 

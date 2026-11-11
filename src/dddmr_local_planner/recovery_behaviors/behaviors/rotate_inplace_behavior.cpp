@@ -66,13 +66,11 @@ void RotateInPlaceBehavior::onInitialize(){
 }
 
 void RotateInPlaceBehavior::trajectory2posearray_cuboids(const base_trajectory::Trajectory& a_traj, 
-                                      geometry_msgs::msg::PoseArray& pose_arr, pcl::PointCloud<pcl::PointXYZ>& cuboids_pcl){
+                                      geometry_msgs::msg::PoseArray& pose_arr){
 
   for(unsigned int i=0;i<a_traj.getPointsSize();i++){
       auto p = a_traj.getPoint(i);
-      pose_arr.poses.push_back(p.pose);  
-      //@ For cuboids debug
-      //cuboids_pcl += a_traj.getCuboid(i);   
+      pose_arr.poses.push_back(p.pose);
   }
 
 }
@@ -84,7 +82,6 @@ void RotateInPlaceBehavior::getBestTrajectory(std::string traj_gen_name, base_tr
 
   double minimum_cost = 9999999;
   geometry_msgs::msg::PoseArray accepted_pose_arr;
-  pcl::PointCloud<pcl::PointXYZ> cuboids_pcl;
 
   for(auto traj_it=trajectories_->begin();traj_it!=trajectories_->end();traj_it++){
 
@@ -96,13 +93,13 @@ void RotateInPlaceBehavior::getBestTrajectory(std::string traj_gen_name, base_tr
     }
 
     if((*traj_it).cost_>=0){
-      trajectory2posearray_cuboids((*traj_it), accepted_pose_arr, cuboids_pcl);
+      trajectory2posearray_cuboids((*traj_it), accepted_pose_arr);
     }
 
   }
 
   geometry_msgs::msg::PoseArray best_pose_arr;
-  trajectory2posearray_cuboids(best_traj, best_pose_arr, cuboids_pcl);
+  trajectory2posearray_cuboids(best_traj, best_pose_arr);
   best_pose_arr.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
   best_pose_arr.header.stamp = node_->get_clock()->now();
   pub_trajectory_pose_array_->publish(best_pose_arr);
@@ -235,7 +232,6 @@ dddmr_sys_core::RecoveryState RotateInPlaceBehavior::runBehavior(
     trajectory_generators_ros_->initializeTheories_wi_Shared_data();
 
     geometry_msgs::msg::PoseArray pose_arr;
-    pcl::PointCloud<pcl::PointXYZ> cuboids_pcl;
 
     trajectories_ = std::make_shared<std::vector<base_trajectory::Trajectory>>();
 
@@ -245,7 +241,7 @@ dddmr_sys_core::RecoveryState RotateInPlaceBehavior::runBehavior(
       if(trajectory_generators_ros_->nextTrajectory(trajectory_generator_name_, a_traj)){
         //@ collected all trajectories here, for later scoring
         trajectories_->push_back(a_traj);
-        trajectory2posearray_cuboids(a_traj, pose_arr, cuboids_pcl);
+        trajectory2posearray_cuboids(a_traj, pose_arr);
       }
 
     }

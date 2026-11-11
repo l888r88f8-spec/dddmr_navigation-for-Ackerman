@@ -1,0 +1,67 @@
+# Offline SHADOW comparison profile: 0.05 m voxels, 8 x 8 x 4 m window.
+#
+# This file is intentionally separate from config/local_map.yaml and from the
+# navigation launch files. It is for `local_map_shadow` replay/offline
+# comparisons only. Do not wire it into p2p or the controller, and do not treat
+# it as a control-ready configuration. Geometry is intentionally omitted, so
+# AdapterStatus.control_ready stays false.
+#
+# Run only the diagnostic shadow node with this file:
+#   ros2 launch dddmr_local_map local_map_shadow.launch.py \
+#     config_file:=/absolute/path/to/config/local_map_005.yaml
+#
+# The 8 x 8 x 4 m extents are integer multiples of 0.05 m:
+# 160 x 160 x 80 voxels. The default 0.10 m configuration is unchanged.
+/**:
+  ros__parameters:
+    local_map:
+      cloud_topic: "/lio_sam/deskew/cloud_deskewed"
+
+      frames:
+        map: "odom"
+        base: "base_link"
+        sensor: "hesai_lidar"
+
+      map:
+        voxel_size: 0.05
+        size_x: 8.0
+        size_y: 8.0
+        size_z: 4.0
+        max_range: 8.0
+        # 160 * 160 * 80 = 2,048,000 cells; leave headroom for the window cap.
+        max_voxels: 2500000
+        inflation_radius: 0.0
+        hit_log_odds: 0.85
+        miss_log_odds: -0.85
+        occupied_threshold: 0.4
+        free_threshold: -0.4
+        min_log_odds: -3.0
+        max_log_odds: 3.0
+
+      terrain:
+        contact_patch_radius: 0.18
+        max_contact_search_z: 0.35
+        max_drop: 0.30
+        max_step: 0.12
+        max_slope_rad: 0.40
+        max_cross_slope_rad: 0.30
+        max_warp: 0.05
+        min_patch_coverage: 0.60
+        min_plane_confidence: 0.10
+        max_snapshot_age: 0.50
+        cluster_max_dz: 0.22
+        plane_inlier_tol: 0.06
+        max_patches: 20000
+        unknown_body_policy: "reject"
+
+      self_filter:
+        enabled: true
+
+      tf_timeout_sec: 0.10
+      max_stamp_age_sec: 0.50
+      future_tolerance_sec: 0.05
+      clock_rewind_tolerance_sec: 0.10
+      use_steady_receipt_age: true
+
+      log_status: true
+      status_log_period_sec: 2.00

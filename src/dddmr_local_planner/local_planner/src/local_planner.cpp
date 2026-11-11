@@ -29,12 +29,18 @@
 * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #include <local_planner/local_planner.h>
+#include <tf2/utils.hpp>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
+#include <sstream>
+#include <utility>
+#include <string>
+#include <utility>
 
 namespace local_planner {
 namespace
@@ -85,8 +91,8 @@ Local_Planner::Local_Planner(const std::string& name): Node(name)
   rpp_max_lateral_accel_ = 1.5;
   rpp_prediction_horizon_sec_ = 1.5;
   rpp_prediction_step_sec_ = 0.1;
-  rpp_wheelbase_ = 0.55;
-  rpp_max_steer_ = 0.69;
+  rpp_wheelbase_ = 0.550;
+  rpp_max_steer_ = 0.3270520925102273;
   rpp_max_angular_velocity_ = 1.2;
   mppi_use_perception_blocked_preemption_ = false;
   allow_offroute_anchor_recovery_ = false;
@@ -104,10 +110,6 @@ void Local_Planner::initial(
   declare_parameter("odom_topic_qos", rclcpp::ParameterValue("reliable"));
   this->get_parameter("odom_topic_qos", odom_topic_qos_);
   RCLCPP_DEBUG(this->get_logger(), "odom_topic_qos: %s", odom_topic_qos_.c_str());
-
-  declare_parameter("compute_best_trajectory_in_odomCb", rclcpp::ParameterValue(false));
-  this->get_parameter("compute_best_trajectory_in_odomCb", compute_best_trajectory_in_odomCb_);
-  RCLCPP_DEBUG(this->get_logger(), "compute_best_trajectory_in_odomCb: %d", compute_best_trajectory_in_odomCb_);
 
   declare_parameter(
     "local_reference.forward_distance",
@@ -235,6 +237,30 @@ void Local_Planner::initial(
   RCLCPP_DEBUG(this->get_logger(), "controller_backend: %s", controller_backend_.c_str());
 
   declare_parameter(
+    mppiEnvironmentBackendParameterName(),
+    rclcpp::ParameterValue("legacy_points"));
+  this->get_parameter(
+    mppiEnvironmentBackendParameterName(), mppi_environment_backend_name_);
+  if(!parseMppiEnvironmentBackend(
+      mppi_environment_backend_name_, &mppi_environment_backend_))
+  {
+    RCLCPP_ERROR(
+      this->get_logger().get_child(name_),
+      "invalid %s '%s'; exact accepted values are 'legacy_points' and 'local_map'",
+      mppiEnvironmentBackendParameterName(),
+      mppi_environment_backend_name_.c_str());
+    mppi_local_map_init_error_ =
+      "invalid " + std::string(mppiEnvironmentBackendParameterName()) + " '" +
+      mppi_environment_backend_name_ + "'";
+    mppi_environment_backend_ = MppiEnvironmentBackend::kLegacyPoints;
+  }
+  RCLCPP_DEBUG(
+    this->get_logger(),
+    "%s: %s",
+    mppiEnvironmentBackendParameterName(),
+    toString(mppi_environment_backend_));
+
+  declare_parameter(
     "regulated_pure_pursuit.critic_trajectory_generator_name",
     rclcpp::ParameterValue("ackermann_simple"));
   this->get_parameter(
@@ -320,13 +346,13 @@ void Local_Planner::initial(
     rpp_prediction_step_sec_);
   declare_parameter(
     "regulated_pure_pursuit.wheelbase",
-    rclcpp::ParameterValue(0.55));
+    rclcpp::ParameterValue(0.550));
   this->get_parameter(
     "regulated_pure_pursuit.wheelbase",
     rpp_wheelbase_);
   declare_parameter(
     "regulated_pure_pursuit.max_steer",
-    rclcpp::ParameterValue(0.69));
+    rclcpp::ParameterValue(0.3270520925102273));
   this->get_parameter(
     "regulated_pure_pursuit.max_steer",
     rpp_max_steer_);
@@ -423,15 +449,36 @@ void Local_Planner::initial(
   declare_parameter("mppi.wz_std", rclcpp::ParameterValue(0.25));
   declare_parameter("mppi.vx_min", rclcpp::ParameterValue(0.05));
   declare_parameter("mppi.vx_max", rclcpp::ParameterValue(0.8));
+  declare_parameter("mppi.reverse_recovery_enabled", rclcpp::ParameterValue(false));
+  declare_parameter("mppi.reverse_max_speed", rclcpp::ParameterValue(0.15));
+  declare_parameter("mppi.reverse_episode_distance", rclcpp::ParameterValue(0.5));
   declare_parameter("mppi.wz_max", rclcpp::ParameterValue(1.2));
   declare_parameter("mppi.ax_min", rclcpp::ParameterValue(-0.8));
   declare_parameter("mppi.ax_max", rclcpp::ParameterValue(0.8));
   declare_parameter("mppi.az_max", rclcpp::ParameterValue(1.5));
-  declare_parameter("mppi.wheelbase", rclcpp::ParameterValue(0.55));
-  declare_parameter("mppi.max_steer", rclcpp::ParameterValue(0.69));
+  declare_parameter("mppi.wheelbase", rclcpp::ParameterValue(0.550));
+  declare_parameter("mppi.max_steer", rclcpp::ParameterValue(0.3270520925102273));
   declare_parameter("mppi.seed", rclcpp::ParameterValue(7));
   declare_parameter("mppi.regenerate_noises", rclcpp::ParameterValue(false));
   declare_parameter("mppi.use_perception_blocked_preemption", rclcpp::ParameterValue(false));
+  declare_parameter("mppi.avoidance_geometry_enabled", rclcpp::ParameterValue(true));
+  declare_parameter("mppi.preferred_side_min_offset", rclcpp::ParameterValue(0.15));
+  declare_parameter("mppi.bypass_width_margin", rclcpp::ParameterValue(0.10));
+  // Cost per metre of lateral travel needed to reach the usable bypass band on
+  // a side. Only applied while the blocking geometry does not force a side.
+  // 0 disables the detour preference and restores pure cost comparison.
+  declare_parameter("mppi.bypass_detour_weight", rclcpp::ParameterValue(1.0));
+  // Linear approach slowdown shared with the RPP backend: full speed at this
+  // distance from the goal, vx_min at the goal. 0 disables it.
+  declare_parameter("mppi.goal_slowdown_distance", rclcpp::ParameterValue(2.5));
+  declare_parameter("mppi.lateral_probe_max_offset", rclcpp::ParameterValue(1.5));
+  declare_parameter("mppi.lateral_probe_step", rclcpp::ParameterValue(0.15));
+  // Extra probes along the route direction so an obstacle that only blocks the
+  // front of the footprint is still seen by the point-cloud probe band.
+  declare_parameter("mppi.lateral_probe_longitudinal_offset", rclcpp::ParameterValue(0.7));
+  declare_parameter("mppi.lateral_probe_longitudinal_step", rclcpp::ParameterValue(0.35));
+  declare_parameter("mppi.debug_blocked_diagnostics", rclcpp::ParameterValue(true));
+  declare_parameter("mppi.debug_blocked_diagnostics_period", rclcpp::ParameterValue(0.1));
   declare_parameter("mppi.critics", rclcpp::ParameterValue(mppi_critic_config.critics));
 
   auto get_double_param = [&](const std::string & param_name, const double default_value) {
@@ -460,6 +507,8 @@ void Local_Planner::initial(
     this->get_parameter("mppi.structured_min_vx").as_double();
   mppi_config.departure_lateral_offset =
     this->get_parameter("mppi.departure_lateral_offset").as_double();
+  mppi_config.bypass_detour_weight =
+    std::max(0.0, this->get_parameter("mppi.bypass_detour_weight").as_double());
   mppi_config.iteration_count = static_cast<std::size_t>(
     std::max<int64_t>(1, this->get_parameter("mppi.iteration_count").as_int()));
   mppi_config.temperature = this->get_parameter("mppi.temperature").as_double();
@@ -468,6 +517,14 @@ void Local_Planner::initial(
   mppi_config.wz_std = this->get_parameter("mppi.wz_std").as_double();
   mppi_config.vx_min = this->get_parameter("mppi.vx_min").as_double();
   mppi_config.vx_max = this->get_parameter("mppi.vx_max").as_double();
+  mppi_config.reverse_recovery_enabled =
+    this->get_parameter("mppi.reverse_recovery_enabled").as_bool();
+  mppi_config.reverse_max_speed =
+    this->get_parameter("mppi.reverse_max_speed").as_double();
+  mppi_config.reverse_episode_distance =
+    this->get_parameter("mppi.reverse_episode_distance").as_double();
+  RCLCPP_INFO(this->get_logger().get_child(name_),
+    "mppi.reverse_episode_distance is deprecated and ignored; directed retreat has no accumulated distance cap");
   mppi_config.wz_max = this->get_parameter("mppi.wz_max").as_double();
   mppi_config.ax_min = this->get_parameter("mppi.ax_min").as_double();
   mppi_config.ax_max = this->get_parameter("mppi.ax_max").as_double();
@@ -480,6 +537,26 @@ void Local_Planner::initial(
     this->get_parameter("mppi.regenerate_noises").as_bool();
   mppi_use_perception_blocked_preemption_ =
     this->get_parameter("mppi.use_perception_blocked_preemption").as_bool();
+  mppi_bypass_geometry_enabled_ =
+    this->get_parameter("mppi.avoidance_geometry_enabled").as_bool();
+  mppi_preferred_side_min_offset_ =
+    std::max(0.0, this->get_parameter("mppi.preferred_side_min_offset").as_double());
+  mppi_bypass_width_margin_ =
+    std::max(0.0, this->get_parameter("mppi.bypass_width_margin").as_double());
+  mppi_goal_slowdown_distance_ =
+    std::max(0.0, this->get_parameter("mppi.goal_slowdown_distance").as_double());
+  mppi_lateral_profile_config_.max_lateral_offset =
+    std::max(0.1, this->get_parameter("mppi.lateral_probe_max_offset").as_double());
+  mppi_lateral_profile_config_.lateral_step =
+    std::max(0.01, this->get_parameter("mppi.lateral_probe_step").as_double());
+  mppi_lateral_profile_config_.max_longitudinal_offset =
+    std::max(0.0, this->get_parameter("mppi.lateral_probe_longitudinal_offset").as_double());
+  mppi_lateral_profile_config_.longitudinal_step =
+    std::max(0.01, this->get_parameter("mppi.lateral_probe_longitudinal_step").as_double());
+  mppi_debug_blocked_diagnostics_ =
+    this->get_parameter("mppi.debug_blocked_diagnostics").as_bool();
+  mppi_debug_blocked_diagnostics_period_ =
+    std::max(0.0, this->get_parameter("mppi.debug_blocked_diagnostics_period").as_double());
   mppi_config.shift_control_sequence =
     std::fabs(mppi_config.controller_period - mppi_config.model_dt) < 1e-6;
   mppi_controller_.setConfig(mppi_config);
@@ -604,6 +681,16 @@ void Local_Planner::initial(
   this->get_parameter("debug_publish.all_trajectories", debug_publish_all_trajectories_);
   RCLCPP_DEBUG(this->get_logger(), "debug_publish.all_trajectories: %d", debug_publish_all_trajectories_);
 
+  // Independent wall-timer rate for the diagnostic aggregated_pc topic, in Hz.
+  // It is deliberately not tied to the controller frequency: the perception
+  // cache refreshes on its own sensor timer, so publishing faster only
+  // re-serializes identical data. Values <= 0 disable the timer entirely.
+  declare_parameter("debug_publish.aggregated_pc_frequency", rclcpp::ParameterValue(10.0));
+  this->get_parameter("debug_publish.aggregated_pc_frequency", debug_publish_aggregated_pc_frequency_);
+  RCLCPP_DEBUG(
+    this->get_logger(), "debug_publish.aggregated_pc_frequency: %.2f",
+    debug_publish_aggregated_pc_frequency_);
+
 
   //@Initialize transform listener and broadcaster
   tf_listener_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -622,6 +709,62 @@ void Local_Planner::initial(
   robot_frame_ = perception_3d_ros_->getGlobalUtils()->getRobotFrame();
   global_frame_ = perception_3d_ros_->getGlobalUtils()->getGblFrame();
   parseCuboid(); //after robot_frame is got
+
+  // The local-map environment backend is strictly opt-in. Construct the
+  // adapter only for controller_backend=mppi plus
+  // mppi.environment_backend=local_map, and fail closed if the map or measured
+  // vehicle geometry is invalid. Never fall back to the legacy point cloud.
+  if(isMppiLocalMapBackendSelected() && mppi_local_map_init_error_.empty()){
+    const auto load_status = dddmr_local_map::ros::loadAdapterConfig(
+      *this, "local_map.", &mppi_local_map_config_);
+    if(!load_status.ok){
+      mppi_local_map_init_error_ =
+        "invalid local_map parameters: " + load_status.error;
+    }
+    else{
+      const auto adapter_status =
+        dddmr_local_map::ros::validateAdapterConfig(mppi_local_map_config_);
+      const auto geometry_status = mppi_local_map_config_.geometry.validate();
+      if(!adapter_status.ok){
+        mppi_local_map_init_error_ =
+          "invalid local_map adapter configuration: " + adapter_status.error;
+      }
+      else if(!mppi_local_map_config_.geometry_status.ok ||
+              !geometry_status.ok)
+      {
+        mppi_local_map_init_error_ =
+          "local_map backend requires validated vehicle geometry: " +
+          (mppi_local_map_config_.geometry_status.ok ?
+            geometry_status.error : mppi_local_map_config_.geometry_status.error);
+      }
+      else{
+        try{
+          mppi_local_map_adapter_ =
+            std::make_unique<dddmr_local_map::ros::LocalMapRosAdapter>(
+              *this, *tf2Buffer_, mppi_local_map_config_);
+        }
+        catch(const std::exception & exception){
+          mppi_local_map_init_error_ =
+            std::string("failed to start local_map adapter: ") + exception.what();
+        }
+      }
+    }
+    if(!mppi_local_map_init_error_.empty()){
+      RCLCPP_ERROR(
+        this->get_logger().get_child(name_),
+        "MPPI local-map backend unavailable, commands will be stopped: %s",
+        mppi_local_map_init_error_.c_str());
+    }
+    else{
+      RCLCPP_INFO(
+        this->get_logger().get_child(name_),
+        "MPPI local-map backend enabled: cloud=%s map_frame=%s base_frame=%s sensor_frame=%s",
+        mppi_local_map_config_.cloud_topic.c_str(),
+        mppi_local_map_config_.map_frame.c_str(),
+        mppi_local_map_config_.base_frame.c_str(),
+        mppi_local_map_config_.sensor_frame.c_str());
+    }
+  }
   
   const auto debug_path_qos =
     rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable();
@@ -637,8 +780,17 @@ void Local_Planner::initial(
   pub_accepted_trajectory_pose_array_ = this->create_publisher<geometry_msgs::msg::PoseArray>("accepted_trajectory", 1);
   pub_best_trajectory_pose_ = this->create_publisher<geometry_msgs::msg::PoseArray>("best_trajectory", 2);
   pub_trajectory_pose_array_ = this->create_publisher<geometry_msgs::msg::PoseArray>("trajectory", 2);
-  //pub_pc_normal_ = pnh_.advertise<visualization_msgs::MarkerArray>("normal_marker", 2, true);
-  //pub_trajectory_cuboids_ = pnh_.advertise<sensor_msgs::PointCloud2>("trajectory_cuboids", 2, true);
+  // Diagnostic cloud publishing runs in its own callback group so a slow
+  // conversion never sits in the control callback.
+  if(debug_publish_aggregated_pc_ && debug_publish_aggregated_pc_frequency_ > 0.0){
+    aggregate_cloud_callback_group_ =
+      this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    aggregate_cloud_timer_ = this->create_wall_timer(
+      std::chrono::duration<double>(1.0 / debug_publish_aggregated_pc_frequency_),
+      std::bind(&Local_Planner::publishAggregatedCloud, this),
+      aggregate_cloud_callback_group_);
+  }
+
 
   cbs_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   rclcpp::SubscriptionOptions sub_options;
@@ -656,8 +808,6 @@ void Local_Planner::initial(
   }
   
   //@Initial pcl ptr
-  pcl_global_plan_.reset(new pcl::PointCloud<pcl::PointXYZ>);
-  kdtree_global_plan_.reset(new pcl::KdTreeFLANN<pcl::PointXYZ>());
 }
 
 Local_Planner::~Local_Planner(){
@@ -666,8 +816,57 @@ Local_Planner::~Local_Planner(){
   mpc_critics_ros_.reset();
   trajectory_generators_ros_.reset();
   trajectories_.reset();
+  mppi_local_map_adapter_.reset();
   tf2Buffer_.reset();
 
+}
+
+void Local_Planner::publishAggregatedCloud(){
+
+  if(!debug_publish_aggregated_pc_ || !pub_aggregate_observation_){
+    return;
+  }
+
+  if(pub_aggregate_observation_->get_subscription_count() == 0){
+    return;
+  }
+
+  auto * stacked_perception =
+    perception_3d_ros_ ? perception_3d_ros_->getStackedPerception() : nullptr;
+  auto perception_shared_data =
+    perception_3d_ros_ ? perception_3d_ros_->getSharedDataPtr() : nullptr;
+
+  if(!stacked_perception || !perception_shared_data){
+    return;
+  }
+
+  pcl::PointCloud<pcl::PointXYZI>::ConstPtr aggregate_observation;
+  {
+    // Only the shared_ptr copy happens under the perception lock; converting
+    // and publishing keep running outside it, on this timer's thread.
+    std::unique_lock<perception_3d::StackedPerception::mutex_t> lock(
+      *(stacked_perception->getMutex()));
+    aggregate_observation = perception_shared_data->aggregate_observation_;
+  }
+
+  // The perception cache allocates a new cloud on every refresh, so an
+  // unchanged pointer means no new sensor data arrived since the last publish.
+  if(!aggregate_cloud_cache_.shouldPublish(aggregate_observation)){
+    return;
+  }
+
+  sensor_msgs::msg::PointCloud2 ros2_aggregate_observation;
+  pcl::toROSMsg(*aggregate_observation, ros2_aggregate_observation);
+  pub_aggregate_observation_->publish(ros2_aggregate_observation);
+  aggregate_cloud_cache_.remember(aggregate_observation);
+
+}
+
+bool Local_Planner::isMppiLocalMapBackendSelected() const
+{
+  return controller_backend_ == "mppi" &&
+         mppi_environment_backend_ == MppiEnvironmentBackend::kLocalMap &&
+         mppi_local_map_init_error_.empty();
 }
 
 nav_msgs::msg::Path Local_Planner::buildPathFromPlan(
@@ -711,6 +910,9 @@ void Local_Planner::publishDebugPath(
   bool throttle_log) const
 {
   if(!publisher){
+    return;
+  }
+  if(!lp::shouldPublishDebug(true, publisher->get_subscription_count())){
     return;
   }
 
@@ -776,7 +978,7 @@ dddmr_sys_core::PlannerState Local_Planner::prepareControllerContext(
     return dddmr_sys_core::PERCEPTION_MALFUNCTION;
   }
 
-  if(!stacked_perception->isSensorOK()){
+  if(!isMppiLocalMapBackendSelected() && !stacked_perception->isSensorOK()){
     RCLCPP_ERROR(
       this->get_logger().get_child(name_),
       "local planner trigger: state=PERCEPTION_MALFUNCTION, action=stop_wait, reason=perception_sensor_not_ok, route_version=%zu, goal_seq=%zu, source=%s",
@@ -785,12 +987,28 @@ dddmr_sys_core::PlannerState Local_Planner::prepareControllerContext(
       route_source_label_.c_str());
     return dddmr_sys_core::PERCEPTION_MALFUNCTION;
   }
+  if(isMppiLocalMapBackendSelected() && !stacked_perception->isSensorOK()){
+    RCLCPP_DEBUG_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "MPPI local-map backend bypasses the legacy nonground sensor-health gate; map bundle health is checked per cycle");
+  }
 
   control_loop_time_ = clock_->now();
   bool have_usable_prune_plan = false;
 
   {
     std::unique_lock<perception_3d::StackedPerception::mutex_t> pct_lock(*(stacked_perception->getMutex()));
+    const bool aggregate_observation_stale =
+      perception_shared_data->aggregate_observation_stale_;
+    if(!isMppiLocalMapBackendSelected() && aggregate_observation_stale){
+      RCLCPP_ERROR(
+        this->get_logger().get_child(name_),
+        "local planner trigger: state=PERCEPTION_MALFUNCTION, action=stop_wait, reason=perception_cache_stale, route_version=%zu, goal_seq=%zu, source=%s",
+        route_version_,
+        goal_seq_,
+        route_source_label_.c_str());
+      return dddmr_sys_core::PERCEPTION_MALFUNCTION;
+    }
     have_usable_prune_plan = prunePlan(forward_prune_, backward_prune_);
     perception_shared_data->pcl_prune_plan_ = pcl_prune_plan_;
     context->aggregate_observation = perception_shared_data->aggregate_observation_;
@@ -801,12 +1019,6 @@ dddmr_sys_core::PlannerState Local_Planner::prepareControllerContext(
 
   if(!context->aggregate_observation){
     context->aggregate_observation = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
-  }
-
-  if(debug_publish_aggregated_pc_ && pub_aggregate_observation_->get_subscription_count() > 0){
-    sensor_msgs::msg::PointCloud2 ros2_aggregate_onservation;
-    pcl::toROSMsg(*context->aggregate_observation, ros2_aggregate_onservation);
-    pub_aggregate_observation_->publish(ros2_aggregate_onservation);
   }
 
   if((clock_->now()-trans_gbl2b_.header.stamp).seconds() > 2.0){
@@ -977,25 +1189,53 @@ double Local_Planner::getMaxAckermannCurvature() const
 pcl::PointCloud<pcl::PointXYZ> Local_Planner::transformRobotCuboid(
   const geometry_msgs::msg::PoseStamped & pose) const
 {
+  // The local-map backend scores the configured rigid-body AABB
+  // (geometry.body_min/body_max), not the legacy visualization cuboid. Render
+  // the same 8 corners in the same order so a pose shows the exact envelope
+  // that terrain/model collision used. Legacy mode keeps its vertices
+  // untouched.
+  std::vector<pcl::PointXYZ> vertices;
+  if(isMppiLocalMapBackendSelected()){
+    const auto & min = mppi_local_map_config_.geometry.body_min;
+    const auto & max = mppi_local_map_config_.geometry.body_max;
+    const auto corner = [](double x, double y, double z){
+      pcl::PointXYZ point;
+      point.x = x;
+      point.y = y;
+      point.z = z;
+      return point;
+    };
+    // blb, brb, blt, flb, brt, frt, flt, frb (front=+x, left=+y, top=+z).
+    vertices = {
+      corner(min.x(), max.y(), min.z()),
+      corner(min.x(), min.y(), min.z()),
+      corner(min.x(), max.y(), max.z()),
+      corner(max.x(), max.y(), min.z()),
+      corner(min.x(), min.y(), max.z()),
+      corner(max.x(), min.y(), max.z()),
+      corner(max.x(), max.y(), max.z()),
+      corner(max.x(), min.y(), min.z())};
+  }
+  else{
+    vertices = robot_cuboid_vertices_;
+  }
+
   pcl::PointCloud<pcl::PointXYZ> cuboid;
-  cuboid.reserve(robot_cuboid_vertices_.size());
+  cuboid.reserve(vertices.size());
 
   tf2::Quaternion q;
   tf2::fromMsg(pose.pose.orientation, q);
-  double roll = 0.0;
-  double pitch = 0.0;
-  double yaw = 0.0;
-  tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
-  const double cos_yaw = std::cos(yaw);
-  const double sin_yaw = std::sin(yaw);
+  q.normalize();
+  // Full 3-D rotation: ramps and mixed roll/pitch trajectories must use the
+  // same oriented rigid body as the MPPI local-map terrain checks.
+  const tf2::Matrix3x3 rotation(q);
 
-  for(const auto & vertex : robot_cuboid_vertices_){
+  for(const auto & vertex : vertices){
+    const tf2::Vector3 rotated = rotation * tf2::Vector3(vertex.x, vertex.y, vertex.z);
     pcl::PointXYZ transformed_point;
-    transformed_point.x =
-      pose.pose.position.x + cos_yaw * vertex.x - sin_yaw * vertex.y;
-    transformed_point.y =
-      pose.pose.position.y + sin_yaw * vertex.x + cos_yaw * vertex.y;
-    transformed_point.z = pose.pose.position.z + vertex.z;
+    transformed_point.x = pose.pose.position.x + rotated.x();
+    transformed_point.y = pose.pose.position.y + rotated.y();
+    transformed_point.z = pose.pose.position.z + rotated.z();
     cuboid.push_back(transformed_point);
   }
 
@@ -1222,11 +1462,12 @@ MppiCriticData Local_Planner::buildMppiCriticData(
     double pitch = 0.0;
     double yaw = 0.0;
     tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
-    data.path.push_back(
-      MppiPathPoint{
-        pose.pose.position.x,
-        pose.pose.position.y,
-        yaw});
+    MppiPathPoint path_point;
+    path_point.x = pose.pose.position.x;
+    path_point.y = pose.pose.position.y;
+    path_point.yaw = yaw;
+    path_point.z = pose.pose.position.z;
+    data.path.push_back(path_point);
     if(i > 0){
       const auto & previous = prune_plan_.poses[i - 1];
       data.local_path_length += getDistanceBTWPoseStamp(previous, pose);
@@ -1299,6 +1540,1106 @@ MppiCriticData Local_Planner::buildMppiCriticData(
     std::max(1e-6, std::tan(mppi_controller_.config().max_steer));
   data.model_dt = mppi_controller_.config().model_dt;
   return data;
+}
+
+MppiResult Local_Planner::computeMppiDirectedRetreat(
+  const MppiControl & measured, const std::vector<MppiPathPoint> & path,
+  const double runtime_speed_limit,
+  const MppiDirectedRetreat::PoseValidator & validator,
+  const std::uint64_t environment_id)
+{
+  if(mppi_retreat_route_version_ != route_version_ ||
+     mppi_retreat_goal_seq_ != goal_seq_)
+  {
+    if(mppi_directed_retreat_.active()){
+      mppi_directed_retreat_.invalidate();
+    }
+    mppi_retreat_route_version_ = route_version_;
+    mppi_retreat_goal_seq_ = goal_seq_;
+  }
+  tf2::Quaternion orientation;
+  tf2::fromMsg(trans_gbl2b_.transform.rotation, orientation);
+  MppiRetreatPose pose;
+  pose.x = trans_gbl2b_.transform.translation.x;
+  pose.y = trans_gbl2b_.transform.translation.y;
+  pose.z = trans_gbl2b_.transform.translation.z;
+  tf2::Matrix3x3(orientation).getRPY(pose.roll, pose.pitch, pose.yaw);
+  auto result = mppi_directed_retreat_.compute(
+    pose, measured, path, mppi_controller_.config(), runtime_speed_limit, validator,
+    environment_id);
+  result.reverse_recovery_active = mppi_directed_retreat_.active();
+  RCLCPP_WARN_THROTTLE(
+    this->get_logger().get_child(name_), *clock_, 2000,
+    "MPPI directed retreat: backend=%s, reason=%s, active=%d, reverse=%d, direction=%d, route_points=%zu, validation_calls=%zu, cycle_ms=%.2f, cmd_vx=%.3f, cmd_wz=%.3f%s",
+    mppi_environment_backend_name_.c_str(), mppi_directed_retreat_.reason().c_str(),
+    result.reverse_recovery_active ? 1 : 0, result.reverse_motion_active ? 1 : 0,
+    mppi_directed_retreat_.direction(), mppi_directed_retreat_.route().size(),
+    mppi_directed_retreat_.lastValidationCalls(), mppi_directed_retreat_.lastCycleMs(),
+    result.command.vx, result.command.wz,
+    mppi_environment_backend_ == MppiEnvironmentBackend::kLegacyPoints ?
+      "; legacy validates supplied obstacle points only; unseen space is not certified free" : "");
+  return result;
+}
+
+void Local_Planner::resetMppiLocalMapSequenceOnFailure(
+  const MppiControl & measured_speed)
+{
+  // A failure only resets the MPPI warm start. The directed route and measured
+  // travel telemetry survive ordinary stop/retry cycles.
+  mppi_controller_.resetControlSequence(measured_speed);
+  mppi_last_command_ = measured_speed;
+}
+
+void Local_Planner::updateMppiMeasuredTravelFromOdom(
+  const nav_msgs::msg::Odometry & msg)
+{
+  local_planner::OdometryTravelSample sample;
+  sample.time_sec =
+    static_cast<double>(msg.header.stamp.sec) +
+    1e-9 * static_cast<double>(msg.header.stamp.nanosec);
+  sample.x = msg.pose.pose.position.x;
+  sample.y = msg.pose.pose.position.y;
+  sample.yaw = tf2::getYaw(msg.pose.pose.orientation);
+  sample.frame_id = msg.header.frame_id;
+
+  const local_planner::MeasuredTravelIncrement increment =
+    mppi_measured_travel_tracker_.update(sample);
+
+  // Keep the odometry baseline current for every backend, but only charge the
+  // MPPI reverse episode while this planner is actually driving and that
+  // episode is active. This prevents pre-activation or unrelated-controller
+  // motion from consuming the reverse budget.
+  if(controller_backend_ != "mppi" ||
+     !mppi_controller_.config().reverse_recovery_enabled)
+  {
+    return;
+  }
+  if(!increment.integrated ||
+     !mppi_controller_.reverseRecoveryActive())
+  {
+    return;
+  }
+
+  // Report the real measured displacement exactly once per accepted odometry
+  // observation. Zero is reported as zero; it never gets converted into a
+  // nominal control-period's worth of synthetic travel.
+  mppi_controller_.noteMeasuredReverseTravel(increment.reverse_distance);
+  mppi_controller_.noteMeasuredForwardTravel(increment.forward_distance);
+}
+
+MppiLocalMapRolloutResult Local_Planner::buildMppiLocalMapRollout(
+  const MppiLocalMapCycle & cycle,
+  const std::vector<MppiControl> & controls) const
+{
+  MppiLocalMapRolloutInput input;
+  input.controls = controls;
+  input.dt = mppi_controller_.config().model_dt;
+  input.initial_pose_planner = cycle.initial_pose_planner;
+  return rolloutMppiLocalMap(cycle.context, input);
+}
+
+bool Local_Planner::acquireMppiLocalMapCycle(
+  MppiLocalMapCycle * cycle, std::string * reason)
+{
+  const auto reject = [reason](const std::string & message) {
+    if(reason != nullptr){
+      *reason = message;
+    }
+    return false;
+  };
+  if(cycle == nullptr){
+    return reject("local map cycle output is null");
+  }
+  if(mppi_local_map_adapter_ == nullptr){
+    return reject(mppi_local_map_init_error_.empty() ?
+      "local map adapter is not initialized" : mppi_local_map_init_error_);
+  }
+
+  const rclcpp::Time now_ros = clock_->now();
+  const double now_ros_sec = now_ros.seconds();
+  if(mppi_local_map_last_ros_stamp_sec_ > 0.0 &&
+     now_ros_sec + mppi_local_map_config_.clock_rewind_tolerance_sec <
+       mppi_local_map_last_ros_stamp_sec_)
+  {
+    mppi_local_map_last_ros_stamp_sec_ = now_ros_sec;
+    return reject("ROS clock moved backwards relative to the last MPPI cycle");
+  }
+
+  const auto steady_now = std::chrono::steady_clock::now();
+  const auto handle = mppi_local_map_adapter_->handleAt(steady_now);
+  if(handle == nullptr){
+    return reject("local map adapter has no bundle yet");
+  }
+
+  MppiLocalMapContext context;
+  context.snapshot = handle->snapshot;
+  context.terrain = handle->terrain;
+  // Observation freshness is relative to this control cycle, not to the
+  // timestamp of an older (but still globally usable) snapshot.
+  context.query_stamp = now_ros_sec;
+
+  if(global_frame_ == mppi_local_map_config_.map_frame){
+    context.planner_to_map = Eigen::Isometry3d::Identity();
+  }
+  else{
+    try{
+      // Match the robot pose acquisition time. A localization correction
+      // between two "latest" lookups must not move the seed in odom.
+      const auto transform = tf2Buffer_->lookupTransform(
+        mppi_local_map_config_.map_frame, global_frame_,
+        rclcpp::Time(trans_gbl2b_.header.stamp, clock_->get_clock_type()));
+      const auto & rotation = transform.transform.rotation;
+      const auto & translation = transform.transform.translation;
+      Eigen::Quaterniond quaternion(
+        rotation.w, rotation.x, rotation.y, rotation.z);
+      if(!quaternion.coeffs().allFinite() || quaternion.norm() < 1e-9){
+        return reject("planner->map TF has an invalid rotation");
+      }
+      quaternion.normalize();
+      context.planner_to_map = Eigen::Isometry3d::Identity();
+      context.planner_to_map.linear() = quaternion.toRotationMatrix();
+      context.planner_to_map.translation() =
+        Eigen::Vector3d(translation.x, translation.y, translation.z);
+    }
+    catch(const tf2::TransformException & exception){
+      return reject(std::string("planner->map TF unavailable: ") +
+                    exception.what());
+    }
+  }
+
+  MppiLocalMapHealthInput health;
+  health.context = context;
+  health.handle_present = true;
+  health.map_healthy = handle->mapHealthy();
+  health.control_ready = handle->readyForControl();
+  health.measurement_stamp_sec = handle->measurement_stamp.seconds();
+  health.now_ros_sec = now_ros_sec;
+  health.receive_steady_sec =
+    std::chrono::duration<double>(
+      handle->receive_steady.time_since_epoch()).count();
+  health.now_steady_sec =
+    std::chrono::duration<double>(steady_now.time_since_epoch()).count();
+  health.max_age_sec = mppi_local_map_config_.max_stamp_age_sec;
+  health.future_tolerance_sec = mppi_local_map_config_.future_tolerance_sec;
+  health.clock_rewind_tolerance_sec =
+    mppi_local_map_config_.clock_rewind_tolerance_sec;
+  health.generation = handle->generation;
+  const auto health_status = MppiLocalMapHealth::validate(health);
+  if(!health_status.ok){
+    return reject(std::string("local map health rejected: ") +
+                  toString(health_status.status) + ": " + health_status.detail);
+  }
+  if(handle->status.code != dddmr_local_map::ros::AdapterCode::kOk){
+    return reject(std::string("local map adapter status is ") +
+                  dddmr_local_map::ros::toString(handle->status.code));
+  }
+
+  tf2::Quaternion base_orientation;
+  tf2::fromMsg(trans_gbl2b_.transform.rotation, base_orientation);
+  base_orientation.normalize();
+
+  cycle->handle = handle;
+  cycle->context = context;
+  cycle->initial_pose_planner = Eigen::Isometry3d::Identity();
+  cycle->initial_pose_planner.linear() =
+    Eigen::Quaterniond(
+      base_orientation.w(), base_orientation.x(), base_orientation.y(),
+      base_orientation.z()).normalized().toRotationMatrix();
+  cycle->initial_pose_planner.translation() = Eigen::Vector3d(
+    trans_gbl2b_.transform.translation.x,
+    trans_gbl2b_.transform.translation.y,
+    trans_gbl2b_.transform.translation.z);
+  cycle->generation = handle->generation;
+  cycle->measurement_stamp_sec = health.measurement_stamp_sec;
+  cycle->receive_steady_sec = health.receive_steady_sec;
+
+  mppi_local_map_last_ros_stamp_sec_ = now_ros_sec;
+  return true;
+}
+
+bool Local_Planner::revalidateMppiLocalMapCycle(
+  const MppiLocalMapCycle & cycle, std::string * reason)
+{
+  const auto reject = [reason](const std::string & message) {
+    if(reason != nullptr){
+      *reason = message;
+    }
+    return false;
+  };
+  if(mppi_local_map_adapter_ == nullptr){
+    return reject("local map adapter is not initialized");
+  }
+
+  const rclcpp::Time now_ros = clock_->now();
+  const double now_ros_sec = now_ros.seconds();
+  if(mppi_local_map_last_ros_stamp_sec_ > 0.0 &&
+     now_ros_sec + mppi_local_map_config_.clock_rewind_tolerance_sec <
+       mppi_local_map_last_ros_stamp_sec_)
+  {
+    mppi_local_map_last_ros_stamp_sec_ = now_ros_sec;
+    return reject("ROS clock moved backwards during MPPI optimization");
+  }
+
+  const auto steady_now = std::chrono::steady_clock::now();
+  const auto latest = mppi_local_map_adapter_->handleAt(steady_now);
+  if(latest == nullptr){
+    return reject("local map adapter lost its bundle during optimization");
+  }
+  if(!latest->mapHealthy() || !latest->readyForControl() ||
+     latest->status.code != dddmr_local_map::ros::AdapterCode::kOk)
+  {
+    return reject(std::string("local map adapter status became unhealthy: ") +
+                  dddmr_local_map::ros::toString(latest->status.code) +
+                  (latest->status.reason.empty() ?
+                    "" : ": " + latest->status.reason));
+  }
+  if(latest->generation != cycle.generation){
+    return reject("local map generation changed during optimization");
+  }
+
+  MppiLocalMapHealthInput health;
+  health.context = cycle.context;
+  health.handle_present = true;
+  health.map_healthy = latest->mapHealthy();
+  health.control_ready = latest->readyForControl();
+  health.measurement_stamp_sec = cycle.measurement_stamp_sec;
+  health.now_ros_sec = now_ros_sec;
+  health.receive_steady_sec = cycle.receive_steady_sec;
+  health.now_steady_sec =
+    std::chrono::duration<double>(steady_now.time_since_epoch()).count();
+  health.max_age_sec = mppi_local_map_config_.max_stamp_age_sec;
+  health.future_tolerance_sec = mppi_local_map_config_.future_tolerance_sec;
+  health.clock_rewind_tolerance_sec =
+    mppi_local_map_config_.clock_rewind_tolerance_sec;
+  health.generation = latest->generation;
+  const auto health_status =
+    MppiLocalMapHealth::validate(health, true, cycle.generation);
+  if(!health_status.ok){
+    return reject(std::string("pinned local map bundle rejected after "
+                              "optimization: ") +
+                  toString(health_status.status) + ": " +
+                  health_status.detail);
+  }
+
+  // A newer healthy frame may exist now. It is deliberately NOT used to
+  // rescore or mix the already validated weighted sequence.
+  mppi_local_map_last_ros_stamp_sec_ = now_ros_sec;
+  return true;
+}
+
+Local_Planner::MppiLocalMapCriticBundle Local_Planner::buildMppiLocalMapCriticData(
+  const std::vector<MppiCandidate> & candidates,
+  const MppiLocalMapCycle & cycle) const
+{
+  MppiLocalMapCriticBundle bundle;
+  bundle.data.trajectories.reserve(candidates.size());
+  bundle.candidate_valid.reserve(candidates.size());
+  bundle.candidate_status.reserve(candidates.size());
+  bundle.candidate_detail.reserve(candidates.size());
+
+  for(const auto & candidate : candidates){
+    const auto rollout = buildMppiLocalMapRollout(cycle, candidate.controls);
+    const auto validation = validateMppiLocalMapRollout(
+      cycle.context, rollout, candidate.controls.size());
+    const bool valid = validation.ok;
+    bundle.candidate_valid.push_back(valid);
+    bundle.candidate_status.push_back(rollout.status);
+    bundle.candidate_detail.push_back(
+      validation.ok ? std::string() : validation.detail);
+
+    if(valid){
+      bundle.data.obstacle_collision_point_checks +=
+        rollout.trajectory.points.size();
+      bundle.data.obstacle_clearance_point_checks +=
+        rollout.trajectory.points.size();
+      bundle.data.trajectories.push_back(rollout.trajectory);
+    }
+    else{
+      MppiScoredTrajectory invalid;
+      invalid.controls = candidate.controls;
+      bundle.data.trajectories.push_back(std::move(invalid));
+    }
+  }
+
+  // Path metadata is derived from the pinned new terrain, not from the empty
+  // legacy obstacle snapshot. The support height is seeded from the previous
+  // projected path pose so the query walks the terrain continuously.
+  const double collision_margin =
+    mppi_critic_manager_.config().obstacles.collision_margin_distance;
+  bundle.data.path.reserve(prune_plan_.poses.size());
+  bundle.data.local_path_length = 0.0;
+  bundle.data.blocked_path_points = 0;
+  double seed_z = prune_plan_.poses.empty() ?
+    trans_gbl2b_.transform.translation.z : prune_plan_.poses.front().pose.position.z;
+  for(std::size_t i = 0; i < prune_plan_.poses.size(); ++i){
+    const auto & pose = prune_plan_.poses[i];
+    tf2::Quaternion q;
+    tf2::fromMsg(pose.pose.orientation, q);
+    q.normalize();
+    double roll = 0.0;
+    double pitch = 0.0;
+    double yaw = 0.0;
+    tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+
+    MppiPathPoint path_point;
+    path_point.x = pose.pose.position.x;
+    path_point.y = pose.pose.position.y;
+    path_point.yaw = yaw;
+    path_point.obstacle_free = false;
+
+    dddmr_local_map::TerrainQuery query;
+    query.stamp = cycle.context.query_stamp;
+    query.position = dddmr_local_map::Vec3(path_point.x, path_point.y, seed_z);
+    query.roll = roll;
+    query.pitch = pitch;
+    query.yaw = yaw;
+    const auto terrain = cycle.context.terrain->evaluate(query);
+    if(terrain.ok()){
+      if(std::isfinite(terrain.projected_position.z())){
+        seed_z = terrain.projected_position.z();
+      }
+      path_point.obstacle_free =
+        !std::isfinite(terrain.obstacle_clearance) ||
+        terrain.obstacle_clearance >= collision_margin;
+    }
+    path_point.z = seed_z;
+    if(!path_point.obstacle_free){
+      ++bundle.data.blocked_path_points;
+    }
+
+    bundle.data.path.push_back(path_point);
+    if(i > 0){
+      const auto & previous = prune_plan_.poses[i - 1];
+      bundle.data.local_path_length += getDistanceBTWPoseStamp(previous, pose);
+    }
+  }
+  bundle.data.path_obstacle_occupancy_ratio = bundle.data.path.empty() ?
+    0.0 : static_cast<double>(bundle.data.blocked_path_points) /
+            static_cast<double>(bundle.data.path.size());
+
+  bundle.data.robot_x = trans_gbl2b_.transform.translation.x;
+  bundle.data.robot_y = trans_gbl2b_.transform.translation.y;
+  bundle.data.robot_yaw = getRobotYaw();
+  const auto robot_path_projection = projectPointOntoMppiPath(
+    bundle.data.path, bundle.data.robot_x, bundle.data.robot_y);
+  bundle.data.robot_path_offset = robot_path_projection.signed_offset;
+  bundle.data.robot_path_offset_valid = robot_path_projection.valid;
+  bundle.data.vx_min = mppi_controller_.config().vx_min;
+  bundle.data.vx_max = mppi_controller_.config().vx_max;
+  bundle.data.min_turning_radius =
+    mppi_controller_.config().wheelbase /
+    std::max(1e-6, std::tan(mppi_controller_.config().max_steer));
+  bundle.data.model_dt = mppi_controller_.config().model_dt;
+  if(bundle.data.blocked_path_points >= 3){
+    bundle.lateral_profile = measureMppiLateralOccupancyForLocalMap(
+      bundle.data.path, cycle);
+  }
+  return bundle;
+}
+
+MppiLateralOccupancyProfile Local_Planner::measureMppiLateralOccupancyForLocalMap(
+  const std::vector<MppiPathPoint> & path,
+  const MppiLocalMapCycle & cycle) const
+{
+  MppiLateralOccupancyProfile profile;
+  if(!mppi_bypass_geometry_enabled_ || path.empty() ||
+    cycle.context.terrain == nullptr)
+  {
+    return profile;
+  }
+  const double collision_margin =
+    mppi_critic_manager_.config().obstacles.collision_margin_distance;
+  const double query_stamp = cycle.context.query_stamp;
+  const auto probe_blocked = [&](const MppiPathPoint & probe) {
+      dddmr_local_map::TerrainQuery query;
+      query.stamp = query_stamp;
+      query.position = dddmr_local_map::Vec3(probe.x, probe.y, probe.z);
+      query.roll = 0.0;
+      query.pitch = 0.0;
+      query.yaw = probe.yaw;
+      const auto terrain = cycle.context.terrain->evaluate(query);
+      if(!terrain.ok()){
+        // Outside the map is not evidence of free space.
+        return true;
+      }
+      return std::isfinite(terrain.obstacle_clearance) &&
+        terrain.obstacle_clearance < collision_margin;
+    };
+  // Every terrain query already tests the whole rigid body OBB, so the probe
+  // at the anchor's longitudinal position covers the footprint along the route
+  // as well; extra along-route terrain queries would only add cost.
+  MppiLateralProfileConfig profile_config = mppi_lateral_profile_config_;
+  profile_config.max_longitudinal_offset = 0.0;
+  return measureMppiLateralOccupancyProfile(
+    path, probe_blocked, profile_config);
+}
+
+MppiLateralOccupancyProfile Local_Planner::measureMppiLateralOccupancyForObstacleCloud(
+  const std::vector<MppiPathPoint> & path,
+  const MppiObstacleSnapshot & obstacle_snapshot) const
+{
+  MppiLateralOccupancyProfile profile;
+  if(!mppi_bypass_geometry_enabled_ || path.empty() ||
+    !obstacle_snapshot.cloud || obstacle_snapshot.cloud->points.empty())
+  {
+    return profile;
+  }
+  const double probe_radius = std::max(
+    0.05, mppi_critic_manager_.config().obstacles.collision_margin_distance);
+  const auto probe_blocked = [&](const MppiPathPoint & probe) {
+      pcl::PointXYZI centre;
+      centre.x = static_cast<float>(probe.x);
+      centre.y = static_cast<float>(probe.y);
+      centre.z = static_cast<float>(probe.z);
+      centre.intensity = 0.0f;
+      return mppiObstacleSnapshotHasPointWithin(
+        obstacle_snapshot, centre, probe_radius);
+    };
+  return measureMppiLateralOccupancyProfile(
+    path, probe_blocked, mppi_lateral_profile_config_);
+}
+
+MppiBypassSide Local_Planner::preferredMppiBypassSide(
+  const MppiLateralOccupancyProfile & profile) const
+{
+  if(!mppi_bypass_geometry_enabled_){
+    return MppiBypassSide::Neutral;
+  }
+  const double required_width = robot_half_width_ +
+    mppi_critic_manager_.config().obstacles.collision_margin_distance +
+    mppi_bypass_width_margin_;
+  return selectMppiGeometricBypassSide(
+    profile, mppi_preferred_side_min_offset_, required_width);
+}
+
+double Local_Planner::mppiSpeedCap(const double allowed_max_linear_speed) const
+{
+  const auto & config = mppi_controller_.config();
+  double cruise_cap = config.vx_max;
+  if(allowed_max_linear_speed > 0.0){
+    cruise_cap = std::min(cruise_cap, allowed_max_linear_speed);
+  }
+  return mppiGoalApproachSpeedCap(
+    getDistanceToGoal(), cruise_cap, mppi_goal_slowdown_distance_, config.vx_min);
+}
+
+void Local_Planner::maybeLogMppiBlockedDiagnostics(
+  const MppiObstacleSnapshot & obstacle_snapshot,
+  const MppiResult & result,
+  const MppiControl & best_sample_command,
+  const MppiLateralOccupancyProfile & profile,
+  const double path_offset,
+  const bool path_offset_valid,
+  const bool optimal_sequence_collision_free,
+  const bool has_optimal_collision_pose,
+  const double optimal_collision_x,
+  const double optimal_collision_y,
+  const double optimal_collision_yaw,
+  const std::size_t blocked_path_points)
+{
+  if(!mppi_debug_blocked_diagnostics_){
+    mppi_blocked_diagnostics_state_.clear();
+    return;
+  }
+  if(blocked_path_points < 3 || mppi_diagnostic_path_.size() < 2 ||
+    !obstacle_snapshot.cloud || obstacle_snapshot.cloud->points.empty())
+  {
+    mppi_blocked_diagnostics_state_.clear();
+    return;
+  }
+
+  // Emit when the decision state changes, and otherwise at the configured
+  // period. A fixed 2 s throttle would miss the sub-second infeasibility that
+  // abandons a passable side.
+  const std::string state =
+    std::string(toString(result.selected_bypass_side)) + "/" +
+    std::string(toString(result.avoidance_stage)) + "/" +
+    (result.feasible_left_candidates > 0 ? "L" : "l") +
+    (result.feasible_right_candidates > 0 ? "R" : "r") +
+    (result.feasible_neutral_candidates > 0 ? "N" : "n") + "/" +
+    (optimal_sequence_collision_free ? "1" : "0") + "/" +
+    (result.has_valid_control ? "1" : "0");
+  const auto now = std::chrono::steady_clock::now();
+  const bool first_trace =
+    mppi_blocked_diagnostics_last_.time_since_epoch().count() == 0;
+  const bool period_elapsed = first_trace ||
+    now - mppi_blocked_diagnostics_last_ >=
+    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+    std::chrono::duration<double>(mppi_debug_blocked_diagnostics_period_));
+  if(state == mppi_blocked_diagnostics_state_ &&
+    !period_elapsed && !first_trace)
+  {
+    return;
+  }
+  mppi_blocked_diagnostics_state_ = state;
+  mppi_blocked_diagnostics_last_ = now;
+
+  std::vector<std::size_t> blocked_indices;
+  blocked_indices.reserve(mppi_diagnostic_path_.size());
+  for(std::size_t i = 0; i < mppi_diagnostic_path_.size(); ++i){
+    if(!mppi_diagnostic_path_[i].obstacle_free){
+      blocked_indices.push_back(i);
+    }
+  }
+  if(blocked_indices.empty()){
+    return;
+  }
+  std::vector<std::size_t> anchors;
+  anchors.push_back(blocked_indices.front());
+  if(blocked_indices.size() > 2){
+    anchors.push_back(blocked_indices[blocked_indices.size() / 2]);
+  }
+  if(blocked_indices.size() > 1){
+    anchors.push_back(blocked_indices.back());
+  }
+
+  const double probe_step =
+    std::max(0.01, mppi_lateral_profile_config_.lateral_step);
+  const double probe_max =
+    std::max(probe_step, mppi_lateral_profile_config_.max_lateral_offset);
+  std::vector<int> obstacle_ids;
+  std::ostringstream corridor;
+  for(const std::size_t anchor_index : anchors){
+    const auto & anchor = mppi_diagnostic_path_[anchor_index];
+    const double normal_x = -std::sin(anchor.yaw);
+    const double normal_y = std::cos(anchor.yaw);
+    geometry_msgs::msg::PoseStamped probe_pose;
+    probe_pose.pose.position.x = anchor.x;
+    probe_pose.pose.position.y = anchor.y;
+    probe_pose.pose.position.z = anchor.z;
+    tf2::Quaternion probe_orientation;
+    probe_orientation.setRPY(0.0, 0.0, anchor.yaw);
+    probe_pose.pose.orientation = tf2::toMsg(probe_orientation);
+    const auto probe_band = [&](const double lateral) {
+        geometry_msgs::msg::PoseStamped pose = probe_pose;
+        pose.pose.position.x += normal_x * lateral;
+        pose.pose.position.y += normal_y * lateral;
+        const auto collision = evaluateMppiObstacleCollisionForCuboid(
+          transformRobotCuboid(pose), obstacle_snapshot, &obstacle_ids);
+        if(!collision.evaluated){
+          return '?';
+        }
+        return collision.in_collision ? 'B' : 'F';
+      };
+    std::string left_band;
+    std::string right_band;
+    for(double offset = probe_step;
+      offset <= probe_max + 1e-9; offset += probe_step)
+    {
+      left_band.push_back(probe_band(offset));
+      right_band.push_back(probe_band(-offset));
+    }
+
+    // Three nearest returns at this anchor, not just the closest one: the
+    // blocking decision is taken from the nearest point, so its height and
+    // lateral position are what separates a real obstacle from a stray ground
+    // or vegetation return.
+    struct NearestPoint
+    {
+      double squared = std::numeric_limits<double>::infinity();
+      double lateral = 0.0;
+      double along = 0.0;
+      double z = 0.0;
+    };
+    NearestPoint nearest_points[3];
+    std::size_t band_points = 0;
+    double band_lateral_min = std::numeric_limits<double>::infinity();
+    double band_lateral_max = -std::numeric_limits<double>::infinity();
+    double band_z_min = std::numeric_limits<double>::infinity();
+    double band_z_max = -std::numeric_limits<double>::infinity();
+    const double cos_yaw = std::cos(anchor.yaw);
+    const double sin_yaw = std::sin(anchor.yaw);
+    for(const auto & point : obstacle_snapshot.cloud->points){
+      if(!std::isfinite(point.x) || !std::isfinite(point.y) ||
+        !std::isfinite(point.z))
+      {
+        continue;
+      }
+      const double dx = point.x - anchor.x;
+      const double dy = point.y - anchor.y;
+      const double squared = dx * dx + dy * dy;
+      if(squared > 4.0){
+        // Only a 2 m neighbourhood is reported; farther points are noise for
+        // a corridor-width decision.
+        continue;
+      }
+      const double lateral = normal_x * dx + normal_y * dy;
+      const double along = cos_yaw * dx + sin_yaw * dy;
+      ++band_points;
+      band_lateral_min = std::min(band_lateral_min, lateral);
+      band_lateral_max = std::max(band_lateral_max, lateral);
+      band_z_min = std::min(band_z_min, static_cast<double>(point.z));
+      band_z_max = std::max(band_z_max, static_cast<double>(point.z));
+      NearestPoint candidate;
+      candidate.squared = squared;
+      candidate.lateral = lateral;
+      candidate.along = along;
+      candidate.z = point.z;
+      for(auto & slot : nearest_points){
+        if(candidate.squared < slot.squared){
+          std::swap(slot, candidate);
+        }
+      }
+    }
+    corridor << " [i=" << anchor_index <<
+      " L=" << left_band << " R=" << right_band;
+    corridor << " near3=[";
+    bool first_nearest = true;
+    for(const auto & nearest : nearest_points){
+      if(!std::isfinite(nearest.squared)){
+        continue;
+      }
+      if(!first_nearest){
+        corridor << " ";
+      }
+      first_nearest = false;
+      corridor << "(d=" << std::sqrt(nearest.squared) <<
+        ",lat=" << nearest.lateral <<
+        ",along=" << nearest.along <<
+        ",z=" << nearest.z << ")";
+    }
+    corridor << "]";
+    corridor << " band(n=" << band_points;
+    if(band_points > 0){
+      corridor << ",lat=[" << band_lateral_min << "," << band_lateral_max <<
+        "],z=[" << band_z_min << "," << band_z_max << "]";
+    }
+    corridor << "]";
+  }
+
+  std::ostringstream optimal_collision;
+  if(has_optimal_collision_pose){
+    double nearest_squared = std::numeric_limits<double>::infinity();
+    double nearest_z = 0.0;
+    for(const auto & point : obstacle_snapshot.cloud->points){
+      if(!std::isfinite(point.x) || !std::isfinite(point.y)){
+        continue;
+      }
+      const double dx = point.x - optimal_collision_x;
+      const double dy = point.y - optimal_collision_y;
+      const double squared = dx * dx + dy * dy;
+      if(squared < nearest_squared){
+        nearest_squared = squared;
+        nearest_z = point.z;
+      }
+    }
+    optimal_collision << "(x=" << optimal_collision_x <<
+      ",y=" << optimal_collision_y << ",yaw=" << optimal_collision_yaw;
+    if(std::isfinite(nearest_squared)){
+      optimal_collision << ",nearest=" << std::sqrt(nearest_squared) <<
+        ",z=" << nearest_z;
+    }
+    optimal_collision << ")";
+  }
+  else{
+    optimal_collision << "none";
+  }
+
+  RCLCPP_INFO(this->get_logger().get_child(name_),
+    "MPPI blocked diagnostics: stage=%s, selected=%s, side_failures=%zu, quality_adv=%zu, feasible=L%zu/R%zu/N%zu, profile=(valid=%d,offset=%.3f), path_offset=%.3f(valid=%d), cmd=(%.3f,%.3f), best_sample=(%.3f,%.3f), optimal_valid=%d, valid_control=%d, blocked=%zu, opt_collision=%s, corridor=%s",
+    toString(result.avoidance_stage),
+    toString(result.selected_bypass_side),
+    result.side_infeasible_cycles,
+    result.side_quality_advantage_cycles,
+    result.feasible_left_candidates,
+    result.feasible_right_candidates,
+    result.feasible_neutral_candidates,
+    profile.valid ? 1 : 0,
+    profile.obstacle_offset,
+    path_offset,
+    path_offset_valid ? 1 : 0,
+    result.command.vx,
+    result.command.wz,
+    best_sample_command.vx,
+    best_sample_command.wz,
+    optimal_sequence_collision_free ? 1 : 0,
+    result.has_valid_control ? 1 : 0,
+    blocked_path_points,
+    optimal_collision.str().c_str(),
+    corridor.str().c_str());
+}
+
+base_trajectory::Trajectory Local_Planner::buildTrajectoryFromProjectedMppiPoses(
+  const std::vector<Eigen::Isometry3d> & poses,
+  const rclcpp::Time & stamp) const
+{
+  const double time_step = std::max(0.02, mppi_controller_.config().model_dt);
+  const unsigned int steps =
+    static_cast<unsigned int>(std::max<std::size_t>(1, poses.size()));
+  base_trajectory::Trajectory trajectory(0.0, 0.0, 0.0, time_step, steps);
+  trajectory.cost_ = 0.0;
+
+  for(const auto & projected_pose : poses){
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header.frame_id = global_frame_;
+    pose.header.stamp = stamp;
+    pose.pose.position.x = projected_pose.translation().x();
+    pose.pose.position.y = projected_pose.translation().y();
+    pose.pose.position.z = projected_pose.translation().z();
+    Eigen::Quaterniond orientation(projected_pose.linear());
+    orientation.normalize();
+    pose.pose.orientation.x = orientation.x();
+    pose.pose.orientation.y = orientation.y();
+    pose.pose.orientation.z = orientation.z();
+    pose.pose.orientation.w = orientation.w();
+    const auto cuboid = transformRobotCuboid(pose);
+    trajectory.addPoint(pose, cuboid, computeCuboidMinMax(cuboid));
+  }
+  return trajectory;
+}
+
+dddmr_sys_core::PlannerState Local_Planner::computeMppiLocalMapControlCommand(
+  const std::string & controller_name,
+  geometry_msgs::msg::Twist * cmd_vel)
+{
+  const MppiControl measured_speed{
+    robot_state_.twist.twist.linear.x,
+    robot_state_.twist.twist.angular.z};
+  const auto stop = [&](const dddmr_sys_core::PlannerState state,
+                        const std::string & reason) {
+    resetMppiLocalMapSequenceOnFailure(measured_speed);
+    if(cmd_vel != nullptr){
+      cmd_vel->linear.x = 0.0;
+      cmd_vel->linear.y = 0.0;
+      cmd_vel->linear.z = 0.0;
+      cmd_vel->angular.x = 0.0;
+      cmd_vel->angular.y = 0.0;
+      cmd_vel->angular.z = 0.0;
+    }
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "MPPI local-map trigger: state=STOP, action=stop_wait, reason=%s, controller=%s, route_version=%zu, goal_seq=%zu, source=%s",
+      reason.c_str(),
+      controller_name.c_str(),
+      route_version_,
+      goal_seq_,
+      route_source_label_.c_str());
+    return state;
+  };
+
+  if(!mppi_local_map_init_error_.empty()){
+    return stop(dddmr_sys_core::ALL_TRAJECTORIES_FAIL,
+                mppi_local_map_init_error_);
+  }
+
+  ControllerContext context;
+  const auto context_state = prepareControllerContext(&context);
+  if(context_state != dddmr_sys_core::TRAJECTORY_FOUND){
+    resetMppiLocalMapSequenceOnFailure(measured_speed);
+    if(cmd_vel != nullptr){
+      cmd_vel->linear.x = 0.0;
+      cmd_vel->linear.y = 0.0;
+      cmd_vel->linear.z = 0.0;
+      cmd_vel->angular.x = 0.0;
+      cmd_vel->angular.y = 0.0;
+      cmd_vel->angular.z = 0.0;
+    }
+    return context_state;
+  }
+
+  // New-backend blocked handling comes from terrain/path metadata. Legacy
+  // perception blocked opinions are intentionally not used here; route and
+  // speed context above remain mandatory.
+  const double mppi_cycle_speed_cap =
+    mppiSpeedCap(context.current_allowed_max_linear_speed);
+  MppiLocalMapCycle cycle;
+  std::string cycle_reason;
+  if(!acquireMppiLocalMapCycle(&cycle, &cycle_reason)){
+    return stop(dddmr_sys_core::ALL_TRAJECTORIES_FAIL, cycle_reason);
+  }
+
+  if(context.current_allowed_max_linear_speed > 0.0 &&
+     context.current_allowed_max_linear_speed < mppi_controller_.config().vx_min)
+  {
+    return stop(
+      dddmr_sys_core::ALL_TRAJECTORIES_FAIL,
+      "speed cap is below the configured MPPI minimum");
+  }
+
+  std::size_t mppi_blocked_path_points = 0;
+  double mppi_robot_path_offset = 0.0;
+  bool mppi_robot_path_offset_valid = false;
+  MppiLateralOccupancyProfile mppi_lateral_profile;
+  MppiBypassSide mppi_preferred_bypass_side = MppiBypassSide::Neutral;
+  double mppi_left_detour = 0.0;
+  double mppi_right_detour = 0.0;
+  bool mppi_detour_valid = false;
+  std::size_t mppi_valid_scores = 0;
+  std::size_t mppi_invalid_terrain_candidates = 0;
+  std::size_t mppi_scored_trajectories = 0;
+
+  const auto scoring_start = std::chrono::steady_clock::now();
+  auto score_function =
+    [&](const std::vector<MppiCandidate> & candidates)
+      -> std::vector<MppiCandidateScore> {
+      auto bundle = buildMppiLocalMapCriticData(candidates, cycle);
+      mppi_scored_trajectories = bundle.data.trajectories.size();
+      mppi_blocked_path_points = bundle.data.blocked_path_points;
+      mppi_lateral_profile = bundle.lateral_profile;
+      mppi_preferred_bypass_side = preferredMppiBypassSide(mppi_lateral_profile);
+      mppi_robot_path_offset = bundle.data.robot_path_offset;
+      mppi_robot_path_offset_valid = bundle.data.robot_path_offset_valid;
+      mppi_left_detour = mppiBypassBandDetour(
+        mppi_lateral_profile, MppiBypassSide::Left, mppi_robot_path_offset);
+      mppi_right_detour = mppiBypassBandDetour(
+        mppi_lateral_profile, MppiBypassSide::Right, mppi_robot_path_offset);
+      mppi_detour_valid = mppi_robot_path_offset_valid &&
+        std::isfinite(mppi_left_detour) && std::isfinite(mppi_right_detour);
+      mppi_invalid_terrain_candidates = 0;
+      for(const bool valid : bundle.candidate_valid){
+        if(!valid){
+          ++mppi_invalid_terrain_candidates;
+        }
+      }
+
+      auto critic_result = mppi_critic_manager_.score(bundle.data);
+      if(critic_result.fail_flag ||
+         critic_result.scores.size() != candidates.size())
+      {
+        return std::vector<MppiCandidateScore>(
+          candidates.size(), MppiCandidateScore{false, -1.0});
+      }
+
+      if(mppi_cycle_speed_cap > 0.0){
+        for(std::size_t i = 0; i < candidates.size(); ++i){
+          if(!mppiSequenceRespectsSpeedCap(
+              candidates[i].controls,
+              measured_speed.vx,
+              mppi_cycle_speed_cap,
+              mppi_controller_.config().shift_control_sequence,
+              mppi_controller_.config().ax_min,
+              mppi_controller_.config().model_dt,
+              mppi_controller_.config().controller_period,
+              mppi_controller_.config().ax_max))
+          {
+            critic_result.scores[i] = MppiCandidateScore{false, -1.0};
+          }
+        }
+      }
+
+      // Terrain/support invalid rollouts are hard-rejected regardless of
+      // whether the optional obstacle critic is enabled or disabled.
+      for(std::size_t i = 0; i < candidates.size(); ++i){
+        if(!bundle.candidate_valid[i]){
+          critic_result.scores[i] = MppiCandidateScore{false, -1.0};
+        }
+      }
+      annotateMppiCandidateMetadata(bundle.data, &critic_result);
+
+      mppi_valid_scores = 0;
+      for(const auto & score : critic_result.scores){
+        if(score.valid && std::isfinite(score.cost) && score.cost >= 0.0){
+          ++mppi_valid_scores;
+        }
+      }
+      return critic_result.scores;
+    };
+
+  constexpr std::size_t max_optimization_attempts = 2;
+  const MppiAvoidanceState entry_avoidance_state =
+    mppi_controller_.avoidanceState();
+  MppiResult result;
+  MppiLocalMapRolloutResult final_rollout;
+  bool final_engine_valid = false;
+  std::size_t optimization_attempts = 0;
+  for(; optimization_attempts < max_optimization_attempts;
+      ++optimization_attempts)
+  {
+    result = mppi_controller_.optimizeBatch(
+      measured_speed,
+      score_function,
+      [&]() {
+        MppiDirectionalContext context{
+          mppi_blocked_path_points >= 3,
+          mppi_robot_path_offset,
+          mppi_robot_path_offset_valid};
+        context.preferred_side = mppi_preferred_bypass_side;
+        context.left_detour = mppi_left_detour;
+        context.right_detour = mppi_right_detour;
+        context.detour_valid = mppi_detour_valid;
+        return context;
+      },
+      mppi_cycle_speed_cap,
+      [&](bool) {
+        const auto metadata = buildMppiLocalMapCriticData({}, cycle);
+        const MppiDirectedRetreat::PoseValidator validator =
+          [&](MppiRetreatPose & pose) {
+            MppiLocalMapRolloutInput input;
+            input.controls = {MppiControl{0.0, 0.0}};
+            input.dt = mppi_controller_.config().model_dt;
+            input.initial_pose_planner = Eigen::Isometry3d::Identity();
+            input.initial_pose_planner.linear() =
+              (Eigen::AngleAxisd(pose.yaw, Eigen::Vector3d::UnitZ()) *
+               Eigen::AngleAxisd(pose.pitch, Eigen::Vector3d::UnitY()) *
+               Eigen::AngleAxisd(pose.roll, Eigen::Vector3d::UnitX())).toRotationMatrix();
+            input.initial_pose_planner.translation() = Eigen::Vector3d(pose.x, pose.y, pose.z);
+            const auto rollout = rolloutMppiLocalMap(cycle.context, input);
+            if(!validateMppiLocalMapRollout(cycle.context, rollout, 1).ok){return false;}
+            // Propagate the actual terrain projection into the next search
+            // primitive, including its support height and full orientation.
+            const auto & projected = rollout.projected_start_pose;
+            pose.x = projected.translation().x();
+            pose.y = projected.translation().y();
+            pose.z = projected.translation().z();
+            const Eigen::Quaterniond q(projected.linear());
+            tf2::Matrix3x3(tf2::Quaternion(q.x(), q.y(), q.z(), q.w())).getRPY(
+              pose.roll, pose.pitch, pose.yaw);
+            return true;
+          };
+        // mapVersion is retained as an ABI-compatible argument but the core
+        // ignores it: per-voxel freshness also depends on query_stamp/age, so
+        // the remaining route is revalidated every update.
+        return computeMppiDirectedRetreat(
+          measured_speed, metadata.data.path, context.current_allowed_max_linear_speed,
+          validator, cycle.context.mapVersion());      });
+    if(!result.has_valid_control){
+      break;
+    }
+
+    final_rollout = buildMppiLocalMapRollout(
+      cycle, result.optimal_sequence);
+    const auto validation = validateMppiLocalMapRollout(
+      cycle.context, final_rollout, result.optimal_sequence.size());
+    if(!validation.ok){
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger().get_child(name_), *clock_, 2000,
+        "MPPI local-map final rollout rejected, resetting sequence: %s",
+        validation.detail.c_str());
+      if(mppi_directed_retreat_.active()){
+        // A final backend rejection also makes the retained directed route
+        // unexecutable; invalidate it into braking instead of only resetting
+        // the unrelated MPPI warm start.
+        mppi_directed_retreat_.invalidate();
+      }
+      mppi_controller_.resetControlSequenceForRetry(
+        measured_speed, entry_avoidance_state);
+      continue;
+    }
+
+    if(mppi_cycle_speed_cap > 0.0 &&
+       !mppiSequenceRespectsSpeedCap(
+         result.optimal_sequence,
+         measured_speed.vx,
+         mppi_cycle_speed_cap,
+         mppi_controller_.config().shift_control_sequence,
+         mppi_controller_.config().ax_min,
+         mppi_controller_.config().model_dt,
+         mppi_controller_.config().controller_period,
+         mppi_controller_.config().ax_max))
+    {
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger().get_child(name_), *clock_, 2000,
+        "MPPI local-map final weighted sequence violates the speed cap, resetting sequence");
+      mppi_controller_.resetControlSequenceForRetry(
+        measured_speed, entry_avoidance_state);
+      continue;
+    }
+
+    // Recheck the pinned bundle age plus current adapter status/generation.
+    // A newer healthy frame may be present now, but it is not rescored here.
+    std::string recheck_reason;
+    if(!revalidateMppiLocalMapCycle(cycle, &recheck_reason)){
+      return stop(dddmr_sys_core::ALL_TRAJECTORIES_FAIL, recheck_reason);
+    }
+    final_engine_valid = true;
+    ++optimization_attempts;
+    break;
+  }
+
+  const double scoring_ms = std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - scoring_start).count();
+  RCLCPP_INFO_THROTTLE(
+    this->get_logger().get_child(name_), *clock_, 2000,
+    "MPPI local-map debug: controller=%s, environment=local_map, map_version=%llu, generation=%llu, scoring_ms=%.2f, trajectories=%zu, valid_scores=%zu, terrain_invalid=%zu, blocked_path_points=%zu, path_offset=%.3f, preferred_side=%s, obstacle_offset=%.3f, lateral_profile_valid=%d, attempts=%zu, final_valid=%d, best_cost=%.3f, cmd_vx=%.3f, cmd_wz=%.3f, allowed_max_speed=%.3f",
+    controller_name.c_str(),
+    static_cast<unsigned long long>(cycle.context.mapVersion()),
+    static_cast<unsigned long long>(cycle.generation),
+    scoring_ms,
+    mppi_scored_trajectories,
+    mppi_valid_scores,
+    mppi_invalid_terrain_candidates,
+    mppi_blocked_path_points,
+    mppi_robot_path_offset,
+    toString(mppi_preferred_bypass_side),
+    mppi_lateral_profile.obstacle_offset,
+    mppi_lateral_profile.valid ? 1 : 0,
+    optimization_attempts,
+    final_engine_valid ? 1 : 0,
+    result.best_cost,
+    result.command.vx,
+    result.command.wz,
+    context.current_allowed_max_linear_speed);
+
+  if(result.reverse_recovery_active || result.reverse_candidates_generated ||
+     result.reverse_budget_exhausted)
+  {
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "MPPI reverse telemetry (distance cap removed): active=%d, motion=%d, generated=%d, used=%.3f, remaining=%.3f, exhausted=%d, cmd_vx=%.3f, cmd_wz=%.3f, measured_vx=%.3f",
+      result.reverse_recovery_active ? 1 : 0,
+      result.reverse_motion_active ? 1 : 0,
+      result.reverse_candidates_generated ? 1 : 0,
+      result.reverse_distance_used,
+      result.reverse_distance_remaining,
+      result.reverse_budget_exhausted ? 1 : 0,
+      result.command.vx,
+      result.command.wz,
+      measured_speed.vx);
+  }
+
+  if(!result.has_valid_control){
+    if(mppi_directed_retreat_.active()){
+      // Recovery still owns the cycle; stop and wait instead of asking the
+      // global planner to replace a route that is still being recovered.
+      return stop(
+        dddmr_sys_core::PATH_BLOCKED_WAIT,
+        "directed retreat braking");
+    }
+    return stop(
+      dddmr_sys_core::PATH_BLOCKED_REPLANNING,
+      result.reverse_budget_exhausted ?
+      "MPPI reverse episode distance exhausted" :
+      "all MPPI local-map candidates were rejected");
+  }
+  if(!final_engine_valid){
+    return stop(dddmr_sys_core::PATH_BLOCKED_REPLANNING,
+                "no collision-free final weighted sequence in the pinned map");
+  }
+
+  mppi_last_command_ = result.command;
+  if(cmd_vel != nullptr){
+    cmd_vel->linear.x = result.command.vx;
+    cmd_vel->linear.y = 0.0;
+    cmd_vel->linear.z = 0.0;
+    cmd_vel->angular.x = 0.0;
+    cmd_vel->angular.y = 0.0;
+    cmd_vel->angular.z = result.command.wz;
+  }
+
+  // The final projected pose vector is the exact source for visualization;
+  // no second map query or re-integration is performed.
+  const auto best_traj = buildTrajectoryFromProjectedMppiPoses(
+    final_rollout.projected_poses, clock_->now());
+  publishDebugPath(
+    buildPathFromTrajectory(best_traj),
+    pub_best_trajectory_path_,
+    "mppi_local_map_best_trajectory",
+    route_version_,
+    goal_seq_,
+    route_source_label_,
+    true);
+
+  if(debug_publish_best_trajectory_ &&
+     pub_best_trajectory_pose_->get_subscription_count() > 0)
+  {
+    geometry_msgs::msg::PoseArray best_pose_arr;
+    trajectory2posearray_cuboids(best_traj, best_pose_arr);
+    best_pose_arr.header.frame_id = global_frame_;
+    best_pose_arr.header.stamp = clock_->now();
+    pub_best_trajectory_pose_->publish(best_pose_arr);
+  }
+
+  return dddmr_sys_core::TRAJECTORY_FOUND;
 }
 
 void Local_Planner::resetLocalRouteTrackingState()
@@ -1737,28 +3078,27 @@ void Local_Planner::parseCuboid(){
     pt.z = p[2];
     robot_cuboid_vertices_.push_back(pt);
   }
+  double half_width = 0.0;
+  for(const auto & vertex : robot_cuboid_vertices_){
+    if(std::isfinite(vertex.y)){
+      half_width = std::max(half_width, std::fabs(static_cast<double>(vertex.y)));
+    }
+  }
+  if(half_width > 1e-6){
+    robot_half_width_ = half_width;
+  }
 }
 
 void Local_Planner::cbOdom(const nav_msgs::msg::Odometry::SharedPtr msg)
 {
   robot_state_ = *msg;
+  // Account measured travel before any readiness/TF/preview early-return so
+  // pauses, stop transitions, and failed readiness waits keep the real
+  // episode budget. Repeated optimization retries consume no extra distance.
+  updateMppiMeasuredTravelFromOdom(*msg);
   if(!updateGlobalPose()){
     got_odom_ = false;
     return;
-  }
-  if(compute_best_trajectory_in_odomCb_){
-    if(controller_backend_ == "regulated_pure_pursuit"){
-      geometry_msgs::msg::Twist cmd_vel;
-      computeRppControlCommand("rpp_preview", &cmd_vel);
-    }
-    else if(controller_backend_ == "mppi"){
-      geometry_msgs::msg::Twist cmd_vel;
-      computeMppiControlCommand("mppi_preview", &cmd_vel);
-    }
-    else{
-      base_trajectory::Trajectory best_traj;
-      computeVelocityCommand("differential_drive_simple", best_traj);
-    }
   }
   got_odom_ = true;
 }
@@ -1895,17 +3235,6 @@ void Local_Planner::setRoute(
   mppi_controller_.resetControlSequence(route_measured_speed);
   mppi_last_command_ = route_measured_speed;
 
-  pcl_global_plan_.reset(new pcl::PointCloud<pcl::PointXYZ>);
-  for(auto gbl_it = global_plan_.begin(); gbl_it!=global_plan_.end();gbl_it++){
-    pcl::PointXYZ pt;
-    pt.x = (*gbl_it).pose.position.x;
-    pt.y = (*gbl_it).pose.position.y;
-    pt.z = (*gbl_it).pose.position.z;
-    pcl_global_plan_->push_back(pt);
-  }
-
-  kdtree_global_plan_.reset(new pcl::KdTreeFLANN<pcl::PointXYZ>());
-  kdtree_global_plan_->setInputCloud (pcl_global_plan_);
   rebuildGlobalPlanArcLengths();
   RCLCPP_DEBUG(
     this->get_logger().get_child(name_),
@@ -2070,7 +3399,6 @@ void Local_Planner::getBestTrajectory(std::string traj_gen_name, base_trajectory
     debug_publish_best_trajectory_ &&
     pub_best_trajectory_pose_->get_subscription_count() > 0;
   geometry_msgs::msg::PoseArray accepted_pose_arr;
-  pcl::PointCloud<pcl::PointXYZ> cuboids_pcl;
 
   for(auto traj_it=trajectories_->begin();traj_it!=trajectories_->end();traj_it++){
 
@@ -2099,7 +3427,7 @@ void Local_Planner::getBestTrajectory(std::string traj_gen_name, base_trajectory
     }
 
     if(publish_accepted_trajectory && (*traj_it).cost_>=0){
-      trajectory2posearray_cuboids((*traj_it), accepted_pose_arr, cuboids_pcl);
+      trajectory2posearray_cuboids((*traj_it), accepted_pose_arr);
     }
 
   }
@@ -2138,7 +3466,7 @@ void Local_Planner::getBestTrajectory(std::string traj_gen_name, base_trajectory
 
   if(publish_best_trajectory){
     geometry_msgs::msg::PoseArray best_pose_arr;
-    trajectory2posearray_cuboids(best_traj, best_pose_arr, cuboids_pcl);
+    trajectory2posearray_cuboids(best_traj, best_pose_arr);
     best_pose_arr.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
     best_pose_arr.header.stamp = clock_->now();
     pub_best_trajectory_pose_->publish(best_pose_arr);
@@ -2185,7 +3513,6 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
     debug_publish_all_trajectories_ &&
     pub_trajectory_pose_array_->get_subscription_count() > 0;
   geometry_msgs::msg::PoseArray pose_arr;
-  pcl::PointCloud<pcl::PointXYZ> cuboids_pcl;
 
   trajectories_ = std::make_shared<std::vector<base_trajectory::Trajectory>>();
 
@@ -2202,7 +3529,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
       //@ collected all trajectories here, for later scoring
       trajectories_->push_back(a_traj);
       if(publish_all_trajectories){
-        trajectory2posearray_cuboids(a_traj, pose_arr, cuboids_pcl);
+        trajectory2posearray_cuboids(a_traj, pose_arr);
       }
     }
 
@@ -2223,8 +3550,6 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
   }
 
   
-  //cuboids_pcl.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
-  //pub_cuboids_.publish(cuboids_pcl);
   
 
   //@Update data for critics
@@ -2253,14 +3578,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeVelocityCommand(std::string t
     RCLCPP_WARN_THROTTLE(this->get_logger().get_child(name_), *clock_, 5000, "All trajectories are rejected by critics.");
     return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
   }
-  else{
-    return dddmr_sys_core::TRAJECTORY_FOUND;
-  }
-  
-  //@ Reset kd tree/observations because it is shared_ptr and copied from perception_ros
-  mpc_critics_ros_->getSharedDataPtr()->pcl_perception_.reset(new pcl::PointCloud<pcl::PointXYZI>());
-  mpc_critics_ros_->getSharedDataPtr()->pcl_perception_kdtree_.reset(new pcl::KdTreeFLANN<pcl::PointXYZI>());
-  return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
+  return dddmr_sys_core::TRAJECTORY_FOUND;
 }
 
 dddmr_sys_core::PlannerState Local_Planner::computeRppControlCommand(
@@ -2414,8 +3732,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeRppControlCommand(
 
   if(debug_publish_best_trajectory_ && pub_best_trajectory_pose_->get_subscription_count() > 0){
     geometry_msgs::msg::PoseArray best_pose_arr;
-    pcl::PointCloud<pcl::PointXYZ> cuboids_pcl;
-    trajectory2posearray_cuboids(predicted_traj, best_pose_arr, cuboids_pcl);
+    trajectory2posearray_cuboids(predicted_traj, best_pose_arr);
     best_pose_arr.header.frame_id = perception_3d_ros_->getGlobalUtils()->getGblFrame();
     best_pose_arr.header.stamp = clock_->now();
     pub_best_trajectory_pose_->publish(best_pose_arr);
@@ -2476,11 +3793,24 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
   const std::string & controller_name,
   geometry_msgs::msg::Twist * cmd_vel)
 {
+  // Fail closed: an invalid environment selector or failed local-map setup
+  // must never silently continue with the legacy point cloud backend.
+  if(!mppi_local_map_init_error_.empty() ||
+     mppi_environment_backend_ == MppiEnvironmentBackend::kLocalMap)
+  {
+    return computeMppiLocalMapControlCommand(controller_name, cmd_vel);
+  }
+
   ControllerContext context;
   const auto context_state = prepareControllerContext(&context);
   if(context_state != dddmr_sys_core::TRAJECTORY_FOUND){
     return context_state;
   }
+
+  // Forward speed cap for this cycle: the external allowed speed combined with
+  // the linear goal-approach slowdown.
+  const double mppi_cycle_speed_cap =
+    mppiSpeedCap(context.current_allowed_max_linear_speed);
 
   if(mppi_use_perception_blocked_preemption_){
     const auto opinion_state = evaluatePerceptionOpinions(context.opinions);
@@ -2544,6 +3874,11 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
   std::size_t mppi_blocked_path_points = 0;
   double mppi_robot_path_offset = 0.0;
   bool mppi_robot_path_offset_valid = false;
+  MppiLateralOccupancyProfile mppi_lateral_profile;
+  MppiBypassSide mppi_preferred_bypass_side = MppiBypassSide::Neutral;
+  double mppi_left_detour = 0.0;
+  double mppi_right_detour = 0.0;
+  bool mppi_detour_valid = false;
 
   MppiResult result;
   auto score_function =
@@ -2561,8 +3896,19 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
       mppi_min_clearance = std::numeric_limits<double>::infinity();
       mppi_path_occupancy_ratio = critic_data.path_obstacle_occupancy_ratio;
       mppi_blocked_path_points = critic_data.blocked_path_points;
+      mppi_diagnostic_path_ = critic_data.path;
+      mppi_lateral_profile = critic_data.blocked_path_points >= 3 ?
+        measureMppiLateralOccupancyForObstacleCloud(
+        critic_data.path, obstacle_snapshot) : MppiLateralOccupancyProfile{};
+      mppi_preferred_bypass_side = preferredMppiBypassSide(mppi_lateral_profile);
       mppi_robot_path_offset = critic_data.robot_path_offset;
       mppi_robot_path_offset_valid = critic_data.robot_path_offset_valid;
+      mppi_left_detour = mppiBypassBandDetour(
+        mppi_lateral_profile, MppiBypassSide::Left, mppi_robot_path_offset);
+      mppi_right_detour = mppiBypassBandDetour(
+        mppi_lateral_profile, MppiBypassSide::Right, mppi_robot_path_offset);
+      mppi_detour_valid = mppi_robot_path_offset_valid &&
+        std::isfinite(mppi_left_detour) && std::isfinite(mppi_right_detour);
       mppi_collision_node_checks += critic_data.obstacle_collision_node_checks;
       mppi_collision_candidate_checks += critic_data.obstacle_collision_point_checks;
       mppi_clearance_node_checks += critic_data.obstacle_clearance_node_checks;
@@ -2597,16 +3943,17 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
           MppiCandidateScore{false, -1.0});
       }
 
-      if(context.current_allowed_max_linear_speed > 0.0){
+      if(mppi_cycle_speed_cap > 0.0){
         for(std::size_t i = 0; i < candidates.size(); ++i){
           if(!mppiSequenceRespectsSpeedCap(
               candidates[i].controls,
               measured_speed.vx,
-              context.current_allowed_max_linear_speed,
+              mppi_cycle_speed_cap,
               mppi_controller_.config().shift_control_sequence,
               mppi_controller_.config().ax_min,
               mppi_controller_.config().model_dt,
-              mppi_controller_.config().controller_period))
+              mppi_controller_.config().controller_period,
+              mppi_controller_.config().ax_max))
           {
             critic_result.scores[i] = MppiCandidateScore{false, -1.0};
           }
@@ -2625,6 +3972,10 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     };
 
   bool optimal_sequence_collision_free = false;
+  bool has_optimal_collision_pose = false;
+  double optimal_collision_x = 0.0;
+  double optimal_collision_y = 0.0;
+  double optimal_collision_yaw = 0.0;
   std::size_t optimization_attempts = 0;
   constexpr std::size_t max_optimization_attempts = 2;
   const MppiAvoidanceState entry_avoidance_state = mppi_controller_.avoidanceState();
@@ -2633,10 +3984,39 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
       measured_speed,
       score_function,
       [&]() {
-        return MppiDirectionalContext{
+        MppiDirectionalContext context{
           mppi_blocked_path_points >= 3,
           mppi_robot_path_offset,
           mppi_robot_path_offset_valid};
+        context.preferred_side = mppi_preferred_bypass_side;
+        context.left_detour = mppi_left_detour;
+        context.right_detour = mppi_right_detour;
+        context.detour_valid = mppi_detour_valid;
+        return context;
+      },
+      mppi_cycle_speed_cap,
+      [&](bool) {
+        const auto metadata = buildMppiCriticData({}, obstacle_snapshot);
+        std::vector<int> directed_retreat_obstacle_ids;
+        const MppiDirectedRetreat::PoseValidator validator =
+          [&](MppiRetreatPose & pose) {
+            geometry_msgs::msg::PoseStamped candidate;
+            candidate.pose.position.x = pose.x;
+            candidate.pose.position.y = pose.y;
+            candidate.pose.position.z = pose.z;
+            tf2::Quaternion q;
+            q.setRPY(pose.roll, pose.pitch, pose.yaw);
+            candidate.pose.orientation = tf2::toMsg(q);
+            const auto collision = evaluateMppiObstacleCollisionForCuboid(
+              transformRobotCuboid(candidate), obstacle_snapshot,
+              &directed_retreat_obstacle_ids);
+            return collision.evaluated && !collision.in_collision;
+          };
+        // The legacy snapshot is rebuilt for every update, so it has no stable
+        // environment identity; pass zero to force route revalidation.
+        return computeMppiDirectedRetreat(
+          measured_speed, metadata.path, context.current_allowed_max_linear_speed,
+          validator, 0);
       });
     if(!result.has_valid_control){
       break;
@@ -2654,6 +4034,33 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     }
     optimal_sequence_collision_free =
       isMppiTrajectoryCollisionFree(optimal_scored_trajectory);
+    if(mppi_cycle_speed_cap > 0.0 &&
+       !mppiSequenceRespectsSpeedCap(
+         result.optimal_sequence,
+         measured_speed.vx,
+         mppi_cycle_speed_cap,
+         mppi_controller_.config().shift_control_sequence,
+         mppi_controller_.config().ax_min,
+         mppi_controller_.config().model_dt,
+         mppi_controller_.config().controller_period,
+         mppi_controller_.config().ax_max))
+    {
+      optimal_sequence_collision_free = false;
+    }
+    has_optimal_collision_pose = false;
+    if(!optimal_sequence_collision_free){
+      // Record where the averaged command actually hits, so the diagnostic
+      // distinguishes a corner-cutting average from a speed-cap rejection.
+      for(const auto & point : optimal_scored_trajectory.points){
+        if(point.in_collision){
+          has_optimal_collision_pose = true;
+          optimal_collision_x = point.x;
+          optimal_collision_y = point.y;
+          optimal_collision_yaw = point.yaw;
+          break;
+        }
+      }
+    }
     if(optimal_sequence_collision_free){
       ++optimization_attempts;
       break;
@@ -2684,7 +4091,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     mppi_clearance_candidate_checks);
   RCLCPP_INFO_THROTTLE(
     this->get_logger().get_child(name_), *clock_, 2000,
-    "MPPI debug: controller=%s, obstacle_points=%zu, scoring_ms=%.2f, trajectories=%zu, trajectory_points=%zu, %s, finite_clearances=%zu, min_clearance=%.3f, path_occupancy=%.3f, collision_trajectories=%zu, valid_scores=%zu, critic_fail=%d, rejected=%zu, best_cost=%.3f, best_vx=%.3f, best_wz=%.3f, prefilter_wz=%.3f, cmd_vx=%.3f, cmd_wz=%.3f, effective_samples=%.2f, weight_pos=%.3f, weight_neg=%.3f, weight_neutral=%.3f, structured=%zu, structured_weight=%.3f, selected_side=%s, best_side=%s, feasible_left=%zu, feasible_right=%zu, feasible_neutral=%zu, phase_compatible=%zu, side_failures=%zu, avoidance_stage=%s, path_offset=%.3f, path_offset_valid=%d, departure_offset=%.3f, best_sample=%zu, best_critic_cost=%.3f, best_energy=%.3f, optimal_valid=%d, attempts=%zu, allowed_max_speed=%.3f",
+    "MPPI debug: controller=%s, obstacle_points=%zu, scoring_ms=%.2f, trajectories=%zu, trajectory_points=%zu, %s, finite_clearances=%zu, min_clearance=%.3f, path_occupancy=%.3f, collision_trajectories=%zu, valid_scores=%zu, critic_fail=%d, rejected=%zu, best_cost=%.3f, best_vx=%.3f, best_wz=%.3f, prefilter_wz=%.3f, cmd_vx=%.3f, cmd_wz=%.3f, effective_samples=%.2f, weight_pos=%.3f, weight_neg=%.3f, weight_neutral=%.3f, structured=%zu, structured_weight=%.3f, selected_side=%s, best_side=%s, feasible_left=%zu, feasible_right=%zu, feasible_neutral=%zu, phase_compatible=%zu, side_failures=%zu, quality_advantage=%zu, best_left_cost=%.3f, best_right_cost=%.3f, avoidance_stage=%s, path_offset=%.3f, path_offset_valid=%d, preferred_side=%s, obstacle_offset=%.3f, lateral_profile_valid=%d, departure_offset=%.3f, best_sample=%zu, best_critic_cost=%.3f, best_energy=%.3f, optimal_valid=%d, attempts=%zu, allowed_max_speed=%.3f",
     controller_name.c_str(),
     mppi_obstacle_points,
     mppi_scoring_ms,
@@ -2717,9 +4124,15 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     result.feasible_neutral_candidates,
     result.phase_compatible_candidates,
     result.side_infeasible_cycles,
+    result.side_quality_advantage_cycles,
+    result.best_left_cost,
+    result.best_right_cost,
     toString(result.avoidance_stage),
     mppi_robot_path_offset,
     mppi_robot_path_offset_valid ? 1 : 0,
+    toString(mppi_preferred_bypass_side),
+    mppi_lateral_profile.obstacle_offset,
+    mppi_lateral_profile.valid ? 1 : 0,
     mppi_controller_.config().departure_lateral_offset,
     result.best_sample_index,
     result.best_critic_cost,
@@ -2728,19 +4141,82 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     optimization_attempts,
     context.current_allowed_max_linear_speed);
 
-  if(!result.has_valid_control){
+  maybeLogMppiBlockedDiagnostics(
+    obstacle_snapshot, result, best_sample_command, mppi_lateral_profile,
+    mppi_robot_path_offset, mppi_robot_path_offset_valid,
+    optimal_sequence_collision_free, has_optimal_collision_pose,
+    optimal_collision_x, optimal_collision_y, optimal_collision_yaw,
+    mppi_blocked_path_points);
+
+  if(result.reverse_recovery_active || result.reverse_candidates_generated ||
+     result.reverse_budget_exhausted)
+  {
     RCLCPP_WARN_THROTTLE(
       this->get_logger().get_child(name_), *clock_, 2000,
-      "MPPI trigger: state=PATH_BLOCKED_REPLANNING, action=route_replan, reason=all_samples_rejected, controller=%s, route_version=%zu, goal_seq=%zu, source=%s, rejected=%zu",
+      "MPPI reverse telemetry (distance cap removed): active=%d, motion=%d, generated=%d, used=%.3f, remaining=%.3f, exhausted=%d, cmd_vx=%.3f, cmd_wz=%.3f, measured_vx=%.3f",
+      result.reverse_recovery_active ? 1 : 0,
+      result.reverse_motion_active ? 1 : 0,
+      result.reverse_candidates_generated ? 1 : 0,
+      result.reverse_distance_used,
+      result.reverse_distance_remaining,
+      result.reverse_budget_exhausted ? 1 : 0,
+      result.command.vx,
+      result.command.wz,
+      measured_speed.vx);
+  }
+
+  if(!result.has_valid_control){
+    if(mppi_directed_retreat_.active()){
+      // Directed retreat still owns the cycle (searching, invalidated, or
+      // braking). A missing control is a temporary stopping condition, not
+      // evidence that the global route is blocked; requesting a replan here
+      // aborts a recovery that is still making progress.
+      if(cmd_vel != nullptr){
+        cmd_vel->linear.x = 0.0;
+        cmd_vel->linear.y = 0.0;
+        cmd_vel->linear.z = 0.0;
+        cmd_vel->angular.x = 0.0;
+        cmd_vel->angular.y = 0.0;
+        cmd_vel->angular.z = 0.0;
+      }
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger().get_child(name_), *clock_, 2000,
+        "MPPI trigger: state=PATH_BLOCKED_WAIT, action=stop_wait, reason=directed_retreat_braking, controller=%s, route_version=%zu, goal_seq=%zu, source=%s, retreat_reason=%s",
+        controller_name.c_str(),
+        route_version_,
+        goal_seq_,
+        route_source_label_.c_str(),
+        mppi_directed_retreat_.reason().c_str());
+      return dddmr_sys_core::PATH_BLOCKED_WAIT;
+    }
+    const char * failure_reason =
+      result.reverse_budget_exhausted ?
+      "directed_retreat_unavailable" :
+      (mppi_scored_trajectories == 0 ?
+      "no_scored_forward_candidates" :
+      (result.rejected_samples >= mppi_scored_trajectories ?
+      "all_samples_rejected" :
+      (result.selected_bypass_side == MppiBypassSide::Neutral ?
+      "directional_selection_failed" : "directional_side_unavailable")));
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "MPPI trigger: state=PATH_BLOCKED_REPLANNING, action=route_replan, reason=%s, controller=%s, route_version=%zu, goal_seq=%zu, source=%s, rejected=%zu, valid_scores=%zu",
+      failure_reason,
       controller_name.c_str(),
       route_version_,
       goal_seq_,
       route_source_label_.c_str(),
-      result.rejected_samples);
+      result.rejected_samples,
+      mppi_valid_scores);
     return dddmr_sys_core::PATH_BLOCKED_REPLANNING;
   }
 
   if(!optimal_sequence_collision_free){
+    if(mppi_directed_retreat_.active()){
+      // Feed the final backend rollout rejection back into directed retreat:
+      // the selected route is no longer executable, so clear it and brake.
+      mppi_directed_retreat_.invalidate();
+    }
     mppi_controller_.resetControlSequenceForRetry(
       measured_speed, entry_avoidance_state);
     RCLCPP_WARN_THROTTLE(
@@ -2776,8 +4252,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
 
   if(debug_publish_best_trajectory_ && pub_best_trajectory_pose_->get_subscription_count() > 0){
     geometry_msgs::msg::PoseArray best_pose_arr;
-    pcl::PointCloud<pcl::PointXYZ> cuboids_pcl;
-    trajectory2posearray_cuboids(best_traj, best_pose_arr, cuboids_pcl);
+    trajectory2posearray_cuboids(best_traj, best_pose_arr);
     best_pose_arr.header.frame_id = global_frame_;
     best_pose_arr.header.stamp = clock_->now();
     pub_best_trajectory_pose_->publish(best_pose_arr);
@@ -2817,94 +4292,15 @@ dddmr_sys_core::PlannerState Local_Planner::computeControlCommand(
   return planner_state;
 }
 
-void Local_Planner::trajectory2posearray_cuboids(const base_trajectory::Trajectory& a_traj, 
-                                      geometry_msgs::msg::PoseArray& pose_arr,
-                                      pcl::PointCloud<pcl::PointXYZ>& cuboids_pcl){
+void Local_Planner::trajectory2posearray_cuboids(const base_trajectory::Trajectory& a_traj,
+                                      geometry_msgs::msg::PoseArray& pose_arr){
 
   for(unsigned int i=0;i<a_traj.getPointsSize();i++){
       auto p = a_traj.getPoint(i);
       pose_arr.poses.push_back(p.pose);
-      //@ For cuboids debug
-      //cuboids_pcl += a_traj.getCuboid(i);       
   }
 
 }
 
-/*
-void Local_Planner::cbMCL_ground_normal(const sensor_msgs::PointCloud2::ConstPtr& msg)
-{
-  
-  ground_with_normals_.reset(new pcl::PointCloud<pcl::PointNormal>);
-  pcl::fromROSMsg(*msg, *ground_with_normals_);
-  if(perception_3d_ros_->getGlobalUtils()->getGblFrame().compare(msg->header.frame_id) != 0)
-    ROS_ERROR("%s: the global frame is not consistent with topics and perception setting.", name_.c_str());
-  global_frame_ = msg->header.frame_id;
-  normal2quaternion();
-}
-
-void Local_Planner::normal2quaternion(){
-
-  visualization_msgs::MarkerArray markerArray;
-  for(size_t i=0;i<ground_with_normals_->points.size();i++){
-
-    tf2::Vector3 axis_vector(ground_with_normals_->points[i].normal_x, ground_with_normals_->points[i].normal_y, ground_with_normals_->points[i].normal_z);
-
-    tf2::Vector3 up_vector(1.0, 0.0, 0.0);
-    tf2::Vector3 right_vector = axis_vector.cross(up_vector);
-    right_vector.normalized();
-    tf2::Quaternion q(right_vector, -1.0*acos(axis_vector.dot(up_vector)));
-    q.normalize();
-
-    //@Create arrow
-    visualization_msgs::Marker marker;
-    // Set the frame ID and timestamp.  See the TF tutorials for information on these.
-    marker.header.frame_id = ground_with_normals_->header.frame_id;
-    marker.header.stamp = ros::Time::now();
-
-    // Set the namespace and id for this marker.  This serves to create a unique ID
-    // Any marker sent with the same namespace and id will overwrite the old one
-    marker.ns = "basic_shapes";
-    marker.id = i;
-
-    // Set the marker type.  Initially this is CUBE, and cycles between that and SPHERE, ARROW, and CYLINDER
-    marker.type = visualization_msgs::Marker::ARROW;
-
-    // Set the marker action.  Options are ADD, DELETE, and new in ROS Indigo: 3 (DELETEALL)
-    marker.action = visualization_msgs::Marker::ADD;
-
-    // Set the pose of the marker.  This is a full 6DOF pose relative to the frame/time specified in the header
-    marker.pose.position.x = ground_with_normals_->points[i].x;
-    marker.pose.position.y = ground_with_normals_->points[i].y;
-    marker.pose.position.z = ground_with_normals_->points[i].z;
-    marker.pose.orientation.x = q.getX();
-    marker.pose.orientation.y = q.getY();
-    marker.pose.orientation.z = q.getZ();
-    marker.pose.orientation.w = q.getW();
-
-    // Set the scale of the marker -- 1x1x1 here means 1m on a side
-    marker.scale.x = 0.3; //scale.x is the arrow length,
-    marker.scale.y = 0.05; //scale.y is the arrow width 
-    marker.scale.z = 0.1; //scale.z is the arrow height. 
-
-    double angle = atan2(ground_with_normals_->points[i].normal_z, 
-                  sqrt(ground_with_normals_->points[i].normal_x*ground_with_normals_->points[i].normal_x+ ground_with_normals_->points[i].normal_y*ground_with_normals_->points[i].normal_y) ) * 180 / 3.1415926535;
-
-    if(fabs(angle)<=10){
-      marker.color.r = 1.0f;
-      marker.color.g = 0.5f;
-      marker.color.b = 0.0f;      
-    }
-    else{
-      marker.color.r = 0.0f;
-      marker.color.g = 0.8f;
-      marker.color.b = 0.2f; 
-    }
-
-    marker.color.a = 0.6f;   
-    markerArray.markers.push_back(marker); 
-  }
-  pub_pc_normal_.publish(markerArray);
-}
-*/
 
 }// end of name space

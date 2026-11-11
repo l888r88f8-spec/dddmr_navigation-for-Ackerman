@@ -34,9 +34,22 @@
 
 #include <angles/angles.h>
 
+#include <chrono>
+#include <string>
+#include <vector>
+
+#include <dddmr_local_map/ros_adapter.hpp>
+
 #include <local_planner/mppi_critic_manager.h>
 #include <local_planner/mppi_controller.h>
+#include <local_planner/mppi_directed_retreat.h>
+#include <local_planner/mppi_local_map_rollout.h>
+#include <local_planner/mppi_measured_travel.h>
 #include <local_planner/mppi_obstacle_geometry.h>
+#include <local_planner/published_cloud_cache.h>
+#include <local_planner/debug_publish.h>
+
+#include <Eigen/Geometry>
 
 /*For graph*/
 #include <queue>
@@ -63,6 +76,8 @@
 #include <dddmr_sys_core/route_tracking_controller.h>
 
 #include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -96,9 +111,6 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       dddmr_sys_core::PlannerState computeVelocityCommand(std::string traj_gen_name, base_trajectory::Trajectory& best_traj);
       void getBestTrajectory(std::string traj_gen_name, base_trajectory::Trajectory& best_traj);
 
-      //@ shared data for trajectory generator, we manage the variables by this way for future changed to ROS2
-      std::shared_ptr<trajectory_generators::TrajectoryGeneratorSharedData> traj_shared_data_;
-      
       bool isGoalPositionReached() override;
       bool isGoalReached();
       
@@ -132,19 +144,24 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       bool debug_publish_accepted_trajectory_;
       bool debug_publish_best_trajectory_;
       bool debug_publish_all_trajectories_;
+
+      /*Diagnostic aggregated_pc publishing, decoupled from the control loop.
+        The perception cache refreshes at its own frequency, so a dedicated
+        timer publishes only freshly refreshed clouds and the planner cycle
+        never pays for PointCloud2 conversion.*/
+      double debug_publish_aggregated_pc_frequency_{10.0};
+      lp::PublishedCloudCache aggregate_cloud_cache_;
+      rclcpp::TimerBase::SharedPtr aggregate_cloud_timer_;
+      rclcpp::CallbackGroup::SharedPtr aggregate_cloud_callback_group_;
+      void publishAggregatedCloud();
       
       /*For cuboid visualization*/
       visualization_msgs::msg::MarkerArray robot_cuboid_;
       visualization_msgs::msg::Marker marker_edge_;
 
-      /*Original point cloud*/
-      pcl::PointCloud<pcl::PointNormal>::Ptr ground_with_normals_;
-      
       /*global plan from global planner*/
       std::vector<geometry_msgs::msg::PoseStamped> global_plan_;
-      pcl::KdTreeFLANN<pcl::PointXYZ>::Ptr kdtree_global_plan_; 
-      pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_global_plan_;
-      
+
       /*store global pose*/
       geometry_msgs::msg::TransformStamped trans_gbl2b_;
       
@@ -161,8 +178,6 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_accepted_trajectory_pose_array_;
       rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_best_trajectory_pose_;
       rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_trajectory_pose_array_;
-      //ros::Publisher pub_pc_normal_;
-      //ros::Publisher pub_trajectory_cuboids_;
       
 
       /*Sub*/
@@ -171,12 +186,10 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       /*cb*/
       void cbOdom(const nav_msgs::msg::Odometry::SharedPtr msg);
 
-      void trajectory2posearray_cuboids(const base_trajectory::Trajectory& a_traj, 
-                                      geometry_msgs::msg::PoseArray& pose_arr,
-                                      pcl::PointCloud<pcl::PointXYZ>& cuboids);
+      void trajectory2posearray_cuboids(const base_trajectory::Trajectory& a_traj,
+                                      geometry_msgs::msg::PoseArray& pose_arr);
       
       void parseCuboid();
-      //void normal2quaternion();
       bool prunePlan(double forward_distance, double backward_distance);
       double getDistanceBTWPoseStamp(const geometry_msgs::msg::PoseStamped& a, const geometry_msgs::msg::PoseStamped& b) const;
       void resetLocalRouteTrackingState();
@@ -196,8 +209,6 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       bool buildHeadingReferenceFromPoseOrientation(
         const geometry_msgs::msg::PoseStamped & pose,
         tf2::Transform * reference_pose) const;
-
-      bool compute_best_trajectory_in_odomCb_;
 
       /* Variables for prune. I have no idea to put these variables now.
          This should be optimize in future. The variables affect the control behavior.
@@ -289,6 +300,62 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
         const std::string & controller_name,
         geometry_msgs::msg::Twist * cmd_vel);
 
+      // One immutable local-map cycle: the adapter bundle, the single
+      // planner<-map transform for this cycle, and the exact starting pose
+      // shared by every candidate and the final weighted sequence.
+      struct MppiLocalMapCycle
+      {
+        std::shared_ptr<const dddmr_local_map::ros::AdapterHandle> handle;
+        local_planner::MppiLocalMapContext context;
+        Eigen::Isometry3d initial_pose_planner{Eigen::Isometry3d::Identity()};
+        std::uint64_t generation{0};
+        double measurement_stamp_sec{0.0};
+        double receive_steady_sec{0.0};
+      };
+
+      struct MppiLocalMapCriticBundle
+      {
+        local_planner::MppiCriticData data;
+        std::vector<bool> candidate_valid;
+        std::vector<local_planner::MppiLocalMapRolloutStatus> candidate_status;
+        std::vector<std::string> candidate_detail;
+        local_planner::MppiLateralOccupancyProfile lateral_profile;
+      };
+
+      bool isMppiLocalMapBackendSelected() const;
+      bool acquireMppiLocalMapCycle(
+        MppiLocalMapCycle * cycle, std::string * reason);
+      bool revalidateMppiLocalMapCycle(
+        const MppiLocalMapCycle & cycle, std::string * reason);
+      local_planner::MppiLocalMapRolloutResult buildMppiLocalMapRollout(
+        const MppiLocalMapCycle & cycle,
+        const std::vector<local_planner::MppiControl> & controls) const;
+      MppiLocalMapCriticBundle buildMppiLocalMapCriticData(
+        const std::vector<local_planner::MppiCandidate> & candidates,
+        const MppiLocalMapCycle & cycle) const;
+      local_planner::MppiLateralOccupancyProfile measureMppiLateralOccupancyForLocalMap(
+        const std::vector<local_planner::MppiPathPoint> & path,
+        const MppiLocalMapCycle & cycle) const;
+      local_planner::MppiLateralOccupancyProfile measureMppiLateralOccupancyForObstacleCloud(
+        const std::vector<local_planner::MppiPathPoint> & path,
+        const local_planner::MppiObstacleSnapshot & obstacle_snapshot) const;
+      local_planner::MppiBypassSide preferredMppiBypassSide(
+        const local_planner::MppiLateralOccupancyProfile & profile) const;
+      // Effective forward speed cap for the MPPI backends: the external
+      // allowed speed and the linear goal-approach slowdown, whichever is
+      // lower. Applied to candidate rejection and the reverse ceiling.
+      double mppiSpeedCap(double allowed_max_linear_speed) const;
+      base_trajectory::Trajectory buildTrajectoryFromProjectedMppiPoses(
+        const std::vector<Eigen::Isometry3d> & poses,
+        const rclcpp::Time & stamp) const;
+      dddmr_sys_core::PlannerState computeMppiLocalMapControlCommand(
+        const std::string & controller_name,
+        geometry_msgs::msg::Twist * cmd_vel);
+      void resetMppiLocalMapSequenceOnFailure(
+        const local_planner::MppiControl & measured_speed);
+      void updateMppiMeasuredTravelFromOdom(
+        const nav_msgs::msg::Odometry & msg);
+
     protected:
 
       std::shared_ptr<tf2_ros::TransformListener> tfl_;
@@ -301,10 +368,65 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       std::string controller_backend_;
       std::string rpp_critic_trajectory_generator_name_;
       local_planner::MppiController mppi_controller_;
+      local_planner::MppiDirectedRetreat mppi_directed_retreat_;
+      std::size_t mppi_retreat_route_version_{std::numeric_limits<std::size_t>::max()};
+      std::size_t mppi_retreat_goal_seq_{std::numeric_limits<std::size_t>::max()};
+      local_planner::MppiResult computeMppiDirectedRetreat(
+        const local_planner::MppiControl & measured,
+        const std::vector<local_planner::MppiPathPoint> & path,
+        double runtime_speed_limit,
+        const local_planner::MppiDirectedRetreat::PoseValidator & validator,
+        std::uint64_t environment_id);
+
+      // Diagnostic-only blocked-corridor trace. It never feeds a control
+      // decision; it records why the controller saw (or lost) a passable side.
+      // Emitted on side/stage/feasibility changes and periodically while the
+      // path is blocked, so the 0.1 s transition that a 2 s debug line hides is
+      // visible.
+      void maybeLogMppiBlockedDiagnostics(
+        const local_planner::MppiObstacleSnapshot & obstacle_snapshot,
+        const local_planner::MppiResult & result,
+        const local_planner::MppiControl & best_sample_command,
+        const local_planner::MppiLateralOccupancyProfile & profile,
+        double path_offset,
+        bool path_offset_valid,
+        bool optimal_sequence_collision_free,
+        bool has_optimal_collision_pose,
+        double optimal_collision_x,
+        double optimal_collision_y,
+        double optimal_collision_yaw,
+        std::size_t blocked_path_points);
+      std::vector<local_planner::MppiPathPoint> mppi_diagnostic_path_;
+      std::string mppi_blocked_diagnostics_state_;
+      std::chrono::steady_clock::time_point mppi_blocked_diagnostics_last_{};
+      bool mppi_debug_blocked_diagnostics_{true};
+      double mppi_debug_blocked_diagnostics_period_{0.1};
+
       local_planner::MppiCriticManager mppi_critic_manager_;
       local_planner::MppiControl mppi_last_command_;
       bool mppi_use_perception_blocked_preemption_;
+      // Autoware-style geometric bypass side selection. When disabled the
+      // controller keeps its previous cost-based side comparison.
+      bool mppi_bypass_geometry_enabled_{true};
+      double mppi_preferred_side_min_offset_{0.15};
+      double mppi_bypass_width_margin_{0.10};
+      // Distance from the goal at which the forward speed cap starts to ramp
+      // down to vx_min; 0 disables the goal-approach slowdown.
+      double mppi_goal_slowdown_distance_{2.5};
+      local_planner::MppiLateralProfileConfig mppi_lateral_profile_config_;
+      local_planner::MppiMeasuredTravelTracker mppi_measured_travel_tracker_;
+      local_planner::MppiEnvironmentBackend mppi_environment_backend_{
+        local_planner::MppiEnvironmentBackend::kLegacyPoints};
+      std::string mppi_environment_backend_name_{"legacy_points"};
+      std::string mppi_local_map_init_error_;
+      std::unique_ptr<dddmr_local_map::ros::LocalMapRosAdapter>
+        mppi_local_map_adapter_;
+      dddmr_local_map::ros::AdapterConfig mppi_local_map_config_;
+      double mppi_local_map_last_ros_stamp_sec_{-1.0};
       std::vector<pcl::PointXYZ> robot_cuboid_vertices_;
+      // Half the widest lateral extent of the loaded collision cuboid. Used as
+      // the minimum free width a geometric bypass side must offer.
+      double robot_half_width_{0.35};
       double rpp_nominal_linear_speed_;
       double rpp_min_linear_speed_;
       double rpp_alignment_linear_speed_;

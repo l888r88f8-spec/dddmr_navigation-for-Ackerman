@@ -31,6 +31,7 @@
 #ifndef PERCEPTION_3D_ROS_H_
 #define PERCEPTION_3D_ROS_H_
 
+#include <perception_3d/perception_snapshot.h>
 #include <perception_3d/stacked_perception.h>
 #include "pluginlib/class_loader.hpp"
 
@@ -54,6 +55,17 @@ class Perception3D_ROS : public rclcpp::Node {
     void initial();
     unsigned long getdGraphSize();
 
+    /*
+    Compatibility-only latest frozen observation snapshot.
+
+    Returns nullptr when export_perception_snapshot is false (the default) or
+    before the first complete clear/mark export. The returned object is
+    immutable and owns deep copies of the points, so it remains valid without
+    the perception lock. Consumers must call IsUsable()/IsFresh(); an unusable
+    snapshot is unknown/insufficient, never free space.
+    */
+    std::shared_ptr<const PerceptionSnapshot> getLatestPerceptionSnapshot() const;
+
   private:
 
     /*For plugin loader*/
@@ -67,6 +79,8 @@ class Perception3D_ROS : public rclcpp::Node {
     double sensors_collected_frequency_;
     double dgraph_publish_frequency_;
     bool enable_detail_log_;
+    /*Compatibility export switch, default false so old nodes are unchanged.*/
+    bool export_perception_snapshot_{false};
     void sensorsUpdateLoop();
     void dGraphPublishLoop();
     

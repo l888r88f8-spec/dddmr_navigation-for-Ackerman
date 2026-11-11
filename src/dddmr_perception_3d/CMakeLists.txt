@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.5)
 project(perception_3d)
 
+# Default to Release only when the caller did not choose a build type and the
+# generator supports a single configuration. Explicit user values (e.g. Debug)
+# and multi-config generators are left untouched.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+  message(STATUS "perception_3d: CMAKE_BUILD_TYPE empty, defaulting to Release")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -85,11 +93,17 @@ ament_target_dependencies(perception_sensor
   ${dependencies}
 )
 
+# perception snapshot (standard-library-only immutable compatibility export)
+add_library(perception_snapshot SHARED
+  src/perception_snapshot.cpp
+)
+
 # stacked_perception
 add_library(stacked_perception SHARED
   src/stacked_perception.cpp
 )
 target_link_libraries(stacked_perception
+  perception_snapshot
   perception_sensor
 )
 ament_target_dependencies(stacked_perception
@@ -198,6 +212,7 @@ ament_target_dependencies(depthimg2pointcloud_node
 install(TARGETS
   shared_data_sensor
   perception_sensor
+  perception_snapshot
   stacked_perception
   stacked_perception_ros
   depth_camera_buffer
@@ -235,11 +250,30 @@ install(FILES perception_3d_plugins.xml
 )
 
 ament_export_include_directories(include)
-ament_export_libraries(shared_data_sensor perception_sensor stacked_perception stacked_perception_ros cluster_marking ground_surface_filter cloud_preprocessor depth_camera_buffer layers)
+ament_export_libraries(shared_data_sensor perception_sensor perception_snapshot stacked_perception stacked_perception_ros cluster_marking ground_surface_filter cloud_preprocessor depth_camera_buffer layers)
 ament_export_dependencies(${dependencies})
 pluginlib_export_plugin_description_file(perception_3d perception_3d_plugins.xml)
 
 if(BUILD_TESTING)
+  ament_add_gtest(test_observation_cache test/test_observation_cache.cpp)
+  target_link_libraries(test_observation_cache stacked_perception ${PCL_LIBRARIES})
+  ament_target_dependencies(test_observation_cache ${dependencies})
+
+  ament_add_gtest(test_perception_snapshot test/test_perception_snapshot.cpp)
+  target_link_libraries(test_perception_snapshot perception_snapshot)
+
+  # Narrow map-only export regression: StaticLayer has no per-plugin observation
+  # for the map source, so the export path must use the ready shared map.
+  ament_add_gtest(test_static_snapshot_export
+    test/test_static_snapshot_export.cpp)
+  target_link_libraries(test_static_snapshot_export
+    stacked_perception
+    perception_sensor
+    perception_snapshot
+    shared_data_sensor
+    ${PCL_LIBRARIES})
+  ament_target_dependencies(test_static_snapshot_export ${dependencies})
+
   ament_add_gtest(test_cloud_preprocessor test/test_cloud_preprocessor.cpp)
   target_link_libraries(test_cloud_preprocessor cloud_preprocessor ${PCL_LIBRARIES})
   ament_target_dependencies(test_cloud_preprocessor ${dependencies})

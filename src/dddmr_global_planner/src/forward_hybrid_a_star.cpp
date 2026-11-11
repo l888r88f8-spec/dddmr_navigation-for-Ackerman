@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <mutex>
 #include <cmath>
 #include <limits>
 #include <queue>
@@ -38,6 +39,60 @@ double Distance3D(
   const double dz = z0 - z1;
   return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
+
+double ElapsedMs(const std::chrono::steady_clock::time_point & started_at)
+{
+  return std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - started_at).count();
+}
+
+// Per-thread, per-MakePlan accumulation. ValidateSample() is only called from
+// the MakePlan() search on the same thread, so this avoids cross-request races
+// without adding a lock to the hot path.
+struct ThreadDGraphTiming
+{
+  std::size_t calls = 0;
+  double total_ms = 0.0;
+  double max_ms = 0.0;
+  std::size_t over_1ms = 0;
+  std::size_t batch_lock_calls = 0;
+  double batch_lock_wait_ms = 0.0;
+  double batch_lock_max_ms = 0.0;
+
+  void reset()
+  {
+    calls = 0;
+    total_ms = 0.0;
+    max_ms = 0.0;
+    over_1ms = 0;
+    batch_lock_calls = 0;
+    batch_lock_wait_ms = 0.0;
+    batch_lock_max_ms = 0.0;
+  }
+
+  void add(double elapsed_ms)
+  {
+    ++calls;
+    total_ms += elapsed_ms;
+    if (elapsed_ms > max_ms) {
+      max_ms = elapsed_ms;
+    }
+    if (elapsed_ms > 1.0) {
+      ++over_1ms;
+    }
+  }
+
+  void addBatchLock(double elapsed_ms)
+  {
+    ++batch_lock_calls;
+    batch_lock_wait_ms += elapsed_ms;
+    if (elapsed_ms > batch_lock_max_ms) {
+      batch_lock_max_ms = elapsed_ms;
+    }
+  }
+};
+
+thread_local ThreadDGraphTiming g_dgraph_timing;
 
 }  // namespace
 
@@ -442,18 +497,17 @@ bool ForwardHybridAStar::IsGroundIndexInWeightMap(std::size_t ground_index) cons
   return weight_map_size_ > 0 && ground_index < weight_map_size_;
 }
 
-bool ForwardHybridAStar::ValidateSample(
+bool ForwardHybridAStar::ProjectSample(
   double x,
   double y,
   double yaw,
   double z_hint,
   std::size_t * ground_index,
-    double * projected_z,
-    double * dgraph_value,
-    std::size_t previous_ground_index,
-    bool allow_nearest_fallback) const
+  double * projected_z,
+  std::size_t previous_ground_index,
+  bool allow_nearest_fallback) const
 {
-  if (ground_index == nullptr || projected_z == nullptr || dgraph_value == nullptr) {
+  if (ground_index == nullptr || projected_z == nullptr) {
     return false;
   }
   if (perception_3d_ == nullptr || pcl_ground_ == nullptr) {
@@ -495,8 +549,23 @@ bool ForwardHybridAStar::ValidateSample(
     return false;
   }
 
+  *ground_index = projected_ground_index;
+  *projected_z = projected_ground_z;
+  return true;
+}
+
+bool ForwardHybridAStar::ReadSampleDGraph(
+  std::size_t ground_index,
+  double * dgraph_value) const
+{
+  if (dgraph_value == nullptr || perception_3d_ == nullptr) {
+    return false;
+  }
+
+  const auto dgraph_query_started_at = std::chrono::steady_clock::now();
   const double dgraph =
-    perception_3d_->get_min_dGraphValue(static_cast<unsigned int>(projected_ground_index));
+    perception_3d_->get_min_dGraphValue(static_cast<unsigned int>(ground_index));
+  g_dgraph_timing.add(ElapsedMs(dgraph_query_started_at));
   const double inscribed_radius = perception_3d_->getGlobalUtils()->getInscribedRadius();
 
   if (!IsFinite(dgraph) || !IsFinite(inscribed_radius)) {
@@ -504,6 +573,40 @@ bool ForwardHybridAStar::ValidateSample(
   }
 
   if (dgraph < inscribed_radius) {
+    return false;
+  }
+
+  *dgraph_value = dgraph;
+  return true;
+}
+
+bool ForwardHybridAStar::ValidateSample(
+  double x,
+  double y,
+  double yaw,
+  double z_hint,
+  std::size_t * ground_index,
+  double * projected_z,
+  double * dgraph_value,
+  std::size_t previous_ground_index,
+  bool allow_nearest_fallback) const
+{
+  if (ground_index == nullptr || projected_z == nullptr || dgraph_value == nullptr) {
+    return false;
+  }
+
+  std::size_t projected_ground_index = 0;
+  double projected_ground_z = 0.0;
+  if (!ProjectSample(
+      x, y, yaw, z_hint,
+      &projected_ground_index, &projected_ground_z,
+      previous_ground_index, allow_nearest_fallback))
+  {
+    return false;
+  }
+
+  double dgraph = 0.0;
+  if (!ReadSampleDGraph(projected_ground_index, &dgraph)) {
     return false;
   }
 
@@ -677,38 +780,83 @@ bool ForwardHybridAStar::RolloutPrimitive(
     return false;
   }
 
+  struct ProjectedSample
+  {
+    double x = 0.0;
+    double y = 0.0;
+    double yaw = 0.0;
+    double projected_z = 0.0;
+    std::size_t ground_index = 0;
+  };
+
+  // Phase 1: project candidate poses and validate geometry against the
+  // planner's private ground copy, outside the shared-map guard.
+  std::vector<ProjectedSample> projected_samples;
+  projected_samples.reserve(64);
   while (remaining > 1e-9) {
     const double ds = std::min(step, remaining);
     x += ds * std::cos(yaw);
     y += ds * std::sin(yaw);
     yaw = NormalizeAngle(yaw + ds / config_.wheelbase * std::tan(steer));
 
-    // The trajectory is continuous in SE(2), then each sample is projected to
-    // nearest ground points for terrain/collision semantics.
-    std::size_t sample_ground_index = 0;
-    double sample_z = 0.0;
-    double sample_dgraph = 0.0;
-    if (!ValidateSample(
+    ProjectedSample sample;
+    sample.x = x;
+    sample.y = y;
+    sample.yaw = yaw;
+    if (!ProjectSample(
         x, y, yaw, z,
-        &sample_ground_index, &sample_z, &sample_dgraph,
+        &sample.ground_index, &sample.projected_z,
         previous_ground_index,
         config_.allow_sample_nearest_fallback))
     {
       return false;
     }
-    const double sample_edge_weight = std::max(
-      0.0,
-      static_cast<double>(shared_data->sGraph_ptr_->getNodeWeight(
-          static_cast<unsigned int>(sample_ground_index))));
-    if (!IsFinite(sample_edge_weight)) {
-      return false;
+
+    z = sample.projected_z;
+    previous_ground_index = sample.ground_index;
+    projected_samples.push_back(sample);
+
+    remaining -= ds;
+  }
+
+  // Phase 2: one shared-map read guard for the projected indices only. The
+  // plugin getter recursively reacquires the same recursive mutex on this
+  // thread. RAII releases the guard on every return so map updates stay
+  // visible between primitives.
+  std::vector<double> sample_dgraph(projected_samples.size(), 0.0);
+  std::vector<double> sample_edge_weight(projected_samples.size(), 0.0);
+  {
+    const auto batch_lock_started_at = std::chrono::steady_clock::now();
+    std::unique_lock<std::recursive_mutex> batch_lock(shared_data->ground_kdtree_cb_mutex_);
+    g_dgraph_timing.addBatchLock(ElapsedMs(batch_lock_started_at));
+
+    for (std::size_t i = 0; i < projected_samples.size(); ++i) {
+      const std::size_t sample_ground_index = projected_samples[i].ground_index;
+      double dgraph = 0.0;
+      if (!ReadSampleDGraph(sample_ground_index, &dgraph)) {
+        return false;
+      }
+      const double sample_edge = std::max(
+        0.0,
+        static_cast<double>(shared_data->sGraph_ptr_->getNodeWeight(
+            static_cast<unsigned int>(sample_ground_index))));
+      if (!IsFinite(sample_edge)) {
+        return false;
+      }
+      if (config_.edge_weight_hard_reject_threshold > 0.0 &&
+        sample_edge >= config_.edge_weight_hard_reject_threshold)
+      {
+        return false;
+      }
+      sample_dgraph[i] = dgraph;
+      sample_edge_weight[i] = sample_edge;
     }
-    if (config_.edge_weight_hard_reject_threshold > 0.0 &&
-      sample_edge_weight >= config_.edge_weight_hard_reject_threshold)
-    {
-      return false;
-    }
-    double edge_over = sample_edge_weight - config_.edge_weight_safe_threshold;
+  }
+
+  // Phase 3: accumulate penalties and emitted poses outside the guard.
+  for (std::size_t i = 0; i < projected_samples.size(); ++i) {
+    const ProjectedSample & sample = projected_samples[i];
+    double edge_over = sample_edge_weight[i] - config_.edge_weight_safe_threshold;
     if (edge_over > 0.0) {
       if (config_.edge_weight_soft_cap > 0.0) {
         edge_over = std::min(edge_over, config_.edge_weight_soft_cap);
@@ -717,19 +865,16 @@ bool ForwardHybridAStar::RolloutPrimitive(
     }
 
     if (sampled_poses != nullptr) {
-      sampled_poses->push_back(SamplePose{x, y, sample_z, yaw});
+      sampled_poses->push_back(SamplePose{sample.x, sample.y, sample.projected_z, sample.yaw});
     }
 
-    z = sample_z;
-    end_ground_index = sample_ground_index;
-    end_projected_z = sample_z;
-    previous_ground_index = sample_ground_index;
+    end_ground_index = sample.ground_index;
+    end_projected_z = sample.projected_z;
 
     const double obstacle_factor =
-      std::exp(-1.0 * inflation_descending_rate * (sample_dgraph - inscribed_radius));
+      std::exp(-1.0 * inflation_descending_rate * (sample_dgraph[i] - inscribed_radius));
     obstacle_penalty_sum += obstacle_factor;
 
-    remaining -= ds;
     ++sample_count;
   }
 
@@ -954,6 +1099,7 @@ bool ForwardHybridAStar::MakePlan(
   if (was_canceled != nullptr) {
     *was_canceled = false;
   }
+  g_dgraph_timing.reset();
   if (search_diagnostics != nullptr) {
     *search_diagnostics = SearchDiagnostics();
   }
@@ -973,6 +1119,13 @@ bool ForwardHybridAStar::MakePlan(
         search_diagnostics->canceled = canceled;
         search_diagnostics->success = success;
         search_diagnostics->path_pose_count = path_pose_count;
+        search_diagnostics->dgraph_calls = g_dgraph_timing.calls;
+        search_diagnostics->dgraph_query_ms = g_dgraph_timing.total_ms;
+        search_diagnostics->dgraph_max_ms = g_dgraph_timing.max_ms;
+        search_diagnostics->dgraph_over_1ms = g_dgraph_timing.over_1ms;
+        search_diagnostics->batch_lock_calls = g_dgraph_timing.batch_lock_calls;
+        search_diagnostics->batch_lock_wait_ms = g_dgraph_timing.batch_lock_wait_ms;
+        search_diagnostics->batch_lock_max_ms = g_dgraph_timing.batch_lock_max_ms;
       }
     };
 
@@ -1070,6 +1223,7 @@ bool ForwardHybridAStar::MakePlan(
   }
   std::size_t start_ground_index = 0;
   double start_projected_z = 0.0;
+  const auto projection_started_at = std::chrono::steady_clock::now();
   if (!PoseToGroundIndex(
       start.pose.position.x,
       start.pose.position.y,
@@ -1080,6 +1234,9 @@ bool ForwardHybridAStar::MakePlan(
       true,
       start_projection))
   {
+    if (search_diagnostics != nullptr) {
+      search_diagnostics->projection_ms = ElapsedMs(projection_started_at);
+    }
     if (!debug_label.empty()) {
       RCLCPP_WARN(logger_, "%s projection failed for start", debug_label.c_str());
     } else {
@@ -1101,6 +1258,9 @@ bool ForwardHybridAStar::MakePlan(
       true,
       goal_projection))
   {
+    if (search_diagnostics != nullptr) {
+      search_diagnostics->projection_ms = ElapsedMs(projection_started_at);
+    }
     if (!debug_label.empty()) {
       RCLCPP_WARN(logger_, "%s projection failed for goal", debug_label.c_str());
     } else {
@@ -1108,6 +1268,9 @@ bool ForwardHybridAStar::MakePlan(
     }
     update_search_diagnostics(0, elapsed_seconds(), false, false, 0);
     return false;
+  }
+  if (search_diagnostics != nullptr) {
+    search_diagnostics->projection_ms = ElapsedMs(projection_started_at);
   }
 
   if (!debug_label.empty() && start_projection != nullptr && goal_projection != nullptr) {

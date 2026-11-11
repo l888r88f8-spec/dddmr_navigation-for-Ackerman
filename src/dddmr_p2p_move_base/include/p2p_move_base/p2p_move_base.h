@@ -29,8 +29,11 @@
 * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 /*Debug*/
+#include <atomic>
 #include <chrono>
+#include <exception>
 #include <mutex>
+#include <p2p_move_base/execution_worker.h>
 #include <p2p_move_base/p2p_fsm.h>
 
 //@in enum state, the p_to_p_move_base is included
@@ -41,6 +44,7 @@
 #include "dddmr_sys_core/action/get_plan.hpp"
 #include "p2p_move_base/local_obstacle_layer.h"
 #include "p2p_move_base/navigation_fault_policy.h"
+#include "p2p_move_base/pause_aware_watchdog.h"
 #include "p2p_move_base/runtime_budget_monitor.h"
 #include "p2p_move_base/p2p_global_plan_manager.h"
 //@for call recovery action
@@ -60,6 +64,8 @@ class P2PMoveBase : public rclcpp::Node {
     P2PMoveBase(std::string name);
     ~P2PMoveBase();
 
+    void stopExecution();
+
     void initial(
       const std::shared_ptr<dddmr_sys_core::RouteTrackingController>& route_controller,
       const std::shared_ptr<p2p_move_base::P2PGlobalPlanManager>& route_manager);
@@ -76,7 +82,10 @@ class P2PMoveBase : public rclcpp::Node {
     
     rclcpp_action::Server<dddmr_sys_core::action::PToPMoveBase>::SharedPtr action_server_p2p_move_base_;
 
+    std::mutex current_handle_mutex_;
     std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> current_handle_;
+    std::atomic<bool> stop_requested_{false};
+    ExecutionWorker execution_worker_;
     
     rclcpp::CallbackGroup::SharedPtr tf_listener_group_;
     rclcpp::CallbackGroup::SharedPtr action_server_group_;
@@ -106,6 +115,8 @@ class P2PMoveBase : public rclcpp::Node {
     std::string tracking_controller_name_;
     std::string alignment_controller_name_;
     std::shared_ptr<p2p_move_base::FSM> FSM_;
+    PauseAwareWatchdog oscillation_watchdog_;
+    PauseAwareWatchdog blocked_wait_watchdog_{0.0, false};
     std::shared_ptr<dddmr_sys_core::RouteTrackingController> route_controller_;
     std::shared_ptr<p2p_move_base::P2PGlobalPlanManager> route_manager_;
 
@@ -115,6 +126,18 @@ class P2PMoveBase : public rclcpp::Node {
     bool syncRouteReferenceFromManager(const std::string & consumer_label);
     std::string terminal_goal_reason_;
     std::string current_route_result_class_;
+
+    bool shouldStopExecution() const;
+    void abortGoalBestEffort(
+      const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> & goal_handle,
+      const std::string & reason);
+    void handleExecutionException(
+      const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> & goal_handle,
+      std::exception_ptr error);
+    void publishZeroVelocityBestEffort();
+    void cancelRecoveryBehaviorsBestEffort();
+    void clearCurrentHandleIf(
+      const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> & goal_handle);
 
     bool is_active(
       const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::PToPMoveBase>> handle) const

@@ -48,6 +48,71 @@ constexpr double kHybridRefineSegmentLength = 8.0;
 constexpr double kHybridRefineMinSegmentLength = 1.0;
 constexpr double kPathDuplicateDistance = 0.05;
 
+double ElapsedMs(const std::chrono::steady_clock::time_point & started_at)
+{
+  return std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - started_at).count();
+}
+
+// Diagnostic-only accumulation for one request's Hybrid-refine segments.
+// Per-thread because the route build is serialized and MakePlan() is called on
+// this thread; no new lock is introduced on the planning hot path.
+struct HybridRefineTiming
+{
+  std::size_t segments = 0;
+  std::size_t segments_succeeded = 0;
+  std::size_t dgraph_calls = 0;
+  double dgraph_query_ms = 0.0;
+  double dgraph_max_ms = 0.0;
+  std::size_t dgraph_over_1ms = 0;
+  std::size_t expansions = 0;
+  double segment_search_ms = 0.0;
+  double projection_ms = 0.0;
+  std::size_t batch_lock_calls = 0;
+  double batch_lock_wait_ms = 0.0;
+  double batch_lock_max_ms = 0.0;
+
+  void reset()
+  {
+    segments = 0;
+    segments_succeeded = 0;
+    dgraph_calls = 0;
+    dgraph_query_ms = 0.0;
+    dgraph_max_ms = 0.0;
+    dgraph_over_1ms = 0;
+    expansions = 0;
+    segment_search_ms = 0.0;
+    projection_ms = 0.0;
+    batch_lock_calls = 0;
+    batch_lock_wait_ms = 0.0;
+    batch_lock_max_ms = 0.0;
+  }
+
+  void add(const ForwardHybridAStar::SearchDiagnostics & diagnostics, double segment_ms, bool succeeded)
+  {
+    ++segments;
+    if (succeeded) {
+      ++segments_succeeded;
+    }
+    dgraph_calls += diagnostics.dgraph_calls;
+    dgraph_query_ms += diagnostics.dgraph_query_ms;
+    if (diagnostics.dgraph_max_ms > dgraph_max_ms) {
+      dgraph_max_ms = diagnostics.dgraph_max_ms;
+    }
+    dgraph_over_1ms += diagnostics.dgraph_over_1ms;
+    expansions += diagnostics.expansions;
+    segment_search_ms += segment_ms;
+    projection_ms += diagnostics.projection_ms;
+    batch_lock_calls += diagnostics.batch_lock_calls;
+    batch_lock_wait_ms += diagnostics.batch_lock_wait_ms;
+    if (diagnostics.batch_lock_max_ms > batch_lock_max_ms) {
+      batch_lock_max_ms = diagnostics.batch_lock_max_ms;
+    }
+  }
+};
+
+thread_local HybridRefineTiming g_hybrid_refine_timing;
+
 double Distance2D(
   const geometry_msgs::msg::PoseStamped & lhs,
   const geometry_msgs::msg::PoseStamped & rhs)
@@ -263,9 +328,9 @@ void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_RO
     graph_path_smoothing_lock_goal_distance_,
     graph_path_smoothing_ground_search_radius_);
 
-  declare_parameter("hybrid_astar.wheelbase", rclcpp::ParameterValue(0.549185));
+  declare_parameter("hybrid_astar.wheelbase", rclcpp::ParameterValue(0.550));
   this->get_parameter("hybrid_astar.wheelbase", forward_hybrid_astar_config_.wheelbase);
-  declare_parameter("hybrid_astar.max_steer", rclcpp::ParameterValue(0.69));
+  declare_parameter("hybrid_astar.max_steer", rclcpp::ParameterValue(0.3270520925102273));
   this->get_parameter("hybrid_astar.max_steer", forward_hybrid_astar_config_.max_steer);
   declare_parameter("hybrid_astar.steer_sample_count", rclcpp::ParameterValue(5));
   this->get_parameter(
@@ -1171,6 +1236,7 @@ bool GlobalPlanner::buildFrozenRouteLocked(
   }
 
   const auto total_started_at = std::chrono::steady_clock::now();
+  g_hybrid_refine_timing.reset();
 
   if(was_canceled != nullptr){
     *was_canceled = false;
@@ -1209,8 +1275,9 @@ bool GlobalPlanner::buildFrozenRouteLocked(
   ForwardHybridAStar::SearchDiagnostics raw_route_search_diagnostics;
   ForwardHybridAStar::ProjectionDiagnostics start_projection;
   ForwardHybridAStar::ProjectionDiagnostics goal_projection;
+  const auto raw_route_started_at = std::chrono::steady_clock::now();
   bool raw_route_stage_started = false;
-  auto raw_route_stage_started_at = std::chrono::steady_clock::now();
+  auto raw_route_stage_started_at = raw_route_started_at;
   const auto raw_route_progress_callback =
     [&publish_stage, &raw_route_stage_started, &raw_route_stage_started_at](
       const ForwardHybridAStar::SearchDiagnostics & diagnostics)
@@ -1257,13 +1324,64 @@ bool GlobalPlanner::buildFrozenRouteLocked(
   }
   if(!raw_route_stage_started && start_projection.success && goal_projection.success){
     raw_route_stage_started = true;
-    raw_route_stage_started_at = std::chrono::steady_clock::now();
     publish_stage(
       "raw_route",
       raw_route_stage_started_at,
       raw_route_search_diagnostics.expansions,
       "in_progress");
   }
+
+  const double raw_route_ms = ElapsedMs(raw_route_started_at);
+  const auto log_request_timing =
+    [this, total_started_at, goal_seq, request_id, &elapsed_seconds, &raw_route_search_diagnostics](
+      const char * result_class,
+      double raw_route_ms_value,
+      double hybrid_refine_ms_value)
+    {
+      const auto & refine = g_hybrid_refine_timing;
+      RCLCPP_INFO(
+        this->get_logger(),
+        "global_planner request timing: goal_seq=%zu, request_id=%zu, result=%s, "
+        "raw_route_ms=%.3f, hybrid_refine_ms=%.3f, total_ms=%.3f, "
+        "raw_projection_ms=%.3f, raw_aggregate_lethal_ms=%.3f, raw_graph_search_ms=%.3f, "
+        "raw_dgraph_calls=%zu, raw_dgraph_query_ms=%.3f, raw_dgraph_max_ms=%.3f, "
+        "raw_dgraph_over_1ms=%zu, raw_planning_time_sec=%.3f, raw_expansions_placeholder=%zu, "
+        "raw_batch_lock_calls=%zu, raw_batch_lock_wait_ms=%.3f, raw_batch_lock_max_ms=%.3f, "
+        "hybrid_segments=%zu, hybrid_segments_succeeded=%zu, hybrid_dgraph_calls=%zu, "
+        "hybrid_dgraph_query_ms=%.3f, hybrid_dgraph_max_ms=%.3f, hybrid_dgraph_over_1ms=%zu, "
+        "hybrid_segment_search_ms=%.3f, hybrid_expansions=%zu, hybrid_projection_ms=%.3f, "
+        "hybrid_batch_lock_calls=%zu, hybrid_batch_lock_wait_ms=%.3f, hybrid_batch_lock_max_ms=%.3f",
+        goal_seq,
+        request_id,
+        result_class,
+        raw_route_ms_value,
+        hybrid_refine_ms_value,
+        elapsed_seconds(total_started_at) * 1000.0,
+        raw_route_search_diagnostics.projection_ms,
+        raw_route_search_diagnostics.aggregate_lethal_ms,
+        raw_route_search_diagnostics.graph_search_ms,
+        raw_route_search_diagnostics.dgraph_calls,
+        raw_route_search_diagnostics.dgraph_query_ms,
+        raw_route_search_diagnostics.dgraph_max_ms,
+        raw_route_search_diagnostics.dgraph_over_1ms,
+        raw_route_search_diagnostics.planning_time_sec,
+        raw_route_search_diagnostics.expansions,
+        raw_route_search_diagnostics.batch_lock_calls,
+        raw_route_search_diagnostics.batch_lock_wait_ms,
+        raw_route_search_diagnostics.batch_lock_max_ms,
+        refine.segments,
+        refine.segments_succeeded,
+        refine.dgraph_calls,
+        refine.dgraph_query_ms,
+        refine.dgraph_max_ms,
+        refine.dgraph_over_1ms,
+        refine.segment_search_ms,
+        refine.expansions,
+        refine.projection_ms,
+        refine.batch_lock_calls,
+        refine.batch_lock_wait_ms,
+        refine.batch_lock_max_ms);
+    };
 
   if(was_canceled != nullptr && *was_canceled){
     if(request_result_class != nullptr){
@@ -1276,6 +1394,7 @@ bool GlobalPlanner::buildFrozenRouteLocked(
         raw_route_backend_.c_str(),
         elapsed_seconds(total_started_at) * 1000.0);
     }
+    log_request_timing("planner_canceled", raw_route_ms, 0.0);
     frozen_route->poses.clear();
     return false;
   }
@@ -1337,6 +1456,10 @@ bool GlobalPlanner::buildFrozenRouteLocked(
         result_class.c_str(),
         elapsed_seconds(total_started_at) * 1000.0);
     }
+    log_request_timing(
+      request_result_class ? request_result_class->c_str() : "failed_raw_route",
+      raw_route_ms,
+      0.0);
     return false;
   }
 
@@ -1354,12 +1477,14 @@ bool GlobalPlanner::buildFrozenRouteLocked(
         raw_route_backend_.c_str(),
         elapsed_seconds(total_started_at) * 1000.0);
     }
+    log_request_timing("planner_canceled", raw_route_ms, 0.0);
     frozen_route->poses.clear();
     return false;
   }
 
   const auto composing_started_at = std::chrono::steady_clock::now();
   publish_stage("composing_frozen_route", composing_started_at, 0, "in_progress");
+  double hybrid_refine_ms = 0.0;
   if(raw_route_backend_ == "hybrid_a_star"){
     bool refine_canceled = false;
     std::ostringstream refine_debug_label;
@@ -1367,6 +1492,7 @@ bool GlobalPlanner::buildFrozenRouteLocked(
       << "hybrid_refine goal_seq=" << goal_seq
       << ", request_id=" << request_id
       << ", stage=hybrid_refine";
+    const auto hybrid_refine_started_at = std::chrono::steady_clock::now();
     *frozen_route = makeHybridRefinedRouteLocked(
       start,
       goal,
@@ -1374,6 +1500,7 @@ bool GlobalPlanner::buildFrozenRouteLocked(
       cancel_requested,
       &refine_canceled,
       refine_debug_label.str());
+    hybrid_refine_ms = ElapsedMs(hybrid_refine_started_at);
     if(refine_canceled){
       if(was_canceled != nullptr){
         *was_canceled = true;
@@ -1388,6 +1515,7 @@ bool GlobalPlanner::buildFrozenRouteLocked(
           raw_route_backend_.c_str(),
           elapsed_seconds(total_started_at) * 1000.0);
       }
+      log_request_timing("hybrid_refine_canceled", raw_route_ms, hybrid_refine_ms);
       frozen_route->poses.clear();
       return false;
     }
@@ -1395,6 +1523,7 @@ bool GlobalPlanner::buildFrozenRouteLocked(
   if(request_result_class != nullptr){
     *request_result_class = "succeeded";
   }
+  log_request_timing("succeeded", raw_route_ms, hybrid_refine_ms);
   if(enable_detail_log_){
     RCLCPP_INFO(
       this->get_logger(),
@@ -1452,6 +1581,7 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
     finish_canceled("planner canceled before route computation started");
     return;
   }
+  const auto route_request_started_at = std::chrono::steady_clock::now();
   {
     std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
     if(!buildFrozenRouteLocked(
@@ -1468,13 +1598,16 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
       frozen_route = raw_route;
     }
   }
+  const double route_request_finished_sec =
+    std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - route_request_started_at).count();
 
   if(planner_canceled || cancel_requested()){
     publishRouteRequestStageDebug(
       request_id,
       goal_seq,
       "finished",
-      0.0,
+      route_request_finished_sec,
       0,
       "planner_canceled");
     finish_canceled(
@@ -1487,7 +1620,7 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
       request_id,
       goal_seq,
       "finished",
-      0.0,
+      route_request_finished_sec,
       0,
       request_result_class);
     publishRawRouteDebugPath(raw_route, goal_seq, debug_route_version_, "get_plan_failed");
@@ -1525,7 +1658,7 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
       request_id,
       goal_seq,
       "finished",
-      0.0,
+      route_request_finished_sec,
       0,
       request_result_class);
     result->path = frozen_route;
@@ -1661,8 +1794,10 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
   }
 
   const auto graph_planning_started_at = std::chrono::steady_clock::now();
+  const auto endpoint_projection_started_at = std::chrono::steady_clock::now();
   has_start_goal_id =
     getStartGoalID(start, goal, start_id, goal_id, start_projection, goal_projection);
+  const double endpoint_projection_ms = ElapsedMs(endpoint_projection_started_at);
   if(has_start_goal_id && progress_callback){
     ForwardHybridAStar::SearchDiagnostics progress;
     progress.success = false;
@@ -1679,21 +1814,35 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
       search_diagnostics->expansions = 0;
       search_diagnostics->planning_time_sec = elapsed_seconds(graph_planning_started_at);
       search_diagnostics->path_pose_count = 0;
+      search_diagnostics->projection_ms = endpoint_projection_ms;
     }
     return mark_canceled();
   }
+  GraphPlanDiagnostics graph_diagnostics;
+  const auto graph_search_started_at = std::chrono::steady_clock::now();
   if(has_start_goal_id){
     if(!use_pre_graph_)
-      a_star_planner_->getPath(start_id, goal_id, path);
+      a_star_planner_->getPath(start_id, goal_id, path, &graph_diagnostics);
     else
       a_star_planner_pre_graph_->getPath(start_id, goal_id, path);  
   }
+  const double graph_search_ms = ElapsedMs(graph_search_started_at);
   if(search_diagnostics != nullptr){
     search_diagnostics->success = !path.empty();
     search_diagnostics->canceled = false;
     search_diagnostics->expansions = 0;
     search_diagnostics->planning_time_sec = elapsed_seconds(graph_planning_started_at);
     search_diagnostics->path_pose_count = 0;
+    search_diagnostics->projection_ms = endpoint_projection_ms;
+    search_diagnostics->aggregate_lethal_ms = graph_diagnostics.aggregate_lethal_ms;
+    search_diagnostics->graph_search_ms = graph_search_ms;
+    search_diagnostics->dgraph_calls = graph_diagnostics.dgraph_calls;
+    search_diagnostics->dgraph_query_ms = graph_diagnostics.dgraph_query_ms;
+    search_diagnostics->dgraph_max_ms = graph_diagnostics.dgraph_max_ms;
+    search_diagnostics->dgraph_over_1ms = graph_diagnostics.dgraph_over_1ms;
+    search_diagnostics->batch_lock_calls = graph_diagnostics.batch_lock_calls;
+    search_diagnostics->batch_lock_wait_ms = graph_diagnostics.batch_lock_wait_ms;
+    search_diagnostics->batch_lock_max_ms = graph_diagnostics.batch_lock_max_ms;
   }
 
   if(path.empty()){
@@ -1822,6 +1971,7 @@ nav_msgs::msg::Path GlobalPlanner::makeHybridRefinedRouteLocked(
   nav_msgs::msg::Path refined_route;
   refined_route.header.frame_id = global_frame_;
   refined_route.header.stamp = clock_->now();
+  g_hybrid_refine_timing.reset();
 
   if(was_canceled != nullptr){
     *was_canceled = false;
@@ -1878,7 +2028,9 @@ nav_msgs::msg::Path GlobalPlanner::makeHybridRefinedRouteLocked(
         << debug_label
         << " hybrid_refine_segment start_index=" << segment_start_index
         << ", goal_index=" << segment_goal_index;
-      if(forward_hybrid_astar_planner_->MakePlan(
+      ForwardHybridAStar::SearchDiagnostics segment_diagnostics;
+      const auto segment_started_at = std::chrono::steady_clock::now();
+      const bool segment_plan_ok = forward_hybrid_astar_planner_->MakePlan(
           segment_start,
           segment_goal,
           &hybrid_segment,
@@ -1886,8 +2038,14 @@ nav_msgs::msg::Path GlobalPlanner::makeHybridRefinedRouteLocked(
           true,
           cancel_requested,
           &segment_canceled,
-          segment_label.str()) &&
-        !hybrid_segment.poses.empty())
+          segment_label.str(),
+          &segment_diagnostics);
+      const double segment_ms = ElapsedMs(segment_started_at);
+      g_hybrid_refine_timing.add(
+        segment_diagnostics,
+        segment_ms,
+        segment_plan_ok && !hybrid_segment.poses.empty());
+      if(segment_plan_ok && !hybrid_segment.poses.empty())
       {
         hybrid_segment.header.frame_id = global_frame_;
         hybrid_segment.header.stamp = clock_->now();

@@ -1,6 +1,8 @@
 #ifndef LOCAL_PLANNER_MPPI_CRITIC_MANAGER_H_
 #define LOCAL_PLANNER_MPPI_CRITIC_MANAGER_H_
 
+#include <functional>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -29,6 +31,9 @@ struct MppiPathPoint
   double y = 0.0;
   double yaw = 0.0;
   bool obstacle_free = true;
+  // Optional support height used by lateral occupancy probes. Path points that
+  // never query a 3-D map leave it at zero.
+  double z = 0.0;
 };
 
 struct MppiPathProjection
@@ -69,6 +74,76 @@ MppiPathProjection projectPointOntoMppiPath(
   const std::vector<MppiPathPoint> & path,
   double x,
   double y);
+
+// Lateral occupancy measured around the blocked section of the local path.
+// Positive offsets are to the path's left, matching projectPointOntoMppiPath.
+struct MppiLateralOccupancyProfile
+{
+  bool valid = false;
+  // Mean signed offset of every blocked lateral probe. Its sign is the side
+  // the obstacle actually sits on; a value near zero means the obstacle
+  // straddles the route and neither side is geometrically preferred.
+  double obstacle_offset = 0.0;
+  // Distance from the route centreline to the nearest blocked probe on each
+  // side. Infinity means no blocked probe was found within the sampled band.
+  double left_clearance = std::numeric_limits<double>::infinity();
+  double right_clearance = std::numeric_limits<double>::infinity();
+  // Widest contiguous free lateral band on each side, in metres, taking the
+  // most restrictive sampled route point. This is the room the vehicle centre
+  // actually has beyond a partial obstruction: an obstacle whose influence
+  // reaches across the centreline can still leave a wide free band farther
+  // out on the opposite side. The bypass gate uses this span rather than the
+  // nearest blocked probe, which would reject that free band.
+  double left_free_span = std::numeric_limits<double>::infinity();
+  double right_free_span = std::numeric_limits<double>::infinity();
+  // Signed offset (metres, left positive) of the inner edge of the same free
+  // run that produced left/right_free_span. Together with the span it gives
+  // the lateral interval the vehicle can occupy on that side, which is what
+  // the bypass detour cost measures the vehicle's distance to. NaN means no
+  // free run was found on that side.
+  double left_band_offset = std::numeric_limits<double>::quiet_NaN();
+  double right_band_offset = std::numeric_limits<double>::quiet_NaN();
+};
+
+struct MppiLateralProfileConfig
+{
+  double max_lateral_offset = 1.5;
+  double lateral_step = 0.15;
+  // At most this many blocked route points are probed, spread across the run.
+  std::size_t max_blocked_points = 3;
+  // A lateral probe sitting exactly at the blocked anchor's longitudinal
+  // position cannot see an obstacle that only intrudes into the front (or
+  // rear) of the vehicle footprint. When positive, every lateral offset is
+  // also probed this far along the route direction (0 disables the extra
+  // probes). Each lateral offset still contributes at most one vote.
+  double max_longitudinal_offset = 0.0;
+  double longitudinal_step = 0.35;
+};
+
+using MppiBlockedProbe = std::function<bool(const MppiPathPoint &)>;
+
+MppiLateralOccupancyProfile measureMppiLateralOccupancyProfile(
+  const std::vector<MppiPathPoint> & path,
+  const MppiBlockedProbe & probe_blocked,
+  const MppiLateralProfileConfig & config = MppiLateralProfileConfig{});
+
+// Mirrors the Autoware avoidance rule: pass on the side opposite the obstacle
+// and only when that side has at least required_width of contiguous free
+// lateral room. A neutral result means "no geometric preference", which keeps
+// the previous cost-based selection behaviour intact.
+MppiBypassSide selectMppiGeometricBypassSide(
+  const MppiLateralOccupancyProfile & profile,
+  double min_decisive_offset,
+  double required_width);
+
+// Lateral distance from the vehicle's signed route offset to the free band on
+// the given side, in metres. Zero when the vehicle already sits inside the
+// band. NaN when the profile has no usable band on that side, which lets the
+// caller treat the detour cost as unavailable rather than free.
+double mppiBypassBandDetour(
+  const MppiLateralOccupancyProfile & profile,
+  MppiBypassSide side,
+  double vehicle_offset);
 
 bool isMppiTrajectoryCollisionFree(const MppiScoredTrajectory & trajectory);
 MppiBypassSide classifyMppiBypassSide(

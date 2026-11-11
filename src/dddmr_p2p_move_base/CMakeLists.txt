@@ -3,6 +3,7 @@ project(p2p_move_base)
 
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_gtest REQUIRED)
+find_package(Threads REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
@@ -120,6 +121,11 @@ ament_target_dependencies(p2p_local_obstacle_layer_ros
 # p2p_mov2_base
 add_library(p2p_mov2_base SHARED
   src/p2p_move_base.cpp
+  src/execution_worker.cpp
+)
+set_target_properties(p2p_mov2_base PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
 )
 target_link_libraries(p2p_mov2_base
   p2p_fsm
@@ -127,6 +133,7 @@ target_link_libraries(p2p_mov2_base
   p2p_navigation_fault_policy
   p2p_runtime_budget_monitor
   p2p_local_obstacle_layer_ros
+  Threads::Threads
 )
 ament_target_dependencies(p2p_mov2_base
   ${dependencies}
@@ -201,6 +208,11 @@ if(BUILD_TESTING)
     ENV PYTHONDONTWRITEBYTECODE=1
   )
 
+  ament_add_pytest_test(test_local_map_launch_parameters
+    test/test_local_map_launch_parameters.py
+    ENV PYTHONDONTWRITEBYTECODE=1
+  )
+
   ament_add_pytest_test(test_navigation_parameter_integration
     test/test_navigation_parameter_integration.py
     ENV PYTHONDONTWRITEBYTECODE=1
@@ -216,6 +228,10 @@ if(BUILD_TESTING)
   )
   ament_target_dependencies(test_parameter_utils
     rclcpp
+  )
+
+  ament_add_gtest(test_pause_aware_watchdog
+    test/test_pause_aware_watchdog.cpp
   )
 
   ament_add_gtest(test_navigation_fault_policy
@@ -271,6 +287,26 @@ if(BUILD_TESTING)
   )
   ament_target_dependencies(test_p2p_move_base_config
     local_planner
+  )
+
+  ament_add_gtest(test_rpc_call_guard
+    test/test_rpc_call_guard.cpp
+  )
+
+  ament_add_gtest(test_publish_feedback_if_active
+    test/test_publish_feedback_if_active.cpp
+  )
+
+  ament_add_gtest(test_execution_worker
+    test/test_execution_worker.cpp
+    src/execution_worker.cpp
+  )
+  set_target_properties(test_execution_worker PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+  )
+  target_link_libraries(test_execution_worker
+    Threads::Threads
   )
 endif()
 

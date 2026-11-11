@@ -30,6 +30,7 @@
 */
 
 
+#include <exception>
 #include <memory>
 #include <perception_3d/perception_3d_ros.h>
 #include <trajectory_generators/trajectory_generators_ros.h>
@@ -67,9 +68,41 @@ int main(int argc, char** argv){
   node_lp->initial(node_p3, node_mc, node_tg);
   node_gpm->initial();
   node_p2p->initial(node_lp, node_gpm);
-  executor.spin();
 
+  int exit_code = 0;
+  try{
+    executor.spin();
+  }
+  catch(const std::exception & ex){
+    RCLCPP_ERROR(
+      node_p2p->get_logger(),
+      "executor.spin terminated with exception: %s",
+      ex.what());
+    exit_code = 1;
+  }
+  catch(...){
+    RCLCPP_ERROR(node_p2p->get_logger(), "executor.spin terminated with unknown exception");
+    exit_code = 1;
+  }
+
+  // Always stop and join navigation execution before dependencies are released.
+  try{
+    node_p2p->stopExecution();
+  }
+  catch(const std::exception & ex){
+    RCLCPP_ERROR(
+      node_p2p->get_logger(),
+      "failed to stop navigation execution worker cleanly: %s",
+      ex.what());
+    exit_code = 1;
+  }
+  catch(...){
+    RCLCPP_ERROR(
+      node_p2p->get_logger(),
+      "failed to stop navigation execution worker cleanly: unknown exception");
+    exit_code = 1;
+  }
 
   rclcpp::shutdown();
-
+  return exit_code;
 }
