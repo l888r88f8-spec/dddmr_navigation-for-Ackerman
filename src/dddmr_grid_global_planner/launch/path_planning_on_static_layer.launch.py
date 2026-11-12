@@ -1,5 +1,7 @@
 import os
 
+import yaml
+
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
@@ -8,15 +10,34 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 
+def _offline_pcd_paths(params_file):
+    with open(params_file, 'r', encoding='utf-8') as stream:
+        config = yaml.safe_load(stream)
+    try:
+        offline = config['dddmr_grid_global_planner']['ros__parameters']['offline']
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError(
+            f'{params_file}: missing '
+            'dddmr_grid_global_planner.ros__parameters.offline') from exc
+
+    paths = {}
+    for key in ('global_pcd', 'ground_pcd'):
+        value = offline.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeError(
+                f'{params_file}: offline.{key} must be a non-empty path')
+        paths[key] = value
+    return paths
+
+
 def generate_launch_description():
 
     grid_share = get_package_share_directory('dddmr_grid_global_planner')
     params_file = os.path.join(grid_share, 'config', 'dddmr_grid_global_planner.yaml')
     default_rviz_config = os.path.join(grid_share, 'rviz', 'dddmr_grid_global_planner.rviz')
+    offline_pcd = _offline_pcd_paths(params_file)
 
     use_sim = LaunchConfiguration('use_sim')
-    map_dir = LaunchConfiguration('map_dir')
-    ground_dir = LaunchConfiguration('ground_dir')
     rviz_config = LaunchConfiguration('rviz_config')
     use_sim_time = ParameterValue(use_sim, value_type=bool)
 
@@ -29,28 +50,13 @@ def generate_launch_description():
                 'replaying with /clock.'),
         ),
         DeclareLaunchArgument(
-            'map_dir',
-            default_value='/home/robot/map/hesai_sim2/GroundMap.pcd',
-            description=(
-                'GroundMap input and mapcloud display. An explicit GlobalMap '
-                'path is optional obstacle evidence only.'),
-        ),
-        DeclareLaunchArgument(
-            'ground_dir',
-            default_value='/home/robot/map/hesai_sim2/GroundMap.pcd',
-            description=(
-                'GroundMap used by the legacy ground-only build and the '
-                'mapground display.'),
-        ),
-        DeclareLaunchArgument(
             'rviz_config',
             default_value=default_rviz_config,
             description='Path to the RViz configuration file.',
         ),
         SetEnvironmentVariable('RCUTILS_COLORIZED_OUTPUT', '1'),
-        # Single display-only publisher: mapcloud comes from map_dir and
-        # mapground from ground_dir. The offline planner reads the PCDs
-        # directly; this node never feeds the planning map.
+        # Display reuses the planner's offline PCD paths from the same YAML.
+        # The launch overrides below never feed the offline planning map.
         Node(
             package='mcl_3dl',
             executable='pcl_publisher',
@@ -60,8 +66,8 @@ def generate_launch_description():
             parameters=[
                 params_file,
                 {
-                    'map_dir': map_dir,
-                    'ground_dir': ground_dir,
+                    'map_dir': offline_pcd['global_pcd'],
+                    'ground_dir': offline_pcd['ground_pcd'],
                     'use_sim_time': use_sim_time,
                 },
             ],
@@ -88,9 +94,8 @@ def generate_launch_description():
                 {'use_sim_time': use_sim_time},
             ],
         ),
-        # The only /get_plan provider. The launch paths override the YAML
-        # offline source paths; ground_dir drives the legacy ground build and
-        # map_dir is optional same/independent obstacle evidence.
+        # The only /get_plan provider. All planner PCD paths come from YAML;
+        # the display publisher has its own YAML section.
         Node(
             package='dddmr_grid_global_planner',
             executable='dddmr_grid_offline_planner_node',
@@ -100,9 +105,6 @@ def generate_launch_description():
             parameters=[
                 params_file,
                 {
-                    'offline.global_pcd': map_dir,
-                    'offline.ground_pcd': ground_dir,
-                    'offline.obstacle_pcd': map_dir,
                     'use_sim_time': use_sim_time,
                 },
             ],

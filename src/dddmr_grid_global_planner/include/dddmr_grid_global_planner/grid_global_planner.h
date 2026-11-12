@@ -470,10 +470,15 @@ private:
     const std::string & result_class,
     const std::string & detail);
   void PublishEmptyPath();
+  void WarmGraphSearch(const MapSnapshot & snapshot);
   void OnMapPublished(std::shared_ptr<const MapSnapshot> snapshot);
 
   // ---- Members ------------------------------------------------------------
   GridPlannerConfig config_;
+  // Persistent topology cache for the fast_graph backend. Zero penalties are
+  // fixed for this node path; hybrid searches keep their own temporary objects.
+  GridGraphAStar graph_search_{
+    GraphSearchOptions{0.0, 0.0, 0.0, 0.0}};
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;

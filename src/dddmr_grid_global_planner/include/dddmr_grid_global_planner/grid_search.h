@@ -339,6 +339,10 @@ struct SearchStats
   std::size_t cell_queries{0};
   std::size_t surface_queries{0};
   std::size_t neighbor_queries{0};
+  // Graph topology cache activity. A build constructs the immutable adjacency
+  // index for one terrain revision; a hit reuses it for another request.
+  std::size_t graph_cache_builds{0};
+  std::size_t graph_cache_hits{0};
 
   // Actual measured wall times. Nested values are labelled in comments:
   // fine_ms includes support evaluation and reconstruction; support_eval_ms is
@@ -416,13 +420,24 @@ public:
 
   const GraphSearchOptions & options() const noexcept {return options_;}
 
+  // Prebuilds the immutable topology cache for the snapshot's fine terrain.
+  // The cache is keyed by owning terrain identity and is bounded to the latest
+  // revision. This is optional; Search builds the same cache on demand.
+  SearchStatus Prepare(
+    const MapSnapshot & map,
+    const SearchBudget & budget,
+    SearchStats * stats = nullptr) const;
+
   SearchResult Search(
     const MapSnapshot & map,
     const ObstacleDistanceField & distance_field,
     const GraphSearchRequest & request) const;
 
 private:
+  struct Impl;
+
   GraphSearchOptions options_;
+  std::shared_ptr<Impl> state_;
 };
 
 // Ackermann Hybrid-A* options. Every budget/tolerance is an explicit search

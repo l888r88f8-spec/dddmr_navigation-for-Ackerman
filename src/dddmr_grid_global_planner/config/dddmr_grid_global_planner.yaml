@@ -1,16 +1,11 @@
-# 静态 PCD 离线全局规划器：单文件 ROS 参数。
-# 仅重排/注释；所有节点、键路径、值、类型和数组元素顺序保持不变。
-# 当前输入为 GroundMap，重建模式由 offline.continuous_ground 控制。
-
 dddmr_grid_global_planner:
   ros__parameters:
-    # 当前生效路径：离线静态 GroundMap 重建（本组置顶）。
     offline:
       enabled: true                                            # 静态 PCD 离线入口；true 时节点只走离线路由。
-      global_cloud_mode: false                                 # false=仅 GroundMap；true 才启用实验性 GlobalMap 多尺度路径。
-      global_pcd: /home/robot/map/hesai_sim2/GlobalMap.pcd     # 仅 global_cloud_mode=true 时读取；默认 GroundMap 模式不读取。
-      ground_pcd: /home/robot/map/hesai_sim2/GroundMap.pcd     # 当前地面输入。
-      obstacle_pcd: /home/robot/map/hesai_sim2/GroundMap.pcd   # 当前静态障碍输入；与 ground_pcd 相同，独立障碍输入会跳过。
+      global_cloud_mode: false                                 # false=GroundMap 重建地面；true=GlobalMap 重建；独立障碍输入另行读取。
+      global_pcd: /home/robot/map/hesai_outdoor_cuiwen/GlobalMap.pcd     # 全局点云显示输入；global_cloud_mode=true 时也用于规划重建。
+      ground_pcd: /home/robot/map/hesai_outdoor_cuiwen/GroundMap.pcd     # 地面规划输入；launch 将其注入 pcl_publisher.ground_dir 供显示。
+      obstacle_pcd: /home/robot/map/hesai_outdoor_cuiwen/GroundMap.pcd   # 独立障碍规划输入；与 ground_pcd 同路径时跳过；不注入显示发布器。
 
       # ---- 通用几何、坡度与台阶（m / rad / 比例）----
       resolution_m: 0.2                                        # 细网格分辨率（m）；x/y 为局部地图原点（m）。
@@ -22,8 +17,7 @@ dddmr_grid_global_planner:
       max_normal_angle_rad: 0.35                               # 离线相邻面连通的法向夹角上限（rad）；连续重建也使用。
       min_boundary_coverage: 0.25                              # 原始边界支撑覆盖比例（0~1）；重建面之间按共享几何判断。
 
-      # ---- 当前生效：连续区域地面重建 ----
-      # 先于旧版逐格判定运行；只用真实区域支撑跨扫描缺口，不伪造原始点。
+      # ---- 连续区域地面重建 ----
       continuous_ground:
         enabled: true                                          # true：区域重建启用。
         regional_radius_m: 0.6                                 # 区域半径（m）：单次区域拟合的搜索半径。
@@ -42,20 +36,17 @@ dddmr_grid_global_planner:
         max_support_refs_per_cell: 24                          # 容量：每格支撑引用上限。
         max_inferred_cells: 2000000                            # 容量：推断格数上限。
 
-      # ---- 共享容量：候选与测量证据（fail-closed，不是物理阈值）----
       max_candidate_cells: 2000000                             # 候选格总数上限。
       max_measurement_points: 4000000                          # 共享：测量点上限。
       max_measurement_patches: 500000                          # 共享：测量 patch 上限。
       max_measurement_point_refs: 8000000                      # 共享：测量点引用上限；当前 GroundMap 预算为 8M。
       max_points_per_measurement_patch: 4096                   # 共享：每个测量 patch 的点数上限。
 
-      # ---- 静态障碍分类（低矮带；不验证顶部净空）----
       ground_duplicate_tolerance_m: 0.08                       # 地面重复判定容差（m）；ground/obstacle 路径相同则跳过独立障碍输入。
       obstacle_blocking_height_m: 1.0                          # 障碍高度带上限（m）；更高点按遮挡忽略，不推断 headroom。
       obstacle_association_radius_m: 0.25                      # 障碍关联半径（m）。
       obstacle_tile_size_m: 3.2                                # 障碍分块尺寸（m）。
 
-      # ---- 旧版 ground_surface 与旧邻域字段（精确生效说明）----
       # 仅地面模式的有界平滑；continuous_ground=true 时由区域重建取代；global 分类不运行。
       ground_surface:
         enabled: true                                          # 旧版平滑开关；区域重建启用时不参与。
@@ -278,7 +269,8 @@ dddmr_grid_global_planner:
       max_corridor_visualization_cells: 20000
 
 # 仅显示用的 PCD 发布器；不加载外部 mcl_3dl/p2p YAML。
-# 地图与地面共用同一个发布器；ground_down_sample=0 保留原始密度。
+# 地图/地面路径由 launch 从顶部 offline.global_pcd / offline.ground_pcd 注入，
+# 本 section 不再保存重复路径；ground_down_sample=0 保留原始密度。
 pcl_publisher:
   ros__parameters:
     global_frame: map                                          # 地图/地面显示坐标系与话题。

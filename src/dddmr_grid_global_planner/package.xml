@@ -41,6 +41,7 @@
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>rcl_interfaces</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>global_planner</exec_depend>
   <exec_depend>mcl_3dl</exec_depend>
@@ -50,7 +51,6 @@
   <test_depend>ament_cmake_uncrustify</test_depend>
   <test_depend>ament_cmake_cpplint</test_depend>
   <test_depend>ament_cmake_flake8</test_depend>
-  <test_depend>python3-yaml</test_depend>
   <test_depend>python3-pytest</test_depend>
 
   <export>

@@ -1034,6 +1034,7 @@ bool GlobalPlanner::getStartGoalID(
     if(!fallback_search){
       pointIdxRadiusSearch_goal.clear();
       pointRadiusSquaredDistance_goal.clear();
+      pcl_goal.z = goal.pose.position.z;  // restore query z after vertical scan
       if(kdtree_ground_->nearestKSearch(pcl_goal, 1, pointIdxRadiusSearch_goal, pointRadiusSquaredDistance_goal) > 0){
         double nearest_distance = sqrt(pointRadiusSquaredDistance_goal[0]);
         if(nearest_distance <= fallback_max_nearest_distance){
@@ -1107,6 +1108,7 @@ bool GlobalPlanner::getStartGoalID(
     if(!fallback_search){
       pointIdxRadiusSearch_start.clear();
       pointRadiusSquaredDistance_start.clear();
+      pcl_start.z = start.pose.position.z;  // restore query z after vertical scan
       if(kdtree_ground_->nearestKSearch(pcl_start, 1, pointIdxRadiusSearch_start, pointRadiusSquaredDistance_start) > 0){
         double nearest_distance = sqrt(pointRadiusSquaredDistance_start[0]);
         if(nearest_distance <= fallback_max_nearest_distance){

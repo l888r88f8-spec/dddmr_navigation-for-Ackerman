@@ -13,9 +13,10 @@
 > ros2 launch dddmr_grid_global_planner path_planning_on_static_layer.launch.py \
 >   use_sim:=false
 > ```
-> `map_dir`/`ground_dir` 默认均为
-> `/home/robot/map/hesai_sim2/GroundMap.pcd`；显式
-> `map_dir:=...GlobalMap.pcd` 只作为可选障碍输入。
+> 所有 PCD 路径统一在 YAML 顶部配置：launch 将 `offline.global_pcd` 和
+> `offline.ground_pcd` 注入 `pcl_publisher.map_dir`/`ground_dir` 供显示；
+> 规划器直接读取 `offline.global_pcd`、`offline.ground_pcd`、
+> `offline.obstacle_pcd`，其中 `obstacle_pcd` 保持独立规划语义。
 
 ## 0. 最终集成验收（2026-11-07）
 
@@ -63,8 +64,8 @@ CPU 功能证据，不是性能/实车数据。
 
 Ground-only（空 obstacle）与同一 GroundMap 作为 obstacle 数组的探测结果：
 两者节点/几何相同，但 static obstacle records 分别为 occupied=40/
-clear=83274/unknown=25 与 occupied=54/clear=83260/unknown=25。当前 launch
-的 `map_dir` 与 `ground_dir` 都指向 GroundMap 时，planner 沿用既有
+clear=83274/unknown=25 与 occupied=54/clear=83260/unknown=25。YAML 中
+`offline.ground_pcd` 与 `offline.obstacle_pcd` 都指向 GroundMap 时，planner 沿用既有
 “相同路径不重复加载 obstacle”语义，探测记录 `obstacle_points=0`；这不构成
 empty-obstacle authoritative-ground 情形的安全性假设，raised/depressed
 ground 证据由上述鲁棒证据路径单独保守处理。
@@ -81,8 +82,9 @@ ros2 launch dddmr_grid_global_planner path_planning_on_static_layer.launch.py \
   use_sim:=false
 ```
 
-`map_dir`/`ground_dir` 默认均为 `GroundMap.pcd`；YAML 的 `ground_pcd`/
-`obstacle_pcd` 默认都指向 GroundMap，`global_pcd` 保留但默认不读取。不要额外
+`map_dir`/`ground_dir` 仅用于显示，由 launch 从 `offline.global_pcd`/
+`offline.ground_pcd` 注入，YAML 不再保存重复显示路径；`ground_pcd`/
+`obstacle_pcd` 默认都指向 GroundMap；默认规划模式不读取 `global_pcd`，显示发布器仍读取它。不要额外
 创建 launch/YAML。ROS 图、RViz 实渲染、
 实时感知和硬件运动仍未运行；不要把本节的 CPU/离线证据表述为实车验收。
 
@@ -454,23 +456,19 @@ ros2 launch dddmr_grid_global_planner path_planning_on_static_layer.launch.py \
   use_sim:=false
 ```
 
-可用参数只有 `use_sim`、`map_dir`、`ground_dir`、`rviz_config`。默认
-`map_dir` 和 `ground_dir` 均为
-`/home/robot/map/hesai_sim2/GroundMap.pcd`，走旧地面构建。
-替换输入文件时：
+launch 参数只有 `use_sim` 和 `rviz_config`。所有 PCD 路径在唯一 YAML
+`config/dddmr_grid_global_planner.yaml` 中设置：
 
-```bash
-ros2 launch dddmr_grid_global_planner path_planning_on_static_layer.launch.py \
-  ground_dir:=/absolute/path/GroundMap.pcd \
-  map_dir:=/absolute/path/GroundMap.pcd \
-  use_sim:=false
-```
+- 规划输入：`dddmr_grid_global_planner.ros__parameters.offline` 下的
+  `global_pcd`、`ground_pcd`、`obstacle_pcd`。
+- 显示输入：launch 从上述 `offline.global_pcd`、`offline.ground_pcd`
+  注入 `pcl_publisher` 的 `map_dir`、`ground_dir`；YAML 不另存显示路径。
 
-`ground_dir` 是旧地面构建输入，同时发布 `mapground`；`map_dir` 发布
-`mapcloud` 并作为可选障碍证据。两者默认相同，此时 planner 跳过独立障碍加载。
-显式把 `map_dir` 设为 `GlobalMap.pcd` 时，它仍只作为可选障碍输入，不会重建
-地面；地面始终来自 `ground_dir`。点云应已经处于 `map` 坐标系；显示发布器
-的额外变换不会变换规划器直接读取的 PCD。
+`global_cloud_mode=false` 时使用 `ground_pcd` 重建地面，`true` 时使用
+`global_pcd`；不同路径的 `obstacle_pcd` 仍可作为独立障碍输入。
+显示路径只是同一 YAML 顶部路径的副本，不覆盖规划输入，也不能通过 launch
+命令行单独改写。
+点云应已处于 `map` 坐标系；显示变换不会变换规划器直接读取的 PCD。
 
 默认启动五个节点：PCD 显示发布器、显示用静态 TF（`map2baselink`）、独立
 离线规划器 `dddmr_grid_offline_planner_node`、RViz 选点 bridge 和 RViz。
@@ -559,10 +557,11 @@ RViz 布局 `rviz/dddmr_grid_global_planner.rviz` 使用 Fixed Frame `map`，
 硬状态（occupied/prohibited/unknown/unsupported）优先于边界热度。把
 `boundary_penalty_weight` 或 `boundary_penalty_distance_m` 设为 0 只关闭软热度，
 不会把 insufficient-connection 紫/蓝标签变成绿色，也不会放宽硬门限。
-默认 launch 把 `ground_dir`（GroundMap）传给 `offline.ground_pcd`，把
-`map_dir` 传给 `offline.obstacle_pcd`；默认两者同路径，planner 跳过独立障碍
-输入。只有显式提供不同的独立障碍 PCD 时才额外加载，额外 obstacle 输入只做
-加法，不会替换地面几何。
+规划器的三个 PCD 路径以 YAML 为准；launch 仅将顶部 `global_pcd`/
+`ground_pcd` 注入显示发布器，不改写规划输入。
+默认 `offline.ground_pcd` 和 `offline.obstacle_pcd` 同路径，planner 跳过独立障碍
+输入。只有在 YAML 中配置不同路径的独立障碍 PCD 时才额外加载；
+额外 obstacle 输入只做加法，不会替换地面几何。
 因此 `MapCloud` 的显示开关不影响占据判定。当前静态模型中，一个点相对关联
 地面高出 0.08 m 且不超过 1.00 m 就会触发占据；这不是对噪点、动态残影或
 车辆可跨越能力的识别。应核对障碍输入的分割、配准和点云质量。
@@ -675,11 +674,10 @@ ros2 action send_goal /get_plan dddmr_sys_core/action/GetPlan \
 4. **launch 参数**：唯一入口
    `path_planning_on_static_layer.launch.py` 默认启动 PCD 显示发布器、
    `map2baselink` 静态 TF、独立离线规划器、RViz bridge 和 RViz；没有实时
-   雷达/感知/定位/控制节点。地图默认
-   `map_dir`/`ground_dir` 均为
-   `/home/robot/map/hesai_sim2/GroundMap.pcd`，走旧地面构建；固定 TF
+   雷达/感知/定位/控制节点。显示和规划 PCD 路径统一由 YAML 顶部规划器
+   `offline` 分组配置，launch 将 `global_pcd`/`ground_pcd` 注入显示发布器。固定 TF
    默认 `tf_x=3.0, tf_y=0.1, tf_z=-0.5, roll/pitch/yaw=0`。可用参数只有
-   `use_sim`、`map_dir`、`ground_dir`、`rviz_config`。
+   `use_sim`、`rviz_config`。
 5. **perception 导出参数**：`export_perception_snapshot` 默认 `false`；
    `perception_snapshot_static_plugin` 默认 `map`（按插件名把静态层与动态层
    分开）。旧节点不设置时保持旧行为。
@@ -808,8 +806,8 @@ ros2 action send_goal /get_plan dddmr_sys_core/action/GetPlan \
 - [ ] 唯一 launch 默认启动 PCD 发布器、静态 TF、离线 planner、RViz bridge
       和 RViz；`rviz_config:=...` 可覆盖布局，`use_sim` 以 typed bool 传给
       全部五个节点。
-- [ ] 默认 PCD 路径存在；`map_dir`/`ground_dir` 指到缺失文件时离线 planner
-      给出明确错误，而不是静默空地图。
+- [ ] 当前模式实际读取的 YAML `offline.*_pcd` 路径存在；规划输入缺失时
+      离线 planner 给出明确错误，而不是静默空地图。
 - [ ] 唯一 YAML 的 `dddmr_grid_rviz_bridge` 默认
       `start_fixed_z_m=goal_fixed_z_m=-0.5`，与显示静态 TF `tf_z` 一致。
 - [ ] `static_transform_from_params.py` 只发布 `map->base_link`；sensor

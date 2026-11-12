@@ -1617,6 +1617,7 @@ void GridGlobalPlanner::LoadOfflineSnapshot()
             std::string(OfflineStaticMapStatusToString(result.status)) + ": " +
             result.detail);
   }
+  WarmGraphSearch(*result.snapshot);
   if (!snapshot_store_ || !snapshot_store_->TryPublish(result.snapshot)) {
     throw std::runtime_error(
             "offline static-map snapshot publication was rejected");
@@ -3656,11 +3657,6 @@ void GridGlobalPlanner::RunPlanningJob(const PlanningJob & job)
     const auto search_start = std::chrono::steady_clock::now();
     SearchResult search;
     if (config_.search_backend == "fast_graph") {
-      GraphSearchOptions options;
-      options.obstacle_penalty_distance_m = 0.0;
-      options.obstacle_penalty_weight = 0.0;
-      options.slope_penalty_weight = 0.0;
-      options.roughness_penalty_weight = 0.0;
       GraphSearchRequest request;
       request.use_points = true;
       request.nearest_layer = true;
@@ -3669,7 +3665,7 @@ void GridGlobalPlanner::RunPlanningJob(const PlanningJob & job)
       request.start_point.z -= config_.vehicle.base_contact_height_m;
       request.goal_point.z -= config_.vehicle.base_contact_height_m;
       request.budget = budget;
-      search = GridGraphAStar(options).Search(
+      search = graph_search_.Search(
         *snapshot, *snapshot->distance_field(), request);
       for (auto & pose : search.path) {
         pose.position.z += config_.vehicle.base_contact_height_m;
@@ -4711,6 +4707,19 @@ void GridGlobalPlanner::PublishEmptyPath()
   }
 }
 
+void GridGlobalPlanner::WarmGraphSearch(const MapSnapshot & snapshot)
+{
+  if (config_.search_backend != "fast_graph") {
+    return;
+  }
+  const SearchStatus status = graph_search_.Prepare(snapshot, SearchBudget{});
+  if (status != SearchStatus::kSuccess) {
+    RCLCPP_WARN(
+      get_logger(), "graph cache prewarm deferred: %s",
+      SearchStatusToString(status));
+  }
+}
+
 void GridGlobalPlanner::OnMapPublished(
   std::shared_ptr<const MapSnapshot> snapshot)
 {
@@ -4718,6 +4727,7 @@ void GridGlobalPlanner::OnMapPublished(
     return;
   }
   try {
+    WarmGraphSearch(*snapshot);
     PublishVersion(*snapshot, "map_update");
   } catch (...) {
     // A visualization/version publication must never terminate the map worker.

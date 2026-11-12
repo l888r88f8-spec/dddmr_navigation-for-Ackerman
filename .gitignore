@@ -4,6 +4,7 @@ benchmarks/
 tools/
 .run_final_validation.sh
 symlink_install_manifest.txt
+.diag_tmp
 
 # Python
 __pycache__/
