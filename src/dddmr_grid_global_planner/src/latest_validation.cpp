@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/latest_validation.h"
+#include "grid_global_planner/latest_validation.h"
 
 #include <algorithm>
 #include <cmath>
@@ -23,10 +23,10 @@
 #include <utility>
 #include <vector>
 
-#include "dddmr_grid_global_planner/distance_field.h"
-#include "dddmr_grid_global_planner/obstacle_tile.h"
+#include "grid_global_planner/distance_field.h"
+#include "grid_global_planner/obstacle_tile.h"
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -590,7 +590,6 @@ LatestValidationResult ValidateLatestSnapshot(
   validation_budget.has_deadline = true;
   validation_budget.deadline = validation_deadline;
   validation_budget.cancel = cancel;
-  validation_budget.max_expansions = config.max_expansions;
   validation_budget.max_samples = config.validation.max_samples;
 
   for (int attempt = 0; attempt < config.max_latest_validation_retries;
@@ -730,6 +729,105 @@ LatestValidationResult ValidateLatestSnapshot(
   return result;
 }
 
+LatestValidationResult ValidatePinnedSnapshot(
+  const LatestValidationConfig & config,
+  const std::shared_ptr<const MapSnapshot> & pinned_snapshot,
+  const std::vector<PathPose> & searched_path,
+  std::chrono::steady_clock::time_point overall_deadline,
+  const std::shared_ptr<std::atomic<bool>> & cancel)
+{
+  LatestValidationResult result;
+  result.path = searched_path;
+  result.status = LatestValidationStatus::kNotReady;
+  if (!pinned_snapshot || !pinned_snapshot->IsReady() ||
+    !pinned_snapshot->fine_terrain() ||
+    !pinned_snapshot->HasReadyDistanceField() ||
+    !pinned_snapshot->distance_field() ||
+    !pinned_snapshot->distance_field()->ready())
+  {
+    result.detail = "pinned snapshot A is not ready";
+    return result;
+  }
+  if (searched_path.empty()) {
+    result.status = LatestValidationStatus::kInvalid;
+    result.detail = "pinned path is empty";
+    return result;
+  }
+  if (!std::isfinite(config.max_latest_validation_time_sec) ||
+    config.max_latest_validation_time_sec <= 0.0 ||
+    config.validation.max_samples == 0)
+  {
+    result.status = LatestValidationStatus::kInvalidConfiguration;
+    result.detail = "pinned validation budgets are invalid";
+    return result;
+  }
+  if (cancel && cancel->load(std::memory_order_relaxed)) {
+    result.status = LatestValidationStatus::kCanceled;
+    result.detail = "canceled before pinned-snapshot validation";
+    return result;
+  }
+  auto validation_deadline = std::chrono::steady_clock::now() +
+    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+    std::chrono::duration<double>(config.max_latest_validation_time_sec));
+  validation_deadline = std::min(validation_deadline, overall_deadline);
+  if (std::chrono::steady_clock::now() >= validation_deadline) {
+    result.status = LatestValidationStatus::kDeadlineExceeded;
+    result.detail = "pinned-snapshot validation deadline exceeded";
+    return result;
+  }
+  SearchBudget budget;
+  budget.has_deadline = true;
+  budget.deadline = validation_deadline;
+  budget.cancel = cancel;
+  budget.max_samples = config.validation.max_samples;
+  PathValidator validator(
+    config.vehicle, config.wheel, config.obstacles, config.validation);
+  const auto & terrain = *pinned_snapshot->fine_terrain();
+  const PathValidationResult checked = validator.Validate(
+    *pinned_snapshot, result.path, terrain.revision(), terrain.content_hash(),
+    budget);
+  result.attempts = 1;
+  if (!checked.ok()) {
+    result.status = ToLatestValidationStatus(checked.status);
+    if (result.status == LatestValidationStatus::kBudgetExhausted &&
+      std::chrono::steady_clock::now() >= validation_deadline)
+    {
+      result.status = LatestValidationStatus::kDeadlineExceeded;
+    }
+    result.detail = "pinned-snapshot validation failed: " + checked.detail;
+    return result;
+  }
+  if (checked.updated_path.empty()) {
+    result.status = LatestValidationStatus::kInvalid;
+    result.detail = "pinned-snapshot validator returned an empty trajectory";
+    return result;
+  }
+  result.path = checked.updated_path;
+  result.snapshot = pinned_snapshot;
+  result.validated_snapshot = pinned_snapshot;
+  result.replayed = true;
+  result.whole_snapshot_validated = true;
+  result.validated_samples = checked.checked_samples;
+  result.ok = true;
+  result.status = LatestValidationStatus::kOk;
+  result.detail = "path validated on the exact pinned snapshot A";
+  return result;
+}
+
+LatestCommitProof BuildPinnedCommitProof(
+  const LatestValidationResult & validation)
+{
+  LatestCommitProof proof;
+  if (!validation.ok || !validation.snapshot ||
+    !validation.snapshot->fine_terrain() || validation.path.empty())
+  {
+    return proof;
+  }
+  proof.kind = LatestCommitProofKind::kPinnedSnapshot;
+  proof.snapshot = validation.snapshot;
+  return proof;
+}
+
 LatestCommitProof BuildLatestCommitProof(
   const LatestValidationConfig & config,
   const LatestValidationResult & validation)
@@ -783,6 +881,11 @@ bool LatestCommitProofMatches(
              &latest == proof.snapshot.get() &&
              latest.fine_terrain().get() ==
              proof.snapshot->fine_terrain().get();
+    case LatestCommitProofKind::kPinnedSnapshot:
+      // Production Grid policy: A was pinned before search and is the plan's
+      // immutable source. B may already be the store's latest snapshot; it must
+      // not reject, revalidate, or starve the accepted A path.
+      return proof.snapshot != nullptr;
     case LatestCommitProofKind::kNone:
       return false;
   }
@@ -810,7 +913,7 @@ LatestValidationResult ValidateLatestGraphSnapshot(
   }
   if (!std::isfinite(config.max_latest_validation_time_sec) ||
     config.max_latest_validation_time_sec <= 0.0 ||
-    config.max_expansions == 0 || config.validation.max_samples == 0)
+    config.validation.max_samples == 0)
   {
     result.status = LatestValidationStatus::kInvalidConfiguration;
     result.detail = "graph validation budgets are invalid";
@@ -823,7 +926,6 @@ LatestValidationResult ValidateLatestGraphSnapshot(
     std::chrono::duration_cast<std::chrono::steady_clock::duration>(
       std::chrono::duration<double>(config.max_latest_validation_time_sec)));
   budget.cancel = cancel;
-  budget.max_expansions = config.max_expansions;
   budget.max_samples = config.validation.max_samples;
   BudgetTracker tracker(budget);
   const auto check_budget = [&](bool consume) {
@@ -916,4 +1018,4 @@ LatestValidationResult ValidateLatestGraphSnapshot(
   return result;
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

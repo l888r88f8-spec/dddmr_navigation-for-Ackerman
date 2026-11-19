@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/obstacle_tile.h"
+#include "grid_global_planner/obstacle_tile.h"
 
 #include <cmath>
 #include <cstddef>
@@ -24,9 +24,9 @@
 #include <unordered_map>
 #include <utility>
 
-#include "dddmr_grid_global_planner/map_snapshot.h"
+#include "grid_global_planner/map_snapshot.h"
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -481,4 +481,4 @@ ObstacleTileLayer ObstacleTileBuilder::Build(
     observed);
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

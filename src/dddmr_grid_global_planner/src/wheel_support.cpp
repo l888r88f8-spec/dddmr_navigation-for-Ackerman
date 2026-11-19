@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/wheel_support.h"
+#include "grid_global_planner/wheel_support.h"
 
 #include <algorithm>
 #include <array>
@@ -27,10 +27,10 @@
 #include <utility>
 #include <vector>
 
-#include "dddmr_grid_global_planner/continuous_ground_surface.h"
-#include "dddmr_grid_global_planner/terrain_boundary_cost.h"
+#include "grid_global_planner/continuous_ground_surface.h"
+#include "grid_global_planner/terrain_boundary_cost.h"
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -3054,4 +3054,4 @@ WheelSupportEvaluation WheelSupportEvaluator::Evaluate(
   return finish(std::move(best));
 }  // NOLINT(readability/fn_size): dense support evaluation; split would duplicate state
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/ackermann_kinematics.h"
+#include "grid_global_planner/ackermann_kinematics.h"
 
 #include <algorithm>
 #include <cmath>
@@ -21,7 +21,7 @@
 #include <string>
 #include <vector>
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -615,4 +615,4 @@ AckermannArcSamples SampleAckermannArc(
   return result;
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

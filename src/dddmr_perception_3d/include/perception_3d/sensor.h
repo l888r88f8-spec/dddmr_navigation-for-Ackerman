@@ -39,6 +39,8 @@
 
 /*Debug*/
 #include <chrono>
+#include <cstdint>
+#include <string>
 
 namespace perception_3d
 {
@@ -47,6 +49,24 @@ enum PerceptionOpinion {
   PASS,
   PATH_BLOCKED_WAIT,
   PATH_BLOCKED_REPLANNING
+};
+
+// Additive producer-owned export state for the frozen perception snapshot.
+//
+// This is deliberately separate from getObservation(): legacy plugins keep
+// their existing local-planner cache semantics, while a producer that can
+// freeze explicit occupied/cleared evidence and acquisition provenance
+// overrides the export hooks below. Defaults describe an unsupported plugin, so
+// static/map plugins are never relabelled from the shared map.
+struct SensorExportObservation
+{
+  pcl::PointCloud<pcl::PointXYZI>::Ptr occupied;
+  pcl::PointCloud<pcl::PointXYZI>::Ptr cleared;
+  std::string frame_id;
+  std::int64_t sensor_stamp_ns{0};
+  std::int64_t received_steady_ns{0};
+  std::uint64_t source_sequence{0};
+  bool complete{false};
 };
 
 class Sensor{
@@ -109,6 +129,36 @@ class Sensor{
     
     //@ lethal point cloud, that will be merged together for line-of-sight check
     pcl::PointCloud<pcl::PointXYZI>::Ptr current_lethal_;
+
+  public:
+
+    // Append export hooks after existing virtual methods to preserve their
+    // vtable positions for already-built downstream consumers.
+    // True when this plugin provides producer-owned snapshot evidence. A
+    // supported plugin must also implement getSnapshotObservation().
+    virtual bool supportsSnapshotObservation() const {return false;}
+
+    // Fills frozen occupied/cleared evidence plus producer-owned provenance.
+    // Returns false when no complete, fresh clear/mark cycle is available; the
+    // caller must then omit this source rather than inventing evidence.
+    virtual bool getSnapshotObservation(SensorExportObservation * observation)
+    {
+      (void)observation;
+      return false;
+    }
+
+    // Append further producer metadata hooks after the existing virtual slots.
+    // A stable COMPLETED-STATE revision changes only when this source's
+    // completed clear/mark/reset state changes. Merely accepting a new input
+    // cloud must not advance it; repeated polls of the same completed scan keep
+    // it. It is an equality token used to key the cost cache, not an ordering
+    // sequence. 0 means "not reported" and makes the cost cache fall back
+    // conservatively.
+    virtual std::uint64_t snapshotStateRevision() const {return 0;}
+
+    // Acquisition stamp of that completed state in the producer clock domain.
+    // 0 means unknown; the loop/cycle clock must never be substituted.
+    virtual std::int64_t snapshotSensorStampNs() const {return 0;}
 
 };
 

@@ -157,6 +157,47 @@ void ForwardHybridAStar::SetGlobalFrame(const std::string & global_frame)
   global_frame_ = global_frame;
 }
 
+bool ForwardHybridAStar::SetSceneSnapshot(
+  const ScenePipelineContext & scene,
+  std::string * rejection_reason)
+{
+  scene_.Reset();
+  if (!scene.valid()) {
+    if (rejection_reason != nullptr) {
+      *rejection_reason = scene.rejectionReason().empty() ?
+        "pinned scene is not valid" : scene.rejectionReason();
+    }
+    return false;
+  }
+  scene_ = scene;
+  if (rejection_reason != nullptr) {
+    rejection_reason->clear();
+  }
+  return true;
+}
+
+void ForwardHybridAStar::ClearSceneSnapshot()
+{
+  scene_.Reset();
+}
+
+const pcl::PointCloud<pcl::PointXYZI> * ForwardHybridAStar::GroundCloud() const
+{
+  if (scene_.valid()) {
+    return scene_.staticView() ? scene_.staticView()->groundPoints().get() : nullptr;
+  }
+  return pcl_ground_.get();
+}
+
+std::shared_ptr<const pcl::KdTreeFLANN<pcl::PointXYZI>>
+ForwardHybridAStar::GroundTree() const
+{
+  if (scene_.valid()) {
+    return scene_.staticView() ? scene_.staticView()->groundKdtree() : nullptr;
+  }
+  return kdtree_ground_;
+}
+
 double ForwardHybridAStar::NormalizeAngle(double angle) const
 {
   if (!IsFinite(angle)) {
@@ -242,7 +283,8 @@ bool ForwardHybridAStar::ComputeStateId(
   if (heading_bin < 0 || heading_bin >= config_.heading_bin_count) {
     return false;
   }
-  if (pcl_ground_ == nullptr || ground_index >= pcl_ground_->points.size()) {
+  const auto * ground_cloud = GroundCloud();
+  if (ground_cloud == nullptr || ground_index >= ground_cloud->points.size()) {
     return false;
   }
 
@@ -294,7 +336,9 @@ bool ForwardHybridAStar::PoseToGroundIndex(
     return false;
   }
 
-  if (kdtree_ground_ == nullptr || pcl_ground_ == nullptr || pcl_ground_->points.empty()) {
+  const auto * ground_cloud = GroundCloud();
+  const auto ground_tree = GroundTree();
+  if (ground_tree == nullptr || ground_cloud == nullptr || ground_cloud->points.empty()) {
     if (diagnostics != nullptr) {
       diagnostics->fallback = "ground_unavailable";
     }
@@ -302,7 +346,7 @@ bool ForwardHybridAStar::PoseToGroundIndex(
   }
 
   const auto select_candidate =
-    [this, x, y, z_hint, previous_ground_index](
+    [this, &ground_cloud, x, y, z_hint, previous_ground_index](
     const std::vector<int> & candidate_indices,
     const std::vector<float> & candidate_squared_distances,
     std::size_t * selected_ground_index,
@@ -325,7 +369,7 @@ bool ForwardHybridAStar::PoseToGroundIndex(
           continue;
         }
         const std::size_t candidate_index = static_cast<std::size_t>(candidate_index_signed);
-        if (candidate_index >= pcl_ground_->points.size()) {
+        if (candidate_index >= ground_cloud->points.size()) {
           continue;
         }
         if (!IsGroundIndexInWeightMap(candidate_index)) {
@@ -337,7 +381,7 @@ bool ForwardHybridAStar::PoseToGroundIndex(
           continue;
         }
 
-        const pcl::PointXYZI & candidate_pt = pcl_ground_->points[candidate_index];
+        const pcl::PointXYZI & candidate_pt = ground_cloud->points[candidate_index];
         if (!IsFinite(candidate_pt.x) || !IsFinite(candidate_pt.y) || !IsFinite(candidate_pt.z)) {
           continue;
         }
@@ -381,7 +425,7 @@ bool ForwardHybridAStar::PoseToGroundIndex(
   std::vector<float> point_squared_distances;
 
   const int found_in_radius =
-    kdtree_ground_->radiusSearch(
+    ground_tree->radiusSearch(
     query,
     config_.projection_search_radius,
     point_indices,
@@ -396,7 +440,7 @@ bool ForwardHybridAStar::PoseToGroundIndex(
         &selected_ground_index,
         &selected_squared_distance))
     {
-      const pcl::PointXYZI & selected_pt = pcl_ground_->points[selected_ground_index];
+      const pcl::PointXYZI & selected_pt = ground_cloud->points[selected_ground_index];
       *ground_index = selected_ground_index;
       *projected_z = selected_pt.z;
       if (diagnostics != nullptr) {
@@ -430,7 +474,7 @@ bool ForwardHybridAStar::PoseToGroundIndex(
 
   point_indices.clear();
   point_squared_distances.clear();
-  if (kdtree_ground_->nearestKSearch(query, 8, point_indices, point_squared_distances) <= 0) {
+  if (ground_tree->nearestKSearch(query, 8, point_indices, point_squared_distances) <= 0) {
     if (diagnostics != nullptr) {
       diagnostics->fallback = "nearest_k_not_found";
     }
@@ -466,7 +510,7 @@ bool ForwardHybridAStar::PoseToGroundIndex(
     return false;
   }
 
-  const pcl::PointXYZI & nearest_pt = pcl_ground_->points[nearest_index];
+  const pcl::PointXYZI & nearest_pt = ground_cloud->points[nearest_index];
   if (!IsFinite(nearest_pt.z)) {
     if (diagnostics != nullptr) {
       diagnostics->fallback = "nearest_k_invalid_projected_point";
@@ -510,7 +554,7 @@ bool ForwardHybridAStar::ProjectSample(
   if (ground_index == nullptr || projected_z == nullptr) {
     return false;
   }
-  if (perception_3d_ == nullptr || pcl_ground_ == nullptr) {
+  if (!scene_.valid() && (perception_3d_ == nullptr || pcl_ground_ == nullptr)) {
     return false;
   }
 
@@ -532,13 +576,14 @@ bool ForwardHybridAStar::ProjectSample(
     return false;
   }
 
-  if (projected_ground_index >= pcl_ground_->points.size()) {
+  const auto * ground_cloud = GroundCloud();
+  if (ground_cloud == nullptr || projected_ground_index >= ground_cloud->points.size()) {
     return false;
   }
   if (!IsGroundIndexInWeightMap(projected_ground_index)) {
     return false;
   }
-  const pcl::PointXYZI & projected_pt = pcl_ground_->points[projected_ground_index];
+  const pcl::PointXYZI & projected_pt = ground_cloud->points[projected_ground_index];
   if (!IsFinite(projected_pt.x) || !IsFinite(projected_pt.y) || !IsFinite(projected_pt.z)) {
     return false;
   }
@@ -558,15 +603,21 @@ bool ForwardHybridAStar::ReadSampleDGraph(
   std::size_t ground_index,
   double * dgraph_value) const
 {
-  if (dgraph_value == nullptr || perception_3d_ == nullptr) {
+  if (dgraph_value == nullptr) {
+    return false;
+  }
+  if (!scene_.valid() && perception_3d_ == nullptr) {
     return false;
   }
 
   const auto dgraph_query_started_at = std::chrono::steady_clock::now();
-  const double dgraph =
+  const double dgraph = scene_.valid() ?
+    scene_.costView()->minDGraphValue(ground_index) :
     perception_3d_->get_min_dGraphValue(static_cast<unsigned int>(ground_index));
   g_dgraph_timing.add(ElapsedMs(dgraph_query_started_at));
-  const double inscribed_radius = perception_3d_->getGlobalUtils()->getInscribedRadius();
+  const double inscribed_radius = scene_.valid() ?
+    scene_.parameters().inscribed_radius :
+    perception_3d_->getGlobalUtils()->getInscribedRadius();
 
   if (!IsFinite(dgraph) || !IsFinite(inscribed_radius)) {
     return false;
@@ -620,11 +671,12 @@ bool ForwardHybridAStar::IsProjectedGroundTransitionValid(
   std::size_t from_ground_index,
   std::size_t to_ground_index) const
 {
-  if (pcl_ground_ == nullptr) {
+  const auto * ground_cloud = GroundCloud();
+  if (ground_cloud == nullptr) {
     return false;
   }
-  if (from_ground_index >= pcl_ground_->points.size() ||
-    to_ground_index >= pcl_ground_->points.size())
+  if (from_ground_index >= ground_cloud->points.size() ||
+    to_ground_index >= ground_cloud->points.size())
   {
     return false;
   }
@@ -637,8 +689,8 @@ bool ForwardHybridAStar::IsProjectedGroundTransitionValid(
     return false;
   }
 
-  const pcl::PointXYZI & from_pt = pcl_ground_->points[from_ground_index];
-  const pcl::PointXYZI & to_pt = pcl_ground_->points[to_ground_index];
+  const pcl::PointXYZI & from_pt = ground_cloud->points[from_ground_index];
+  const pcl::PointXYZI & to_pt = ground_cloud->points[to_ground_index];
   if (!IsFinite(from_pt.x) || !IsFinite(from_pt.y) || !IsFinite(from_pt.z) ||
     !IsFinite(to_pt.x) || !IsFinite(to_pt.y) || !IsFinite(to_pt.z))
   {
@@ -740,7 +792,8 @@ bool ForwardHybridAStar::RolloutPrimitive(
   if (primitive_result == nullptr) {
     return false;
   }
-  if (perception_3d_ == nullptr || pcl_ground_ == nullptr) {
+  const bool pinned = scene_.valid();
+  if (!pinned && (perception_3d_ == nullptr || pcl_ground_ == nullptr)) {
     return false;
   }
   if (primitive_index < 0 ||
@@ -761,13 +814,12 @@ bool ForwardHybridAStar::RolloutPrimitive(
   const double step = std::max(config_.primitive_step, 1e-3);
   const double steer = primitive_steers_[static_cast<std::size_t>(primitive_index)];
 
-  const double inscribed_radius = perception_3d_->getGlobalUtils()->getInscribedRadius();
-  const double inflation_descending_rate =
+  const double inscribed_radius = pinned ?
+    scene_.parameters().inscribed_radius :
+    perception_3d_->getGlobalUtils()->getInscribedRadius();
+  const double inflation_descending_rate = pinned ?
+    scene_.parameters().inflation_descending_rate :
     perception_3d_->getGlobalUtils()->getInflationDescendingRate();
-  const auto shared_data = perception_3d_->getSharedDataPtr();
-  if (shared_data == nullptr || shared_data->sGraph_ptr_ == nullptr) {
-    return false;
-  }
 
   double obstacle_penalty_sum = 0.0;
   double edge_penalty_sum = 0.0;
@@ -776,7 +828,8 @@ bool ForwardHybridAStar::RolloutPrimitive(
   double end_projected_z = z;
   std::size_t previous_ground_index = parent.ground_index;
 
-  if (pcl_ground_ == nullptr || previous_ground_index >= pcl_ground_->points.size()) {
+  const auto * ground_cloud = GroundCloud();
+  if (ground_cloud == nullptr || previous_ground_index >= ground_cloud->points.size()) {
     return false;
   }
 
@@ -819,13 +872,37 @@ bool ForwardHybridAStar::RolloutPrimitive(
     remaining -= ds;
   }
 
-  // Phase 2: one shared-map read guard for the projected indices only. The
-  // plugin getter recursively reacquires the same recursive mutex on this
-  // thread. RAII releases the guard on every return so map updates stay
-  // visible between primitives.
+  // Phase 2: read the pinned cost/static views only. The legacy branch keeps
+  // the original shared-map guard exactly as before.
   std::vector<double> sample_dgraph(projected_samples.size(), 0.0);
   std::vector<double> sample_edge_weight(projected_samples.size(), 0.0);
-  {
+  if (pinned) {
+    for (std::size_t i = 0; i < projected_samples.size(); ++i) {
+      const std::size_t sample_ground_index = projected_samples[i].ground_index;
+      double dgraph = 0.0;
+      if (!ReadSampleDGraph(sample_ground_index, &dgraph)) {
+        return false;
+      }
+      const double sample_edge = std::max(
+        0.0,
+        static_cast<double>(scene_.staticView()->graph().getNodeWeight(
+            static_cast<unsigned int>(sample_ground_index))));
+      if (!IsFinite(sample_edge)) {
+        return false;
+      }
+      if (config_.edge_weight_hard_reject_threshold > 0.0 &&
+        sample_edge >= config_.edge_weight_hard_reject_threshold)
+      {
+        return false;
+      }
+      sample_dgraph[i] = dgraph;
+      sample_edge_weight[i] = sample_edge;
+    }
+  } else {
+    const auto shared_data = perception_3d_->getSharedDataPtr();
+    if (shared_data == nullptr || shared_data->sGraph_ptr_ == nullptr) {
+      return false;
+    }
     const auto batch_lock_started_at = std::chrono::steady_clock::now();
     std::unique_lock<std::recursive_mutex> batch_lock(shared_data->ground_kdtree_cb_mutex_);
     g_dgraph_timing.addBatchLock(ElapsedMs(batch_lock_started_at));
@@ -1179,19 +1256,28 @@ bool ForwardHybridAStar::MakePlan(
     return false;
   }
 
-  if (perception_3d_ == nullptr || pcl_ground_ == nullptr || kdtree_ground_ == nullptr) {
+  const bool pinned = scene_.valid();
+  if (!pinned &&
+    (perception_3d_ == nullptr || pcl_ground_ == nullptr || kdtree_ground_ == nullptr))
+  {
     RCLCPP_WARN(logger_, "Hybrid A*: planner context is not ready.");
     return false;
   }
-  if (pcl_ground_->points.empty()) {
+  const auto * ground_cloud = GroundCloud();
+  if (ground_cloud == nullptr || ground_cloud->points.empty()) {
     RCLCPP_WARN(logger_, "Hybrid A*: ground point cloud is empty.");
     return false;
   }
   weight_map_size_ = 0;
-  const auto shared_data = perception_3d_->getSharedDataPtr();
-  if (shared_data != nullptr && shared_data->sGraph_ptr_ != nullptr) {
+  if (pinned) {
     weight_map_size_ =
-      static_cast<std::size_t>(shared_data->sGraph_ptr_->getNodeWeightSize());
+      static_cast<std::size_t>(scene_.staticView()->graph().nodeWeightCount());
+  } else {
+    const auto shared_data = perception_3d_->getSharedDataPtr();
+    if (shared_data != nullptr && shared_data->sGraph_ptr_ != nullptr) {
+      weight_map_size_ =
+        static_cast<std::size_t>(shared_data->sGraph_ptr_->getNodeWeightSize());
+    }
   }
   if (weight_map_size_ == 0) {
     RCLCPP_WARN(logger_, "Hybrid A*: ground weight map is empty, reject planning request.");
@@ -1324,7 +1410,7 @@ bool ForwardHybridAStar::MakePlan(
     return false;
   }
 
-  const std::size_t ground_size = pcl_ground_->points.size();
+  const std::size_t ground_size = ground_cloud->points.size();
   const std::size_t max_size = std::numeric_limits<std::size_t>::max();
   if (ground_size > max_size / heading_bin_size) {
     RCLCPP_WARN(logger_, "Hybrid A*: state space overflow.");

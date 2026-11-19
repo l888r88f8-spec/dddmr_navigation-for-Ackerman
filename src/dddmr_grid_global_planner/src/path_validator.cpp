@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/path_validator.h"
+#include "grid_global_planner/path_validator.h"
 
 #include <algorithm>
 #include <chrono>
@@ -24,9 +24,9 @@
 #include <utility>
 #include <vector>
 
-#include "dddmr_grid_global_planner/ackermann_kinematics.h"
+#include "grid_global_planner/ackermann_kinematics.h"
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -597,4 +597,4 @@ PathValidationResult PathValidator::Validate(
   return finish();
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/offline_static_map.h"
+#include "grid_global_planner/offline_static_map.h"
 
 #include <algorithm>
 #include <array>
@@ -30,13 +30,13 @@
 #include <utility>
 #include <vector>
 
-#include "dddmr_grid_global_planner/distance_field.h"
-#include "dddmr_grid_global_planner/ground_surface_reconstruction.h"
-#include "dddmr_grid_global_planner/obstacle_tile.h"
-#include "dddmr_grid_global_planner/offline_geometry.h"
-#include "dddmr_grid_global_planner/offline_surface_evidence.h"
+#include "grid_global_planner/distance_field.h"
+#include "grid_global_planner/ground_surface_reconstruction.h"
+#include "grid_global_planner/obstacle_tile.h"
+#include "grid_global_planner/offline_geometry.h"
+#include "grid_global_planner/offline_surface_evidence.h"
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -784,12 +784,13 @@ bool ComputeOwnCellResiduals(
   return !first;
 }
 
-// Checked ref-budget accumulation. `cap == 0` is rejected by option validation,
-// so subtraction is always well-defined here.
-bool AddRefBudget(
-  std::size_t * total, std::size_t count, std::size_t cap) noexcept
+// Checked size_t accumulation for persisted measurement refs. There is
+// intentionally no configured capacity; only real integer overflow fails.
+bool AddRefCount(std::size_t * total, std::size_t count) noexcept
 {
-  if (total == nullptr || *total > cap || count > cap - *total) {
+  if (total == nullptr ||
+    count > std::numeric_limits<std::size_t>::max() - *total)
+  {
     return false;
   }
   *total += count;
@@ -1136,10 +1137,6 @@ std::uint64_t HashBuildContent(
   HashSize(&hash, options.min_neighborhood_points);
   HashBool(&hash, options.mark_excessive_slope_prohibited);
   HashSize(&hash, options.max_candidate_cells);
-  HashSize(&hash, options.max_measurement_points);
-  HashSize(&hash, options.max_measurement_patches);
-  HashSize(&hash, options.max_measurement_point_refs);
-  HashSize(&hash, options.max_points_per_measurement_patch);
   HashDouble(&hash, options.ground_duplicate_tolerance_m);
   HashDouble(&hash, options.obstacle_blocking_height_m);
   HashDouble(&hash, options.obstacle_association_radius_m);
@@ -1280,28 +1277,7 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
     };
 
   // Validate every option before touching input. A bad offline profile must
-  // fail closed instead of producing a plausible-looking map. Zero memory caps
-  // are reported by key so the caller can correct the exact option.
-  if (options.max_measurement_points == 0U) {
-    return finish(
-      OfflineStaticMapStatus::kInvalidOptions,
-      "max_measurement_points must be positive");
-  }
-  if (options.max_measurement_patches == 0U) {
-    return finish(
-      OfflineStaticMapStatus::kInvalidOptions,
-      "max_measurement_patches must be positive");
-  }
-  if (options.max_measurement_point_refs == 0U) {
-    return finish(
-      OfflineStaticMapStatus::kInvalidOptions,
-      "max_measurement_point_refs must be positive");
-  }
-  if (options.max_points_per_measurement_patch == 0U) {
-    return finish(
-      OfflineStaticMapStatus::kInvalidOptions,
-      "max_points_per_measurement_patch must be positive");
-  }
+  // fail closed instead of producing a plausible-looking map.
   if (!IsValidResolution(options.resolution) ||
     !std::isfinite(options.origin_x) || !std::isfinite(options.origin_y) ||
     !std::isfinite(options.neighborhood_radius_m) ||
@@ -1324,10 +1300,6 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
     options.min_boundary_coverage > 1.0 ||
     options.min_neighborhood_points < 3U ||
     options.max_candidate_cells == 0U ||
-    options.max_measurement_points == 0U ||
-    options.max_measurement_patches == 0U ||
-    options.max_measurement_point_refs == 0U ||
-    options.max_points_per_measurement_patch == 0U ||
     !std::isfinite(options.ground_duplicate_tolerance_m) ||
     options.ground_duplicate_tolerance_m < 0.0 ||
     !std::isfinite(options.obstacle_blocking_height_m) ||
@@ -1491,14 +1463,6 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
         "global surface expansion exceeds the 16-attempt per-patch budget");
     }
   }
-  if (options.max_points_per_measurement_patch <
-    options.min_neighborhood_points)
-  {
-    return finish(
-      OfflineStaticMapStatus::kInvalidOptions,
-      "max_points_per_measurement_patch must be at least "
-      "min_neighborhood_points");
-  }
   const double halo_radius = continuous_ground_active ?
     std::max(
     options.continuous_ground.max_gap_fill_m,
@@ -1537,12 +1501,6 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
   {
     return finish_budget(
       "ground point table exceeds the uint32 index range");
-  }
-  if (ground_points.size() > options.max_measurement_points) {
-    return finish_budget(
-      "ground point count " + std::to_string(ground_points.size()) +
-      " exceeds max_measurement_points (" +
-      std::to_string(options.max_measurement_points) + ")");
   }
 
   // 1. Build the canonical finite real point table. Sorting and exact
@@ -1589,11 +1547,6 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
     legacy_expanded_radius;
   const double bin_size = std::max(
     std::max(expanded_radius, ground_context_radius), options.resolution);
-  // Temporary neighbour collection is bounded by the smaller of the point-table
-  // and stored-ref policies. Per-layer capacity is enforced separately so floors
-  // are never charged against one another.
-  const std::size_t temporary_ref_cap = std::min(
-    options.max_measurement_points, options.max_measurement_point_refs);
   std::map<std::pair<std::int64_t, std::int64_t>, std::vector<std::size_t>>
   lookup_bins;
   std::int64_t min_cell_x = std::numeric_limits<std::int64_t>::max();
@@ -1608,9 +1561,14 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
     if (!cell.has_value()) {
       continue;
     }
-    const auto bin_x = BinCoord(point.x, options.origin_x, bin_size);
-    const auto bin_y = BinCoord(point.y, options.origin_y, bin_size);
-    lookup_bins[{bin_x, bin_y}].push_back(index);
+    // Only the legacy per-cell branch consumes these coarse buckets. The
+    // continuous branch needs just the candidate span below, so it must not
+    // allocate a second index of every real point.
+    if (!continuous_ground_active) {
+      const auto bin_x = BinCoord(point.x, options.origin_x, bin_size);
+      const auto bin_y = BinCoord(point.y, options.origin_y, bin_size);
+      lookup_bins[{bin_x, bin_y}].push_back(index);
+    }
     min_cell_x = std::min(min_cell_x, cell->x);
     min_cell_y = std::min(min_cell_y, cell->y);
     max_cell_x = std::max(max_cell_x, cell->x);
@@ -1809,7 +1767,14 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
     FineCellIndex current_cell{};
     int local_layer = -1;
     bool have_cell = false;
-    for (const ContinuousSurfaceCell & cell : continuous_cells) {
+    for (ContinuousSurfaceCell & cell : continuous_cells) {
+      // Consume this cell's temporary index vectors in place. A cell that
+      // cannot be published releases them immediately; a published cell moves
+      // them into the persistent patch instead of making another copy.
+      const auto release_cell_indices = [&cell]() {
+          std::vector<std::uint32_t>().swap(cell.point_indices);
+          std::vector<std::uint32_t>().swap(cell.inlier_indices);
+        };
       if (!have_cell || !(cell.cell == current_cell)) {
         current_cell = cell.cell;
         local_layer = 0;
@@ -1826,38 +1791,37 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
         !raw_normal.IsFinite() || !std::isfinite(normal_length) ||
         std::fabs(normal_length - 1.0) > 1.0e-6 || !(raw_normal.z > kEpsilon))
       {
+        release_cell_indices();
         continue;
       }
       const double raw_center_z = raw_centroid.z -
         (raw_normal.x * (cell_center.x - raw_centroid.x) +
         raw_normal.y * (cell_center.y - raw_centroid.y)) / raw_normal.z;
       if (!std::isfinite(raw_center_z)) {
+        release_cell_indices();
         continue;
       }
-      std::vector<std::uint32_t> refs = cell.point_indices;
+      std::vector<std::uint32_t> refs = std::move(cell.point_indices);
       std::sort(refs.begin(), refs.end());
       refs.erase(std::unique(refs.begin(), refs.end()), refs.end());
-      // The module already capped the refs it fitted. Never truncate persisted
-      // provenance here: doing so would make patch.fit disagree with the plane
-      // and RMS that were actually fitted. Fail the budget before mutation.
-      if (refs.size() > options.max_points_per_measurement_patch) {
-        return finish_budget(
-          "continuous ground cell refs reached "
-          "max_points_per_measurement_patch (" +
-          std::to_string(options.max_points_per_measurement_patch) + ")");
-      }
+      // Never truncate persisted provenance: patch.fit must agree with the
+      // plane and RMS that were actually fitted.
       if (refs.size() < 4U) {
+        release_cell_indices();
         continue;
       }
-      std::vector<std::uint32_t> inliers;
-      for (const std::uint32_t index : cell.inlier_indices) {
+      std::vector<std::uint32_t> inliers = std::move(cell.inlier_indices);
+      std::size_t kept_inliers = 0U;
+      for (const std::uint32_t index : inliers) {
         if (std::binary_search(refs.begin(), refs.end(), index)) {
-          inliers.push_back(index);
+          inliers[kept_inliers++] = index;
         }
       }
+      inliers.resize(kept_inliers);
       std::sort(inliers.begin(), inliers.end());
       inliers.erase(std::unique(inliers.begin(), inliers.end()), inliers.end());
       if (inliers.size() < 4U) {
+        release_cell_indices();
         continue;
       }
       ContinuousFitStats ref_stats;
@@ -1867,6 +1831,7 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
         !ComputeContinuousFitStats(
           finite_ground, inliers, raw_centroid, raw_normal, &inlier_stats))
       {
+        release_cell_indices();
         continue;
       }
       // Actual measured seed-cell count, not a display/validator-shaped cap.
@@ -1883,12 +1848,14 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
             cell.shared_corners, cell_center, &derived_centroid,
             &derived_normal))
         {
+          release_cell_indices();
           continue;
         }
         if (std::atan2(
             std::hypot(derived_normal.x, derived_normal.y),
             derived_normal.z) > options.max_slope_rad + kEpsilon)
         {
+          release_cell_indices();
           continue;
         }
         node_centroid = derived_centroid;
@@ -1899,6 +1866,7 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
       if (!ComputeContinuousFitStats(
           finite_ground, inliers, node_centroid, node_normal, &node_stats))
       {
+        release_cell_indices();
         continue;
       }
       std::vector<std::uint32_t> own_indices;
@@ -1909,34 +1877,6 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
         if (point_cell.has_value() && *point_cell == cell.cell) {
           own_indices.push_back(index);
         }
-      }
-      if (nodes.size() >= options.max_measurement_patches ||
-        patches.size() >= options.max_measurement_patches)
-      {
-        return finish_budget(
-          "measurement nodes/patches reached max_measurement_patches (" +
-          std::to_string(options.max_measurement_patches) + ")");
-      }
-      // Exact persisted ref cost for this branch: base refs + fit refs + fit
-      // inliers + own-cell refs. The inliers vector is stored and must be
-      // charged; no fitted ref is silently dropped.
-      std::size_t continuous_refs = result.metrics.measurement_point_refs;
-      if (!AddRefBudget(
-          &continuous_refs, refs.size(),
-          options.max_measurement_point_refs) ||
-        !AddRefBudget(
-          &continuous_refs, refs.size(),
-          options.max_measurement_point_refs) ||
-        !AddRefBudget(
-          &continuous_refs, inliers.size(),
-          options.max_measurement_point_refs) ||
-        !AddRefBudget(
-          &continuous_refs, own_indices.size(),
-          options.max_measurement_point_refs))
-      {
-        return finish_budget(
-          "continuous ground refs exceed max_measurement_point_refs (" +
-          std::to_string(options.max_measurement_point_refs) + ")");
       }
       SurfaceReconstructionEvidence evidence;
       evidence.attempted = true;
@@ -2006,11 +1946,7 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
       patch.id = next_patch_id++;
       patch.cell = cell.cell;
       patch.local_layer_index = local_layer;
-      patch.base_point_indices = refs;
-      patch.base_sample_count = refs.size();
       patch.fit.radius_m = options.continuous_ground.regional_radius_m;
-      patch.fit.point_indices = refs;
-      patch.fit.inlier_indices = inliers;
       patch.fit.plane_valid = true;
       patch.fit.centroid = raw_centroid;
       patch.fit.normal = raw_normal;
@@ -2033,8 +1969,6 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
       patch.fit.max_raised_m = ref_stats.max_raised;
       patch.fit.raised_conflict_sample_count = 0U;
       patch.fit.conflict_point = finite_ground[ref_stats.conflict_index];
-      patch.own_cell_point_indices = own_indices;
-      patch.own_cell_sample_count = own_indices.size();
       if (!own_indices.empty()) {
         ContinuousFitStats own_stats;
         if (ComputeContinuousFitStats(
@@ -2060,12 +1994,32 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
         patch.z_min = std::min(patch.z_min, finite_ground[index].z);
         patch.z_max = std::max(patch.z_max, finite_ground[index].z);
       }
+      // base_point_indices and fit.point_indices are distinct evidence
+      // semantics, so one copy of the fitted refs remains required. Everything
+      // else is moved out of the consumed cell's temporaries.
+      const std::size_t base_ref_count = refs.size();
+      const std::size_t inlier_ref_count = inliers.size();
+      const std::size_t own_ref_count = own_indices.size();
+      std::size_t total_refs = result.metrics.measurement_point_refs;
+      if (!AddRefCount(&total_refs, base_ref_count) ||
+        !AddRefCount(&total_refs, base_ref_count) ||
+        !AddRefCount(&total_refs, inlier_ref_count) ||
+        !AddRefCount(&total_refs, own_ref_count))
+      {
+        return finish_budget("measurement point refs overflow size_t");
+      }
+      patch.base_point_indices = std::move(refs);
+      patch.base_sample_count = base_ref_count;
+      patch.fit.point_indices = patch.base_point_indices;
+      patch.fit.inlier_indices = std::move(inliers);
+      patch.own_cell_point_indices = std::move(own_indices);
+      patch.own_cell_sample_count = own_ref_count;
       patch.status = MeasurementPatchStatus::kSupported;
       patch.reason = MeasurementRejectionReason::kNone;
       patch.node_id = node.id;
       patch.surface_reconstruction = evidence;
 
-      result.metrics.measurement_point_refs = continuous_refs;
+      result.metrics.measurement_point_refs = total_refs;
       ++result.metrics.accepted_nodes;
       nodes.push_back(std::move(node));
       patches.push_back(std::move(patch));
@@ -2101,11 +2055,6 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
               if (std::hypot(point.x - center.x, point.y - center.y) <=
                 options.neighborhood_radius_m + kEpsilon)
               {
-                if (neighbors.size() >= temporary_ref_cap) {
-                  return finish_budget(
-                    "neighbourhood refs reached the temporary budget (" +
-                    std::to_string(temporary_ref_cap) + ")");
-                }
                 neighbors.push_back(static_cast<std::uint32_t>(index));
               }
             }
@@ -2125,21 +2074,6 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
         {
           const std::vector<std::uint32_t> & layer = layers[layer_index];
           ++result.metrics.candidate_layers;
-          // Per-patch capacity belongs to one actual measured layer, not the
-          // aggregate of different floors in this XY neighbourhood.
-          if (layer.size() > options.max_points_per_measurement_patch) {
-            return finish_budget(
-              "layer refs reached max_points_per_measurement_patch (" +
-              std::to_string(
-                options.max_points_per_measurement_patch) + ")");
-          }
-          // This layer is a real additional patch; reject here rather than while
-          // visiting a later empty halo cell.
-          if (patches.size() >= options.max_measurement_patches) {
-            return finish_budget(
-              "measurement patches reached max_measurement_patches (" +
-              std::to_string(options.max_measurement_patches) + ")");
-          }
 
           std::size_t base_own_count = 0U;
           for (const std::uint32_t index : layer) {
@@ -2149,25 +2083,6 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
             if (point_cell.has_value() && *point_cell == cell) {
               ++base_own_count;
             }
-          }
-          // Preflight only the known minimum persisted cost (base refs, the
-          // selected-fit refs that are at least the base refs, and own refs).
-          // Inliers are temporary until the exact post-evaluation check.
-          std::size_t base_preflight = result.metrics.measurement_point_refs;
-          const bool base_budget_ok =
-            AddRefBudget(
-            &base_preflight, layer.size(),
-            options.max_measurement_point_refs) &&
-            AddRefBudget(
-            &base_preflight, layer.size(),
-            options.max_measurement_point_refs) &&
-            AddRefBudget(
-            &base_preflight, base_own_count,
-            options.max_measurement_point_refs);
-          if (!base_budget_ok) {
-            return finish_budget(
-              "measurement point refs exceed max_measurement_point_refs (" +
-              std::to_string(options.max_measurement_point_refs) + ")");
           }
 
           SurfaceAttempt base_attempt = EvaluateSurfaceAttempt(
@@ -2237,11 +2152,6 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
                       point.x - center.x,
                       point.y - center.y) <= ground_context_radius + kEpsilon)
                   {
-                    if (context_neighbors.size() >= temporary_ref_cap) {
-                      return finish_budget(
-                        "context neighbourhood refs reached the temporary "
-                        "budget (" + std::to_string(temporary_ref_cap) + ")");
-                    }
                     context_neighbors.push_back(
                       static_cast<std::uint32_t>(index));
                   }
@@ -2297,36 +2207,6 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
               const bool selected_same_floor = SelectExpandedSameFloorLayer(
                 finite_ground, layer, layers, layer_index, radius_refs,
                 options, &expanded_selected, &selection_reason);
-              if (expanded_selected.size() >
-                options.max_points_per_measurement_patch)
-              {
-                return finish_budget(
-                  "context layer refs reached "
-                  "max_points_per_measurement_patch (" +
-                  std::to_string(
-                    options.max_points_per_measurement_patch) + ")");
-              }
-              std::size_t context_preflight =
-                result.metrics.measurement_point_refs;
-              const bool context_budget_ok =
-                AddRefBudget(
-                &context_preflight, layer.size(),
-                options.max_measurement_point_refs) &&
-                AddRefBudget(
-                &context_preflight, layer.size(),
-                options.max_measurement_point_refs) &&
-                AddRefBudget(
-                &context_preflight, base_own_count,
-                options.max_measurement_point_refs) &&
-                AddRefBudget(
-                &context_preflight, expanded_selected.size(),
-                options.max_measurement_point_refs);
-              if (!context_budget_ok) {
-                return finish_budget(
-                  "context measurement refs exceed "
-                  "max_measurement_point_refs (" +
-                  std::to_string(options.max_measurement_point_refs) + ")");
-              }
               expansion_attempt = EvaluateSurfaceAttempt(
                 finite_ground, expanded_selected, center, cell, options);
               expansion_attempted = true;
@@ -2410,11 +2290,6 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
                       point.x - center.x,
                       point.y - center.y) <= expanded_radius + kEpsilon)
                   {
-                    if (expanded_neighbors.size() >= temporary_ref_cap) {
-                      return finish_budget(
-                        "expanded neighbourhood refs reached the temporary "
-                        "budget (" + std::to_string(temporary_ref_cap) + ")");
-                    }
                     expanded_neighbors.push_back(
                       static_cast<std::uint32_t>(index));
                   }
@@ -2464,40 +2339,6 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
               const bool selected_same_floor = SelectExpandedSameFloorLayer(
                 finite_ground, layer, layers, layer_index, radius_refs,
                 options, &expanded_selected, &selection_reason);
-              if (expanded_selected.size() >
-                options.max_points_per_measurement_patch)
-              {
-                return finish_budget(
-                  "expanded layer refs reached "
-                  "max_points_per_measurement_patch (" +
-                  std::to_string(
-                    options.max_points_per_measurement_patch) + ")");
-              }
-              // The known minimum after this attempt adds the base/fit/own set
-              // plus the actual attempt refs. Inliers and the expanded fit copy
-              // are checked exactly after evaluation, before persistent vectors
-              // are copied.
-              std::size_t expansion_preflight =
-                result.metrics.measurement_point_refs;
-              const bool expansion_budget_ok =
-                AddRefBudget(
-                &expansion_preflight, layer.size(),
-                options.max_measurement_point_refs) &&
-                AddRefBudget(
-                &expansion_preflight, layer.size(),
-                options.max_measurement_point_refs) &&
-                AddRefBudget(
-                &expansion_preflight, base_own_count,
-                options.max_measurement_point_refs) &&
-                AddRefBudget(
-                &expansion_preflight, expanded_selected.size(),
-                options.max_measurement_point_refs);
-              if (!expansion_budget_ok) {
-                return finish_budget(
-                  "expanded measurement refs exceed "
-                  "max_measurement_point_refs (" +
-                  std::to_string(options.max_measurement_point_refs) + ")");
-              }
               expansion_attempt = EvaluateSurfaceAttempt(
                 finite_ground, expanded_selected, center, cell, options);
               expansion_attempted = true;
@@ -2558,36 +2399,20 @@ OfflineStaticMapResult BuildOfflineStaticMapImpl(
           // Exact stored-ref cost, including duplicated base/fit/own vectors and
           // any failed expansion attempt. This runs before copying into a patch.
           std::size_t patch_refs = 0U;
-          bool patch_budget_ok =
-            AddRefBudget(
-            &patch_refs, layer.size(),
-            options.max_measurement_point_refs) &&
-            AddRefBudget(
-            &patch_refs, selected_attempt.point_indices.size(),
-            options.max_measurement_point_refs) &&
-            AddRefBudget(
-            &patch_refs, selected_attempt.inlier_indices.size(),
-            options.max_measurement_point_refs) &&
-            AddRefBudget(
-            &patch_refs, base_attempt.own_cell_indices.size(),
-            options.max_measurement_point_refs);
+          bool patch_refs_ok =
+            AddRefCount(&patch_refs, layer.size()) &&
+            AddRefCount(&patch_refs, selected_attempt.point_indices.size()) &&
+            AddRefCount(&patch_refs, selected_attempt.inlier_indices.size()) &&
+            AddRefCount(&patch_refs, base_attempt.own_cell_indices.size());
           if (expansion_attempted) {
-            patch_budget_ok = patch_budget_ok &&
-              AddRefBudget(
-              &patch_refs, expansion_attempt.point_indices.size(),
-              options.max_measurement_point_refs) &&
-              AddRefBudget(
-              &patch_refs, expansion_attempt.inlier_indices.size(),
-              options.max_measurement_point_refs);
+            patch_refs_ok = patch_refs_ok &&
+              AddRefCount(&patch_refs, expansion_attempt.point_indices.size()) &&
+              AddRefCount(&patch_refs, expansion_attempt.inlier_indices.size());
           }
           std::size_t total_refs = result.metrics.measurement_point_refs;
-          patch_budget_ok = patch_budget_ok &&
-            AddRefBudget(
-            &total_refs, patch_refs, options.max_measurement_point_refs);
-          if (!patch_budget_ok) {
-            return finish_budget(
-              "measurement point refs exceed max_measurement_point_refs (" +
-              std::to_string(options.max_measurement_point_refs) + ")");
+          patch_refs_ok = patch_refs_ok && AddRefCount(&total_refs, patch_refs);
+          if (!patch_refs_ok) {
+            return finish_budget("measurement point refs overflow size_t");
           }
 
           MeasurementPatch patch;
@@ -3543,4 +3368,4 @@ OfflineStaticMapResult BuildOfflineGlobalCloudMap(
   }
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

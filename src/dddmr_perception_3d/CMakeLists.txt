@@ -98,12 +98,22 @@ add_library(perception_snapshot SHARED
   src/perception_snapshot.cpp
 )
 
+# Immutable unified scene envelope and owned legacy static/cost views.
+add_library(scene_snapshot SHARED
+  src/scene_snapshot.cpp
+)
+target_link_libraries(scene_snapshot
+  perception_snapshot
+  ${PCL_LIBRARIES}
+)
+
 # stacked_perception
 add_library(stacked_perception SHARED
   src/stacked_perception.cpp
 )
 target_link_libraries(stacked_perception
   perception_snapshot
+  scene_snapshot
   perception_sensor
 )
 ament_target_dependencies(stacked_perception
@@ -213,6 +223,7 @@ install(TARGETS
   shared_data_sensor
   perception_sensor
   perception_snapshot
+  scene_snapshot
   stacked_perception
   stacked_perception_ros
   depth_camera_buffer
@@ -250,7 +261,7 @@ install(FILES perception_3d_plugins.xml
 )
 
 ament_export_include_directories(include)
-ament_export_libraries(shared_data_sensor perception_sensor perception_snapshot stacked_perception stacked_perception_ros cluster_marking ground_surface_filter cloud_preprocessor depth_camera_buffer layers)
+ament_export_libraries(shared_data_sensor perception_sensor perception_snapshot scene_snapshot stacked_perception stacked_perception_ros cluster_marking ground_surface_filter cloud_preprocessor depth_camera_buffer layers)
 ament_export_dependencies(${dependencies})
 pluginlib_export_plugin_description_file(perception_3d perception_3d_plugins.xml)
 
@@ -261,6 +272,16 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_perception_snapshot test/test_perception_snapshot.cpp)
   target_link_libraries(test_perception_snapshot perception_snapshot)
+
+  ament_add_gtest(test_scene_snapshot test/test_scene_snapshot.cpp)
+  target_link_libraries(test_scene_snapshot
+    scene_snapshot
+    stacked_perception
+    perception_sensor
+    perception_snapshot
+    shared_data_sensor
+    ${PCL_LIBRARIES})
+  ament_target_dependencies(test_scene_snapshot ${dependencies})
 
   # Narrow map-only export regression: StaticLayer has no per-plugin observation
   # for the map source, so the export path must use the ready shared map.
@@ -280,6 +301,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_preprocessed_lidar test/test_preprocessed_lidar.cpp)
   target_link_libraries(test_preprocessed_lidar layers cloud_preprocessor ${PCL_LIBRARIES})
   ament_target_dependencies(test_preprocessed_lidar ${dependencies})
+
+  ament_add_gtest(test_global_lidar_export test/test_global_lidar_export.cpp)
+  target_link_libraries(test_global_lidar_export layers cloud_preprocessor ${PCL_LIBRARIES})
+  ament_target_dependencies(test_global_lidar_export ${dependencies})
 
   ament_add_gtest(test_parameter_utils test/test_parameter_utils.cpp)
   ament_target_dependencies(test_parameter_utils ${dependencies})

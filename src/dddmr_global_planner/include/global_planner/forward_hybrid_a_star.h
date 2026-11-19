@@ -8,6 +8,8 @@
 #include <pcl/point_types.h>
 #include <rclcpp/rclcpp.hpp>
 
+#include <global_planner/scene_pipeline.h>
+
 #include <perception_3d/perception_3d_ros.h>
 
 #include <cstddef>
@@ -102,6 +104,17 @@ public:
 
   void SetConfig(const Config & config);
   void SetGlobalFrame(const std::string & global_frame);
+
+  /*
+  Pin the same immutable scene views used by the graph/pre-graph route for this
+  request. A failed pin is a hard refusal for hybrid planning; it never falls
+  back to live SharedData/get_min_dGraphValue() reads.
+  */
+  bool SetSceneSnapshot(
+    const ScenePipelineContext & scene,
+    std::string * rejection_reason = nullptr);
+  void ClearSceneSnapshot();
+  bool hasSceneSnapshot() const noexcept {return scene_.valid();}
 
   bool MakePlan(
     const geometry_msgs::msg::PoseStamped & start,
@@ -269,9 +282,15 @@ private:
   const NodeRecord * FindNode(std::size_t state_id) const;
   NodeRecord * FindNode(std::size_t state_id);
 
+  // Pinned-scene or legacy source selection. The pinned branch never touches
+  // live perception storage.
+  const pcl::PointCloud<pcl::PointXYZI> * GroundCloud() const;
+  std::shared_ptr<const pcl::KdTreeFLANN<pcl::PointXYZI>> GroundTree() const;
+
   std::shared_ptr<perception_3d::Perception3D_ROS> perception_3d_;
   pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_ground_;
   pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr kdtree_ground_;
+  ScenePipelineContext scene_;
 
   rclcpp::Logger logger_;
   std::string global_frame_;

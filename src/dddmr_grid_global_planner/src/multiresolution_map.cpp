@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/multiresolution_map.h"
+#include "grid_global_planner/multiresolution_map.h"
 
 #include <algorithm>
 #include <cmath>
@@ -27,9 +27,9 @@
 #include <utility>
 #include <vector>
 
-#include "dddmr_grid_global_planner/distance_field.h"
+#include "grid_global_planner/distance_field.h"
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -1115,4 +1115,4 @@ const char * CoarseBuildStatusToString(CoarseBuildStatus status) noexcept
   return "unknown";
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

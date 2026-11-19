@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/plan_commit_delivery.h"
+#include "grid_global_planner/plan_commit_delivery.h"
 
 #include <exception>
 #include <memory>
@@ -20,7 +20,7 @@
 #include <string>
 #include <utility>
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 
 const char * PlanJobPhaseToString(PlanJobPhase phase) noexcept
@@ -486,4 +486,4 @@ bool PlanCommitDelivery::PublishPathIfCurrent(
   return true;
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

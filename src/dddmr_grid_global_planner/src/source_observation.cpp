@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/source_observation.h"
+#include "grid_global_planner/source_observation.h"
 
 #include <algorithm>
 #include <cmath>
@@ -20,7 +20,7 @@
 #include <string>
 #include <utility>
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -176,4 +176,4 @@ const char * SourceUpdateKindToString(SourceUpdateKind kind) noexcept
   return "unknown";
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

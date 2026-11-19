@@ -246,6 +246,10 @@ bool MppiDirectedRetreat::search(
      (distance(start, search_->start) > kSearchStartResetDistance ||
       std::abs(angle(start.yaw - search_->start.yaw)) > kSearchStartResetYaw))
   {
+    // Evidence: a restart here discards every expansion already paid for and
+    // restarts the scan from the first root, which is the only way a sliced
+    // search can fail to converge while the vehicle is moving.
+    ++search_restarts_;
     search_.reset();
   }
   if(!search_){
@@ -338,6 +342,7 @@ bool MppiDirectedRetreat::search(
   while(state.initial_arc < 5){
     if(deadline.expired()){
       reason_ = "search_in_progress";
+      last_search_expansions_ = state.expansions;
       return false;
     }
     if(state.initial_step == 0){
@@ -385,6 +390,7 @@ bool MppiDirectedRetreat::search(
     else{
       if(deadline.expired()){
         reason_ = "search_in_progress";
+        last_search_expansions_ = state.expansions;
         return false;
       }
       index = state.open.top().index;
@@ -415,6 +421,7 @@ bool MppiDirectedRetreat::search(
         state.nodes[static_cast<std::size_t>(index)].next_edge = edge;
         state.expanding = index;
         reason_ = "search_in_progress";
+        last_search_expansions_ = state.expansions;
         return false;
       }
       const double k = curvatures[edge];
@@ -451,6 +458,7 @@ bool MppiDirectedRetreat::search(
   if(found < 0){
     reason_ = state.expansions >= kSearchMaxExpansions ?
       "search_budget_exhausted" : "no_complete_bypass";
+    last_search_expansions_ = state.expansions;
     search_.reset();
     return false;
   }
@@ -492,6 +500,8 @@ bool MppiDirectedRetreat::search(
   direction_ = reverse_yaw > 1e-3 ? 1 : (reverse_yaw < -1e-3 ? -1 : 0);
   anchor_ = state.start;
   reconnect_goal_ = state.goal;
+  last_search_expansions_ = state.expansions;
+  ++routes_selected_;
   search_.reset();
   progress_ = 0;
   phase_ = Phase::Reverse;

@@ -1,0 +1,62 @@
+# 静态地图发布与离线演示辅助参数，由 path_planning_on_static_layer.launch.py 加载。
+# pcl_publisher 发布的点云是规划器建图输入；其余节点用于显示和 RViz 交互。
+# 文件路径只由 launch 的 map_path 传入，ground_down_sample=0 保留地面原始密度。
+pcl_publisher:
+  ros__parameters:
+    # map_topic/ground_topic 由 launch 从主 YAML 公共段注入。
+    map_rotate_around_x: 0.0                                       # 地图输入变换：旋转（rad）、平移（m）；地面组同理。
+    map_rotate_around_y: 0.0                                       # 全局点云绕 Y 轴旋转（rad）。
+    map_rotate_around_z: 0.0                                       # 全局点云绕 Z 轴旋转（rad）。
+    map_translate_x: 0.0                                           # 全局点云沿 X 轴平移（m）。
+    map_translate_y: 0.0                                           # 全局点云沿 Y 轴平移（m）。
+    map_translate_z: 0.0                                           # 全局点云沿 Z 轴平移（m）。
+    ground_rotate_around_x: 0.0                                    # 地面点云绕 X 轴旋转（rad）。
+    ground_rotate_around_y: 0.0                                    # 地面点云绕 Y 轴旋转（rad）。
+    ground_rotate_around_z: 0.0                                    # 地面点云绕 Z 轴旋转（rad）。
+    ground_translate_x: 0.0                                        # 地面点云沿 X 轴平移（m）。
+    ground_translate_y: 0.0                                        # 地面点云沿 Y 轴平移（m）。
+    ground_translate_z: 0.0                                        # 地面点云沿 Z 轴平移（m）。
+
+    map_down_sample: 0.3                                           # 完整地图降采样（m）；0 表示不降采样。
+    ground_down_sample: 0.0                                        # 地面输入降采样体素尺寸（m）；0 保留原始密度。
+
+# 仅显示用的静态 TF 辅助节点；launch 将其重命名为 map2baselink。
+# 固定位姿由 launch 的 Node.arguments 提供（x=3.0,y=0.1,z=-0.5,rpy=0）。
+# 父/子坐标系由 launch 从 grid_global_planner.yaml 的公共
+# global_frame / robot_base_frame 读取后，以 --frame-id / --child-frame-id 传入。
+map2baselink:
+  ros__parameters:
+    use_sim_time: false                                           # 时钟由 launch 的 use_sim 参数覆盖。
+
+# RViz 点击 -> /get_plan 桥接；start/goal z 默认固定 -0.5m，与显示 TF 一致。
+# height mode=fixed 使用 *_fixed_z_m；click 保留 RViz 给出的 z；桥接器不从地形/TF 推断 z。
+grid_rviz_bridge:
+  ros__parameters:
+    action_name: /get_plan                                         # 离线演示请求的全局规划 action。
+    start_topic: /grid_global_planner/rviz_start             # RViz 输入/输出话题（绝对路径）。
+    goal_topic: /grid_global_planner/rviz_goal               # RViz 终点输入话题。
+    marker_topic: /grid_global_planner/rviz_markers          # 起终点标记输出话题。
+    path_topic: /grid_global_planner/rviz_path               # 演示路径显示话题。
+
+    start_height_mode: fixed                                       # 起点/终点高度策略与固定 z（m）。
+    start_fixed_z_m: -0.5                                          # fixed 模式的起点基准高度（m）。
+    goal_height_mode: fixed                                        # 终点高度来源：fixed 使用固定值，click 使用点击值。
+    goal_fixed_z_m: -0.5                                           # fixed 模式的终点基准高度（m）。
+
+    require_start: true                                            # 起点要求；false 时走规划器空起点 TF 回退，非默认。
+
+    submission_timeout_sec: 30.0                                   # 提交/目标/取消/重试/状态日志时限（s）；超时 fail-closed。
+    goal_timeout_sec: 60.0                                         # 规划目标的等待时限（s）。
+    cancel_grace_sec: 10.0                                         # 请求取消后的宽限时长（s）。
+    retry_delay_sec: 0.5                                           # 规划请求重试间隔（s）。
+    status_log_period_sec: 5.0                                     # 状态日志输出间隔（s）。
+
+    marker_z_offset_m: 0.05                                        # 显示标记 z 偏移（m）、尺寸（m）与警告寿命（s）。
+    marker_scale_m: 0.8                                            # 起终点标记尺寸（m）。
+    warning_lifetime_sec: 5.0                                      # 警告标记的显示时长（s）。
+
+# RViz 布局读取 rviz/grid_global_planner.rviz；launch 最后传入 bool use_sim_time。
+# 本段只用于读取该节点时的自描述。
+rviz2:
+  ros__parameters:
+    use_sim_time: false                                            # 由 launch 的 use_sim 参数覆盖。

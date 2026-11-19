@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/offline_geometry.h"
+#include "grid_global_planner/offline_geometry.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <utility>
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace offline_geometry
 {
@@ -502,4 +502,4 @@ EdgeEvaluation EvaluateEdgeSupport(
 }
 
 }  // namespace offline_geometry
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

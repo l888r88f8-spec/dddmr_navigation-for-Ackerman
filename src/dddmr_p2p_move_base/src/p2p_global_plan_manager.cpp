@@ -465,6 +465,12 @@ void P2PGlobalPlanManager::queryThread(){
     }
 
     goal_msg.goal = goal_;
+    // The goal pose is a one-shot operator request, not a sensor observation.
+    // The grid planner validates request stamps against its sensor-age limit,
+    // so re-sending the original click timestamp makes every replan after a
+    // couple of seconds fail as "sensor stamp is stale" and publish an empty
+    // path. Re-stamp at request time; the pose itself is unchanged.
+    goal_msg.goal.header.stamp = this->clock_->now();
     goal_msg.activate_threading = true;
     goal_seq = goal_seq_;
     request_id = ++next_route_request_id_;

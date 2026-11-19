@@ -30,6 +30,7 @@
 */
 #include <perception_3d/static_layer.h>
 #include <perception_3d/parameter_utils.h>
+#include <perception_3d/scene_snapshot.h>
 
 PLUGINLIB_EXPORT_CLASS(perception_3d::StaticLayer, perception_3d::Sensor)
 
@@ -177,12 +178,21 @@ void StaticLayer::cbMap(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
     return;
   }
 
+  const std::string content_frame = gbl_utils_ ?
+    gbl_utils_->getGblFrame() : msg->header.frame_id;
+  const std::uint64_t map_hash =
+    ComputePointCloudContentHash(*incoming_map, content_frame);
+  const bool map_changed =
+    map_hash != last_map_content_hash_ ||
+    shared_data_->static_map_size_ != incoming_map->points.size();
+
   pcl_map_ = incoming_map;
 
-  if(shared_data_->static_map_size_!=pcl_map_->points.size()){
+  if(map_changed){
     new_map_ = true;
     RCLCPP_WARN(node_->get_logger().get_child(name_), "%s receive new \033[1;32mMap\033[0m with size: %lu", name_.c_str(), pcl_map_->points.size());
   }
+  last_map_content_hash_ = map_hash;
   shared_data_->static_map_size_ = pcl_map_->points.size();
   shared_data_->kdtree_map_.reset(new pcl::KdTreeFLANN<pcl::PointXYZI>());
   shared_data_->kdtree_map_->setInputCloud(pcl_map_);
@@ -210,10 +220,19 @@ void StaticLayer::cbGround(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
       name_.c_str(), incoming_ground->points.size(), pcl_ground_->points.size());
   }
 
-  if(shared_data_->static_ground_size_!=pcl_ground_->points.size()){
+  const std::string content_frame = gbl_utils_ ?
+    gbl_utils_->getGblFrame() : msg->header.frame_id;
+  const std::uint64_t ground_hash =
+    ComputePointCloudContentHash(*pcl_ground_, content_frame);
+  const bool ground_changed =
+    ground_hash != last_ground_content_hash_ ||
+    shared_data_->static_ground_size_ != pcl_ground_->points.size();
+
+  if(ground_changed){
     new_ground_ = true;
     RCLCPP_WARN(node_->get_logger().get_child(name_), "%s receive new \033[1;32mGround\033[0m with size: %lu", name_.c_str(), pcl_ground_->points.size());
   }  
+  last_ground_content_hash_ = ground_hash;
   shared_data_->static_ground_size_ = pcl_ground_->points.size();
   shared_data_->kdtree_ground_.reset(new pcl::KdTreeFLANN<pcl::PointXYZI>());
   shared_data_->kdtree_ground_->setInputCloud(pcl_ground_);
@@ -251,9 +270,11 @@ void StaticLayer::selfMark(){
 void StaticLayer::selfClear(){
 
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
-  if(new_ground_ && new_map_){
+  const bool have_both =
+    pcl_ground_ && pcl_map_ && !pcl_ground_->empty() && !pcl_map_->empty();
+  if(have_both && (new_ground_ || new_map_)){
 
-    RCLCPP_WARN(node_->get_logger().get_child(name_), "%s has already received two msg.", name_.c_str());
+    RCLCPP_WARN(node_->get_logger().get_child(name_), "%s has accepted a complete static map/ground pair.", name_.c_str());
     shared_data_->requestAllLayersToResetDGraph();
 
     shared_data_->dgraph_update_request_[name_] = false;
@@ -269,7 +290,29 @@ void StaticLayer::selfClear(){
       generateStaticGraph();
       RCLCPP_INFO(node_->get_logger().get_child(name_), "Static graph is generated with graph size: %lu", shared_data_->sGraph_ptr_->getSize());
     }
-      
+
+    //@ Freeze the accepted source identity only after the graph/weights have
+    //@ been rebuilt from this exact map/ground pair. The content fingerprint
+    //@ includes frame/order/count, so a same-size replacement is a new revision.
+    const std::string content_frame = gbl_utils_ ?
+      gbl_utils_->getGblFrame() : std::string();
+    const std::uint64_t content_hash =
+      ComputeStaticContentHash(*pcl_ground_, *pcl_map_, content_frame);
+    const bool identity_changed =
+      !shared_data_->source_map_identity_known_ ||
+      content_hash != shared_data_->source_map_content_hash_ ||
+      content_frame != shared_data_->source_map_frame_id_ ||
+      shared_data_->source_map_ground_count_ != pcl_ground_->points.size() ||
+      shared_data_->source_map_map_count_ != pcl_map_->points.size();
+    if(identity_changed){
+      shared_data_->source_map_revision_ += 1;
+      shared_data_->source_map_content_hash_ = content_hash;
+      shared_data_->source_map_frame_id_ = content_frame;
+      shared_data_->source_map_ground_count_ = pcl_ground_->points.size();
+      shared_data_->source_map_map_count_ = pcl_map_->points.size();
+      shared_data_->source_map_identity_known_ = true;
+    }
+
     shared_data_->is_static_layer_ready_ = true;
     is_ground_and_map_being_initialized_once_ = true;
   }

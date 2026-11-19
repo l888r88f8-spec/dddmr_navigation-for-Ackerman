@@ -18,9 +18,9 @@
 #include <string>
 #include <vector>
 
-#include "dddmr_grid_global_planner/terrain_types.h"
+#include "grid_global_planner/terrain_types.h"
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 
 // Loads the x/y/z fields from one PCD file into the ROS-independent point type.
@@ -37,6 +37,6 @@ bool LoadOfflinePcdPoints(
   std::vector<Point3> * points,
   std::string * detail);
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner
 
 #endif  // OFFLINE_PCD_LOADER_H_

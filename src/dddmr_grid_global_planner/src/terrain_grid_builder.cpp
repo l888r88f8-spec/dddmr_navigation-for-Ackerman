@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/terrain_grid_builder.h"
+#include "grid_global_planner/terrain_grid_builder.h"
 
-#include "dddmr_grid_global_planner/continuous_ground_surface.h"
+#include "grid_global_planner/continuous_ground_surface.h"
 
 #include <algorithm>
 #include <array>
@@ -26,7 +26,7 @@
 #include <unordered_map>
 #include <utility>
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -1443,4 +1443,4 @@ const char * TerrainBuildStatusToString(TerrainBuildStatus status) noexcept
   return "unknown";
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

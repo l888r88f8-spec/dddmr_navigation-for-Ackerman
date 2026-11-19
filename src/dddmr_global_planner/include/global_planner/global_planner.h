@@ -53,6 +53,7 @@ type edge_t is inside here
 #include <global_planner/a_star_on_pc.h>
 #include <global_planner/a_star_on_pre_graph.h>
 #include <global_planner/forward_hybrid_a_star.h>
+#include <global_planner/scene_pipeline.h>
 #include <functional>
 #include <set>
 #include <mutex>
@@ -81,6 +82,7 @@ type edge_t is inside here
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <cstdint>
 #include <string>
 
 namespace global_planner
@@ -157,22 +159,22 @@ class GlobalPlanner : public rclcpp::Node {
       double graph_path_smoothing_lock_start_distance_;
       double graph_path_smoothing_lock_goal_distance_;
       double graph_path_smoothing_ground_search_radius_;
-      size_t static_ground_size_;
       bool use_pre_graph_;
       ForwardHybridAStar::Config forward_hybrid_astar_config_;
-      
-      /*Original point cloud*/
-      pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_ground_;
-      pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_map_;
-      /*Original kdtree*/
-      pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr kdtree_ground_; 
-      pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr kdtree_map_; 
 
       /*
-      Graph class:
-      static: similar to static layer in costmap_2d
-      dynamic: similar to obstacle layer in costmap_2d, this class require frequently clearing, therefore, keep it small
+      Immutable scene cache. The latest complete static view and its source-map
+      identity are updated by the perception check timer; route builds read the
+      same pointers under their own workspace lock. No mutable SharedData or
+      PCL owner is retained here.
       */
+      std::shared_ptr<const perception_3d::LegacyStaticView> current_static_view_;
+      perception_3d::SourceMapIdentity current_static_identity_;
+      std::uint64_t static_scene_generation_{0};
+      std::mutex scene_cache_mutex_;
+
+      /*Legacy pre-graph constructor placeholder. It is never populated with a
+      shallow SharedData graph copy and is unused after setSceneSnapshot().*/
       perception_3d::StaticGraph static_graph_ = perception_3d::StaticGraph();
 
       rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_ground_;
@@ -197,12 +199,12 @@ class GlobalPlanner : public rclcpp::Node {
       /*Func*/
       void makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHandle<dddmr_sys_core::action::GetPlan>> goal_handle);
 
-      void postSmoothPath(std::vector<unsigned int>& path_id, std::vector<unsigned int>& smoothed_path_id);
       void getStaticGraphFromPerception3D();
 
       bool getStartGoalID(
         const geometry_msgs::msg::PoseStamped& start,
         const geometry_msgs::msg::PoseStamped& goal,
+        const ScenePipelineContext & scene,
         unsigned int& start_id,
         unsigned int& goal_id,
         ForwardHybridAStar::ProjectionDiagnostics * start_projection = nullptr,
@@ -234,6 +236,7 @@ class GlobalPlanner : public rclcpp::Node {
       nav_msgs::msg::Path makeROSPlanLocked(
         const geometry_msgs::msg::PoseStamped & start,
         const geometry_msgs::msg::PoseStamped & goal,
+        const ScenePipelineContext & scene,
         bool force_position_only_goal = false,
         bool force_use_goal_heading = false,
         const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
@@ -248,6 +251,7 @@ class GlobalPlanner : public rclcpp::Node {
       nav_msgs::msg::Path makeGraphRouteLocked(
         const geometry_msgs::msg::PoseStamped & start,
         const geometry_msgs::msg::PoseStamped & goal,
+        const ScenePipelineContext & scene,
         const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
         bool * was_canceled = nullptr,
         ForwardHybridAStar::SearchDiagnostics * search_diagnostics = nullptr,
@@ -257,12 +261,14 @@ class GlobalPlanner : public rclcpp::Node {
         const geometry_msgs::msg::PoseStamped & start,
         const geometry_msgs::msg::PoseStamped & goal,
         const nav_msgs::msg::Path & graph_route,
+        const ScenePipelineContext & scene,
         const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
         bool * was_canceled = nullptr,
         const std::string & debug_label = "");
       bool buildFrozenRouteLocked(
         const geometry_msgs::msg::PoseStamped & start,
         const geometry_msgs::msg::PoseStamped & goal,
+        const ScenePipelineContext & scene,
         nav_msgs::msg::Path * raw_route,
         nav_msgs::msg::Path * frozen_route,
         const CancelRequestedCallback & cancel_requested = CancelRequestedCallback(),
@@ -272,11 +278,45 @@ class GlobalPlanner : public rclcpp::Node {
         std::string * request_result_class = nullptr);
 
       void pubStaticGraph();
-      void getROSPath(std::vector<unsigned int>& path_id, nav_msgs::msg::Path& ros_path);
-      void smoothGraphPathForAckermann(nav_msgs::msg::Path * path) const;
+      void getROSPath(
+        std::vector<unsigned int>& path_id,
+        nav_msgs::msg::Path& ros_path,
+        const ScenePipelineContext & scene);
+      void smoothGraphPathForAckermann(
+        nav_msgs::msg::Path * path,
+        const ScenePipelineContext & scene) const;
       void refreshPathOrientations(nav_msgs::msg::Path * path) const;
       void pubWeight();
-      
+
+      /*
+      Scene acquisition and latest-route validation. Acquisition is a hard
+      requirement: a missing/incomplete snapshot aborts the request and never
+      falls back to live SharedData. Validation pins one newer complete scene
+      and never re-reads live data.
+      */
+      bool acquirePinnedScene(
+        ScenePipelineContext * scene,
+        std::string * rejection_reason);
+      bool acquireLatestPinnedScene(
+        const ScenePipelineContext & pinned,
+        ScenePipelineContext * latest,
+        bool * static_map_changed,
+        std::string * rejection_reason);
+      enum class LatestRouteStatus
+      {
+        kAccepted,
+        kReplan,
+        kRejected,
+      };
+      LatestRouteStatus validateRouteAgainstLatest(
+        const ScenePipelineContext & pinned,
+        const nav_msgs::msg::Path & route,
+        ScenePipelineContext * latest,
+        std::string * result_class,
+        std::string * detail);
+
+      /*Serializes route builds and A-star/hybrid scene re-pinning. This is the
+      planner's own workspace/job lock, not a perception lock.*/
       std::mutex protect_kdtree_ground_;
 
     protected:

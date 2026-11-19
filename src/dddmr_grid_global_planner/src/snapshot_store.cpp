@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/snapshot_store.h"
+#include "grid_global_planner/snapshot_store.h"
 
 #include <chrono>
 #include <cstddef>
@@ -21,7 +21,7 @@
 #include <mutex>
 #include <utility>
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 
 SnapshotStore::SnapshotStore(
@@ -227,4 +227,4 @@ void SnapshotStore::ReclaimerLoop()
   }
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

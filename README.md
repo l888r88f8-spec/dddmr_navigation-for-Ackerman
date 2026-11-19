@@ -4,7 +4,7 @@
 
 ## MLS 测量证据与独立 PCD 地形（2026-11-10）
 
-本仓库的 `dddmr_grid_global_planner` 新增了可独立于在线雷达/定位运行的静态
+本仓库的 `grid_global_planner` 新增了可独立于在线雷达/定位运行的静态
 PCD 地形入口。数据流是：
 
 ```text
@@ -43,13 +43,13 @@ PCD 地形入口。数据流是：
 
 ```bash
 source /opt/ros/humble/setup.bash
-colcon build --packages-select dddmr_grid_global_planner \
+colcon build --packages-select grid_global_planner \
   --cmake-args -DCMAKE_BUILD_TYPE=Release
 source install/setup.bash
-ctest --test-dir build/dddmr_grid_global_planner --output-on-failure
+ctest --test-dir build/grid_global_planner --output-on-failure
 
 # 当前精确 GroundMap + YAML 0.20/R.35/.45 profile；默认空障碍数组
-./build/dddmr_grid_global_planner/offline_static_pcd_smoke \
+./build/grid_global_planner/offline_static_pcd_smoke \
   /home/robot/map/hesai_sim2/GroundMap.pcd
 ```
 

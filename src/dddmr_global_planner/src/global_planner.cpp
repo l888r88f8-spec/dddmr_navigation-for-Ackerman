@@ -228,18 +228,22 @@ void GlobalPlanner::handle_accepted(const std::shared_ptr<rclcpp_action::ServerG
   
 void GlobalPlanner::initial(const std::shared_ptr<perception_3d::Perception3D_ROS>& perception_3d){
   
-  static_ground_size_ = 0;
   perception_3d_ros_ = perception_3d;
   graph_ready_ = false;
   has_initialized_ = false;
+  static_scene_generation_ = 0;
   robot_frame_ = perception_3d_ros_->getGlobalUtils()->getRobotFrame();
   global_frame_ = perception_3d_ros_->getGlobalUtils()->getGblFrame();
   global_plan_result_ = std::make_shared<dddmr_sys_core::action::GetPlan::Result>();
-  
-  pcl_map_.reset(new pcl::PointCloud<pcl::PointXYZI>);
-  pcl_ground_.reset(new pcl::PointCloud<pcl::PointXYZI>);
-  kdtree_map_.reset(new pcl::KdTreeFLANN<pcl::PointXYZI>);
-  kdtree_ground_.reset(new pcl::KdTreeFLANN<pcl::PointXYZI>);
+
+  //@ One-time producer mode: original-planner cost only. Evidence export and
+  //@ the point-export/local pipeline are left off exactly as before.
+  perception_3d::SceneProducerConfig scene_producer_config;
+  scene_producer_config.enabled = true;
+  scene_producer_config.evidence = false;
+  scene_producer_config.legacy_cost = true;
+  scene_producer_config.static_source_name = "map";
+  perception_3d_ros_->configureSceneProducer(scene_producer_config);
 
   declare_parameter("graph_a_star.turning_weight", rclcpp::ParameterValue(0.1));
   this->get_parameter("graph_a_star.turning_weight", turning_weight_);
@@ -471,49 +475,87 @@ GlobalPlanner::~GlobalPlanner(){
   a_star_planner_pre_graph_.reset();
   forward_hybrid_astar_planner_.reset();
   action_server_global_planner_.reset();
-  kdtree_ground_.reset();
-  kdtree_map_.reset();
-  pcl_ground_.reset();
-  pcl_map_.reset();
 }
 
 void GlobalPlanner::checkPerception3DThread(){
   
-  auto shared_data = perception_3d_ros_->getSharedDataPtr();
-  if(!shared_data || !shared_data->is_static_layer_ready_){
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000, "Waiting for static layer");
+  if(!perception_3d_ros_){
     return;
   }
-  
-  if(static_ground_size_!=shared_data->static_ground_size_){
-    std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
-    std::unique_lock<std::recursive_mutex> sensor_lock(shared_data->ground_kdtree_cb_mutex_);
-    if(!shared_data->pcl_ground_ || !shared_data->pcl_map_ ||
-      !shared_data->kdtree_ground_ || !shared_data->kdtree_map_ ||
-      !shared_data->sGraph_ptr_)
+
+  //@ Static-only capture. This never evaluates the per-ground fused dGraph or
+  //@ freezes lethal points, so the 500 ms idle timer stays cheap. A full cost
+  //@ export happens only on an actual route request.
+  perception_3d::SceneSnapshotRequest request;
+  request.include_evidence = false;
+  request.include_legacy_cost = false;
+  request.include_legacy_static = true;
+  const auto static_snapshot = perception_3d_ros_->captureSceneSnapshot(
+    request, this->now().nanoseconds(), 0, 0, false);
+
+  if(!static_snapshot || !static_snapshot->complete() ||
+    !static_snapshot->hasLegacyStatic() || !static_snapshot->sourceMap().known)
+  {
+    RCLCPP_INFO_THROTTLE(
+      this->get_logger(), *clock_, 1000,
+      "Waiting for one complete immutable static scene");
+    return;
+  }
+
+  const perception_3d::SourceMapIdentity & new_identity =
+    static_snapshot->sourceMap();
+  const std::shared_ptr<const perception_3d::LegacyStaticView> & new_view =
+    static_snapshot->legacyStatic();
+
+  {
+    std::lock_guard<std::mutex> cache_lock(scene_cache_mutex_);
+    if(current_static_view_ == new_view &&
+      current_static_identity_.SameContent(new_identity))
     {
       return;
     }
-    *pcl_ground_ = *(shared_data->pcl_ground_);
-    global_frame_ = perception_3d_ros_->getGlobalUtils()->getGblFrame();
-    *kdtree_ground_ = *(shared_data->kdtree_ground_);
-    *kdtree_map_ = *(shared_data->kdtree_map_);
-    *pcl_map_ = *(shared_data->pcl_map_);
-    static_graph_ = *shared_data->sGraph_ptr_; //@ node weight
-    RCLCPP_DEBUG(this->get_logger(), "Ground and Kd-tree ground have been received from perception_3d.");
-    getStaticGraphFromPerception3D();
-    static_ground_size_ = std::min(shared_data->static_ground_size_, pcl_ground_->points.size());
   }
 
+  //@ Static changes are serialized with route builds through the planner's own
+  //@ workspace lock. No perception lock is taken directly here.
+  std::unique_lock<std::mutex> workspace_lock(protect_kdtree_ground_);
+  std::uint64_t previous_revision = 0;
+  {
+    std::lock_guard<std::mutex> cache_lock(scene_cache_mutex_);
+    previous_revision = current_static_identity_.revision;
+    current_static_view_ = new_view;
+    current_static_identity_ = new_identity;
+    ++static_scene_generation_;
+  }
+
+  //@ Drop every backend's pinned route view. The next request re-pins the new
+  //@ static identity before projection/search, so no old index binding is
+  //@ retained as a cached route.
+  if(a_star_planner_){
+    a_star_planner_->clearSceneSnapshot();
+  }
+  if(a_star_planner_pre_graph_){
+    a_star_planner_pre_graph_->clearSceneSnapshot();
+  }
+  if(forward_hybrid_astar_planner_){
+    forward_hybrid_astar_planner_->ClearSceneSnapshot();
+  }
+
+  RCLCPP_INFO(
+    this->get_logger(),
+    "Pinned static scene changed: revision %llu -> %llu, content_hash=%llu, ground=%zu, map=%zu, generation=%llu; cached route views invalidated",
+    static_cast<unsigned long long>(previous_revision),
+    static_cast<unsigned long long>(new_identity.revision),
+    static_cast<unsigned long long>(new_identity.content_hash),
+    new_identity.ground_point_count,
+    new_identity.map_point_count,
+    static_cast<unsigned long long>(static_scene_generation_));
+
+  getStaticGraphFromPerception3D();
 }
 
 void GlobalPlanner::cbClickedPoint(const geometry_msgs::msg::PointStamped::SharedPtr clicked_goal){
   
-  if(!perception_3d_ros_->getSharedDataPtr()->is_static_layer_ready_){
-    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *clock_, 1000, "Received clicked goal before static layer is ready");
-    return;
-  }
-
   geometry_msgs::msg::PoseStamped start, goal;
   start.header.frame_id = global_frame_;
   start.header.stamp = clock_->now();
@@ -541,6 +583,16 @@ void GlobalPlanner::cbClickedPoint(const geometry_msgs::msg::PointStamped::Share
     RCLCPP_DEBUG(this->get_logger(), "Failed to transform pointcloud: %s", e.what());
     return;
   }
+
+  ScenePipelineContext scene;
+  std::string scene_reason;
+  if(!acquirePinnedScene(&scene, &scene_reason)){
+    RCLCPP_WARN(
+      this->get_logger(),
+      "Clicked goal route request aborted without a complete pinned scene: %s",
+      scene_reason.c_str());
+    return;
+  }
   
   const std::size_t goal_seq = ++debug_goal_seq_;
   nav_msgs::msg::Path raw_route;
@@ -550,6 +602,7 @@ void GlobalPlanner::cbClickedPoint(const geometry_msgs::msg::PointStamped::Share
     if(!buildFrozenRouteLocked(
          start,
          goal,
+         scene,
          &raw_route,
          &frozen_route))
     {
@@ -574,106 +627,36 @@ void GlobalPlanner::cbClickedPoint(const geometry_msgs::msg::PointStamped::Share
 
 }
 
-void GlobalPlanner::postSmoothPath(std::vector<unsigned int>& path_id, std::vector<unsigned int>& smoothed_path_id){
-  
-  smoothed_path_id.clear();
-  geometry_msgs::msg::PoseStamped current_pst;
-  current_pst.pose.position.x = pcl_ground_->points[path_id[0]].x;
-  current_pst.pose.position.y = pcl_ground_->points[path_id[0]].y;
-  current_pst.pose.position.z = pcl_ground_->points[path_id[0]].z;
-  
-  smoothed_path_id.push_back(path_id[0]);
-
-  for(auto it=1;it<path_id.size()-1;it++){
-
-    geometry_msgs::msg::PoseStamped next_pst;
-    next_pst.pose.position.x = pcl_ground_->points[path_id[it]].x;
-    next_pst.pose.position.y = pcl_ground_->points[path_id[it]].y;
-    next_pst.pose.position.z = pcl_ground_->points[path_id[it]].z;
-
-    double vx,vy,vz;
-    vx = next_pst.pose.position.x - current_pst.pose.position.x;
-    vy = next_pst.pose.position.y - current_pst.pose.position.y;
-    vz = next_pst.pose.position.z - current_pst.pose.position.z;
-    double unit = sqrt(vx*vx + vy*vy + vz*vz);
-    
-    tf2::Vector3 axis_vector(vx/unit, vy/unit, vz/unit);
-
-    tf2::Vector3 up_vector(1.0, 0.0, 0.0);
-    tf2::Vector3 right_vector = axis_vector.cross(up_vector);
-    right_vector.normalized();
-    tf2::Quaternion q(right_vector, -1.0*acos(axis_vector.dot(up_vector)));
-    q.normalize();
-
-    current_pst.pose.orientation.x = q.getX();
-    current_pst.pose.orientation.y = q.getY();
-    current_pst.pose.orientation.z = q.getZ();
-    current_pst.pose.orientation.w = q.getW();     
-
-    //@Interpolation to make global plan smoother and better resolution for local planner
-    for(double step=0.05;step<0.99;step+=0.05){
-      pcl::PointXYZI pst_inter_polate_pc;
-      pst_inter_polate_pc.x = current_pst.pose.position.x + vx*step;
-      pst_inter_polate_pc.y = current_pst.pose.position.y + vy*step;
-      pst_inter_polate_pc.z = current_pst.pose.position.z + vz*step;
-      std::vector<int> pointIdxRadiusSearch;
-      std::vector<float> pointRadiusSquaredDistance;
-      if(kdtree_map_->radiusSearch(pst_inter_polate_pc, perception_3d_ros_->getGlobalUtils()->getInscribedRadius(), pointIdxRadiusSearch, pointRadiusSquaredDistance)>1){
-        //@ no line of sight, keep this pose
-        smoothed_path_id.push_back(path_id[it]);
-        current_pst = next_pst;
-        break;
-      }
-      pointIdxRadiusSearch.clear();
-      pointRadiusSquaredDistance.clear();
-      if(kdtree_ground_->radiusSearch(pst_inter_polate_pc, 1.0, pointIdxRadiusSearch, pointRadiusSquaredDistance)<2){
-        //@ not on the ground
-        smoothed_path_id.push_back(path_id[it]);
-        current_pst = next_pst;
-        break;
-      }
-      double dx = vx*step;
-      double dy = vy*step;
-      double dr = sqrt(dx*dx+dy*dy);
-      double dz = fabs(vz*step);
-      float vertical_angle = std::asin(dz / dr);
-      if(dr>0.5 && vertical_angle>0.349){
-        //@ z jump
-        smoothed_path_id.push_back(path_id[it]);
-        current_pst = next_pst;
-        break;        
-      }
-      if(dr>20.0){
-        //@ longer than 10 meter
-        smoothed_path_id.push_back(path_id[it]);
-        current_pst = next_pst;
-        break;        
-      }
-    }
-  }
-  smoothed_path_id.push_back(path_id[path_id.size()-1]);
-}
-
-void GlobalPlanner::getROSPath(std::vector<unsigned int>& path_id, nav_msgs::msg::Path& ros_path){
-
+void GlobalPlanner::getROSPath(
+  std::vector<unsigned int>& path_id,
+  nav_msgs::msg::Path& ros_path,
+  const ScenePipelineContext & scene)
+{
   ros_path.header.frame_id = global_frame_;
   ros_path.header.stamp = clock_->now();
 
+  if(!scene.valid() || !scene.staticView() || !scene.staticView()->groundPoints()){
+    return;
+  }
+  const pcl::PointCloud<pcl::PointXYZI> & ground_points =
+    *scene.staticView()->groundPoints();
 
   for(auto it=0;it<path_id.size();it++){
+    if(path_id[it] >= ground_points.points.size()){
+      continue;
+    }
     geometry_msgs::msg::PoseStamped pst;
     pst.header = ros_path.header;
-    pst.pose.position.x = pcl_ground_->points[path_id[it]].x;
-    pst.pose.position.y = pcl_ground_->points[path_id[it]].y;
-    pst.pose.position.z = pcl_ground_->points[path_id[it]].z;
+    pst.pose.position.x = ground_points.points[path_id[it]].x;
+    pst.pose.position.y = ground_points.points[path_id[it]].y;
+    pst.pose.position.z = ground_points.points[path_id[it]].z;
 
     geometry_msgs::msg::PoseStamped next_pst;
-    if(it<path_id.size()-1){
-      next_pst.pose.position.x = pcl_ground_->points[path_id[it+1]].x;
-      next_pst.pose.position.y = pcl_ground_->points[path_id[it+1]].y;
-      next_pst.pose.position.z = pcl_ground_->points[path_id[it+1]].z;
+    if(it<path_id.size()-1 && path_id[it+1] < ground_points.points.size()){
+      next_pst.pose.position.x = ground_points.points[path_id[it+1]].x;
+      next_pst.pose.position.y = ground_points.points[path_id[it+1]].y;
+      next_pst.pose.position.z = ground_points.points[path_id[it+1]].z;
     }
-
 
     double vx,vy,vz;
     vx = next_pst.pose.position.x - pst.pose.position.x;
@@ -682,18 +665,19 @@ void GlobalPlanner::getROSPath(std::vector<unsigned int>& path_id, nav_msgs::msg
 
     if(vz!=0){
       double unit = sqrt(vx*vx + vy*vy + vz*vz);
-      
-      tf2::Vector3 axis_vector(vx/unit, vy/unit, vz/unit);
+      if(unit > 1e-9){
+        tf2::Vector3 axis_vector(vx/unit, vy/unit, vz/unit);
 
-      tf2::Vector3 up_vector(1.0, 0.0, 0.0);
-      tf2::Vector3 right_vector = axis_vector.cross(up_vector);
-      right_vector.normalized();
-      tf2::Quaternion q(right_vector, -1.0*acos(axis_vector.dot(up_vector)));
-      q.normalize();
-      pst.pose.orientation.x = q.getX();
-      pst.pose.orientation.y = q.getY();
-      pst.pose.orientation.z = q.getZ();
-      pst.pose.orientation.w = q.getW();
+        tf2::Vector3 up_vector(1.0, 0.0, 0.0);
+        tf2::Vector3 right_vector = axis_vector.cross(up_vector);
+        right_vector.normalized();
+        tf2::Quaternion q(right_vector, -1.0*acos(axis_vector.dot(up_vector)));
+        q.normalize();
+        pst.pose.orientation.x = q.getX();
+        pst.pose.orientation.y = q.getY();
+        pst.pose.orientation.z = q.getZ();
+        pst.pose.orientation.w = q.getW();
+      }
     }
     else{
       //@ handle with 2D
@@ -706,7 +690,6 @@ void GlobalPlanner::getROSPath(std::vector<unsigned int>& path_id, nav_msgs::msg
       pst.pose.orientation.w = q.getW();
     }
 
-    //RCLCPP_DEBUG(this->get_logger(), "%.2f, %.2f, %.2f,%.2f, %.2f, %.2f, %.2f", vx, vy, vz, q.getX(), q.getY(), q.getZ(), q.getW());
     //@Interpolation to make global plan smoother and better resolution for local planner
     geometry_msgs::msg::PoseStamped pst_inter_polate = pst;
     if(it<path_id.size()-1){
@@ -724,207 +707,46 @@ void GlobalPlanner::getROSPath(std::vector<unsigned int>& path_id, nav_msgs::msg
           ros_path.poses.push_back(pst_inter_polate);
           last_pst = pst_inter_polate;
         }
-        
+
       }
     }
     else{
       ros_path.poses.push_back(pst);
     }
-    
+
   }
 }
 
 void GlobalPlanner::refreshPathOrientations(nav_msgs::msg::Path * path) const
 {
-  if(path == nullptr || path->poses.empty()){
-    return;
-  }
-
-  if(path->poses.size() == 1){
-    return;
-  }
-
-  for(std::size_t i = 0; i < path->poses.size(); ++i){
-    const std::size_t prev_idx = (i > 0) ? i - 1 : i;
-    const std::size_t next_idx = (i + 1 < path->poses.size()) ? i + 1 : i;
-    if(prev_idx == next_idx){
-      continue;
-    }
-
-    const double vx =
-      path->poses[next_idx].pose.position.x - path->poses[prev_idx].pose.position.x;
-    const double vy =
-      path->poses[next_idx].pose.position.y - path->poses[prev_idx].pose.position.y;
-    const double vz =
-      path->poses[next_idx].pose.position.z - path->poses[prev_idx].pose.position.z;
-    const double tangent_norm = std::sqrt(vx * vx + vy * vy + vz * vz);
-    if(tangent_norm < 1e-6){
-      continue;
-    }
-
-    tf2::Quaternion q;
-    if(std::fabs(vz) > 1e-6){
-      tf2::Vector3 axis_vector(vx / tangent_norm, vy / tangent_norm, vz / tangent_norm);
-      tf2::Vector3 up_vector(1.0, 0.0, 0.0);
-      tf2::Vector3 right_vector = axis_vector.cross(up_vector);
-      const double right_norm = right_vector.length();
-      if(right_norm > 1e-6){
-        right_vector /= right_norm;
-        const double axis_dot =
-          std::clamp(static_cast<double>(axis_vector.dot(up_vector)), -1.0, 1.0);
-        q = tf2::Quaternion(right_vector, -1.0 * std::acos(axis_dot));
-      }
-      else{
-        q.setRPY(0.0, 0.0, std::atan2(vy, vx));
-      }
-    }
-    else{
-      q.setRPY(0.0, 0.0, std::atan2(vy, vx));
-    }
-    q.normalize();
-    path->poses[i].pose.orientation.x = q.getX();
-    path->poses[i].pose.orientation.y = q.getY();
-    path->poses[i].pose.orientation.z = q.getZ();
-    path->poses[i].pose.orientation.w = q.getW();
-  }
+  RefreshPathOrientations(path);
 }
 
-void GlobalPlanner::smoothGraphPathForAckermann(nav_msgs::msg::Path * path) const
+void GlobalPlanner::smoothGraphPathForAckermann(
+  nav_msgs::msg::Path * path,
+  const ScenePipelineContext & scene) const
 {
-  if(path == nullptr || path->poses.size() < 5){
+  if(path == nullptr){
     return;
   }
-  if(!graph_path_smoothing_enable_ ||
-     graph_path_smoothing_iterations_ <= 0 ||
-     graph_path_smoothing_weight_ <= 0.0 ||
-     graph_path_smoothing_max_shift_ <= 0.0)
-  {
-    return;
+  const std::size_t adjusted_points = SmoothPathAgainstScene(
+    path,
+    scene,
+    graph_path_smoothing_enable_,
+    graph_path_smoothing_iterations_,
+    graph_path_smoothing_weight_,
+    graph_path_smoothing_max_shift_,
+    graph_path_smoothing_lock_start_distance_,
+    graph_path_smoothing_lock_goal_distance_,
+    graph_path_smoothing_ground_search_radius_);
+  if(adjusted_points > 0){
+    RCLCPP_DEBUG(
+      this->get_logger(),
+      "graph_path_smoothing applied, poses=%zu, adjusted_points=%zu, iterations=%d",
+      path->poses.size(),
+      adjusted_points,
+      graph_path_smoothing_iterations_);
   }
-
-  std::vector<double> arc_lengths(path->poses.size(), 0.0);
-  for(std::size_t i = 1; i < path->poses.size(); ++i){
-    const double dx =
-      path->poses[i].pose.position.x - path->poses[i - 1].pose.position.x;
-    const double dy =
-      path->poses[i].pose.position.y - path->poses[i - 1].pose.position.y;
-    const double dz =
-      path->poses[i].pose.position.z - path->poses[i - 1].pose.position.z;
-    arc_lengths[i] = arc_lengths[i - 1] + std::sqrt(dx * dx + dy * dy + dz * dz);
-  }
-  const double total_length = arc_lengths.back();
-  if(!std::isfinite(total_length) || total_length < 0.5){
-    return;
-  }
-
-  std::vector<double> reference_x(path->poses.size(), 0.0);
-  std::vector<double> reference_y(path->poses.size(), 0.0);
-  for(std::size_t i = 0; i < path->poses.size(); ++i){
-    reference_x[i] = path->poses[i].pose.position.x;
-    reference_y[i] = path->poses[i].pose.position.y;
-  }
-
-  double inscribed_radius = 0.3;
-  if(perception_3d_ros_ && perception_3d_ros_->getGlobalUtils()){
-    inscribed_radius = std::max(
-      0.05,
-      static_cast<double>(perception_3d_ros_->getGlobalUtils()->getInscribedRadius()));
-  }
-
-  std::size_t total_adjusted_points = 0;
-  for(int iteration = 0; iteration < graph_path_smoothing_iterations_; ++iteration){
-    const auto previous = path->poses;
-    bool iteration_changed = false;
-
-    for(std::size_t i = 1; i + 1 < path->poses.size(); ++i){
-      if(arc_lengths[i] <= graph_path_smoothing_lock_start_distance_){
-        continue;
-      }
-      if((total_length - arc_lengths[i]) <= graph_path_smoothing_lock_goal_distance_){
-        continue;
-      }
-
-      const double prev_x = previous[i - 1].pose.position.x;
-      const double prev_y = previous[i - 1].pose.position.y;
-      const double next_x = previous[i + 1].pose.position.x;
-      const double next_y = previous[i + 1].pose.position.y;
-      const double curr_x = previous[i].pose.position.x;
-      const double curr_y = previous[i].pose.position.y;
-
-      double target_x =
-        curr_x + graph_path_smoothing_weight_ * (0.5 * (prev_x + next_x) - curr_x);
-      double target_y =
-        curr_y + graph_path_smoothing_weight_ * (0.5 * (prev_y + next_y) - curr_y);
-
-      const double reference_dx = target_x - reference_x[i];
-      const double reference_dy = target_y - reference_y[i];
-      const double reference_shift = std::hypot(reference_dx, reference_dy);
-      if(reference_shift > graph_path_smoothing_max_shift_ && reference_shift > 1e-6){
-        const double scale = graph_path_smoothing_max_shift_ / reference_shift;
-        target_x = reference_x[i] + reference_dx * scale;
-        target_y = reference_y[i] + reference_dy * scale;
-      }
-
-      const double candidate_step = std::hypot(target_x - curr_x, target_y - curr_y);
-      if(candidate_step < 1e-5){
-        continue;
-      }
-
-      pcl::PointXYZI candidate;
-      candidate.x = target_x;
-      candidate.y = target_y;
-      candidate.z = previous[i].pose.position.z;
-
-      if(kdtree_ground_){
-        std::vector<int> ground_indices;
-        std::vector<float> ground_squared_distances;
-        if(kdtree_ground_->radiusSearch(
-             candidate,
-             graph_path_smoothing_ground_search_radius_,
-             ground_indices,
-             ground_squared_distances) < 1)
-        {
-          continue;
-        }
-      }
-
-      if(kdtree_map_){
-        std::vector<int> map_indices;
-        std::vector<float> map_squared_distances;
-        if(kdtree_map_->radiusSearch(
-             candidate,
-             inscribed_radius,
-             map_indices,
-             map_squared_distances) > 1)
-        {
-          continue;
-        }
-      }
-
-      path->poses[i].pose.position.x = target_x;
-      path->poses[i].pose.position.y = target_y;
-      iteration_changed = true;
-      ++total_adjusted_points;
-    }
-
-    if(!iteration_changed){
-      break;
-    }
-  }
-
-  path->poses.front().pose.position.x = reference_x.front();
-  path->poses.front().pose.position.y = reference_y.front();
-  path->poses.back().pose.position.x = reference_x.back();
-  path->poses.back().pose.position.y = reference_y.back();
-
-  refreshPathOrientations(path);
-
-  RCLCPP_DEBUG(
-    this->get_logger(),
-    "graph_path_smoothing applied, poses=%zu, adjusted_points=%zu, iterations=%d",
-    path->poses.size(),
-    total_adjusted_points,
-    graph_path_smoothing_iterations_);
 }
 
 unsigned int GlobalPlanner::getClosestIndexFromRadiusSearch(
@@ -947,6 +769,7 @@ unsigned int GlobalPlanner::getClosestIndexFromRadiusSearch(
 bool GlobalPlanner::getStartGoalID(
   const geometry_msgs::msg::PoseStamped& start,
   const geometry_msgs::msg::PoseStamped& goal,
+  const ScenePipelineContext & scene,
   unsigned int& start_id,
   unsigned int& goal_id,
   ForwardHybridAStar::ProjectionDiagnostics * start_projection,
@@ -955,6 +778,16 @@ bool GlobalPlanner::getStartGoalID(
   const double search_radius = 1.0;
   const double fallback_vertical_radius = 0.5;
   const double fallback_max_nearest_distance = 3.0;
+
+  if(!scene.valid() || !scene.staticView() ||
+    !scene.staticView()->groundPoints() || !scene.staticView()->groundKdtree())
+  {
+    return false;
+  }
+  const pcl::PointCloud<pcl::PointXYZI> & ground_points =
+    *scene.staticView()->groundPoints();
+  const auto ground_tree = scene.staticView()->groundKdtree();
+
   const auto init_projection =
     [](ForwardHybridAStar::ProjectionDiagnostics * projection,
        const geometry_msgs::msg::PoseStamped & pose) {
@@ -968,19 +801,19 @@ bool GlobalPlanner::getStartGoalID(
       projection->fallback = "none";
     };
   const auto finalize_projection =
-    [this](
+    [&ground_points](
       ForwardHybridAStar::ProjectionDiagnostics * projection,
       unsigned int ground_id,
       const std::vector<float> & squared_distances)
     {
-      if(projection == nullptr){
+      if(projection == nullptr || ground_id >= ground_points.points.size()){
         return;
       }
       projection->success = true;
       projection->ground_index = ground_id;
-      projection->ground_x = pcl_ground_->points[ground_id].x;
-      projection->ground_y = pcl_ground_->points[ground_id].y;
-      projection->ground_z = pcl_ground_->points[ground_id].z;
+      projection->ground_x = ground_points.points[ground_id].x;
+      projection->ground_y = ground_points.points[ground_id].y;
+      projection->ground_z = ground_points.points[ground_id].z;
       projection->projection_distance = std::sqrt(
         std::pow(projection->ground_x - projection->query_x, 2.0) +
         std::pow(projection->ground_y - projection->query_y, 2.0) +
@@ -1012,8 +845,11 @@ bool GlobalPlanner::getStartGoalID(
 
   //@Compute nearest pc as goal
   //@TODO: add an edge between goal and nearest pc
-  
-  if(kdtree_ground_->radiusSearch (pcl_goal, search_radius, pointIdxRadiusSearch_goal, pointRadiusSquaredDistance_goal)<1){
+
+  if(!scene.ProjectOnGround(
+      pcl_goal, search_radius, &pointIdxRadiusSearch_goal,
+      &pointRadiusSquaredDistance_goal))
+  {
     RCLCPP_WARN(this->get_logger(), "Goal is not found within %.2f m.", search_radius);
     bool fallback_search = false;
 
@@ -1022,7 +858,9 @@ bool GlobalPlanner::getStartGoalID(
       pointIdxRadiusSearch_goal.clear();
       pointRadiusSquaredDistance_goal.clear();
       pcl_goal.z = z;
-      if(kdtree_ground_->radiusSearch(pcl_goal, fallback_vertical_radius, pointIdxRadiusSearch_goal, pointRadiusSquaredDistance_goal,0)>0)
+      if(scene.ProjectOnGround(
+          pcl_goal, fallback_vertical_radius, &pointIdxRadiusSearch_goal,
+          &pointRadiusSquaredDistance_goal))
       {
         fallback_search = true;
         goal_fallback = "vertical_search";
@@ -1035,7 +873,10 @@ bool GlobalPlanner::getStartGoalID(
       pointIdxRadiusSearch_goal.clear();
       pointRadiusSquaredDistance_goal.clear();
       pcl_goal.z = goal.pose.position.z;  // restore query z after vertical scan
-      if(kdtree_ground_->nearestKSearch(pcl_goal, 1, pointIdxRadiusSearch_goal, pointRadiusSquaredDistance_goal) > 0){
+      if(ground_tree->nearestKSearch(
+          pcl_goal, 1, pointIdxRadiusSearch_goal,
+          pointRadiusSquaredDistance_goal) > 0)
+      {
         double nearest_distance = sqrt(pointRadiusSquaredDistance_goal[0]);
         if(nearest_distance <= fallback_max_nearest_distance){
           fallback_search = true;
@@ -1053,13 +894,16 @@ bool GlobalPlanner::getStartGoalID(
       return false;
     }
   }
-  
+
   goal_id = getClosestIndexFromRadiusSearch(pointIdxRadiusSearch_goal, pointRadiusSquaredDistance_goal);
+  if(goal_id >= ground_points.points.size()){
+    return false;
+  }
   if(goal_projection != nullptr){
     goal_projection->fallback = goal_fallback;
     goal_projection->fallback_z_before = goal_fallback_z_before;
     goal_projection->fallback_z_after =
-      goal_fallback == "nearest_fallback" ? pcl_ground_->points[goal_id].z : goal_fallback_z_after;
+      goal_fallback == "nearest_fallback" ? ground_points.points[goal_id].z : goal_fallback_z_after;
     goal_projection->fallback_nearest_distance = goal_fallback_nearest_distance;
   }
   finalize_projection(goal_projection, goal_id, pointRadiusSquaredDistance_goal);
@@ -1067,12 +911,12 @@ bool GlobalPlanner::getStartGoalID(
   if(enable_detail_log_){
     RCLCPP_DEBUG(this->get_logger(), "Selected goal: %.2f, %.2f, %.2f, Nearest-> id: %u, x: %.2f, y: %.2f, z: %.2f", 
       goal.pose.position.x, goal.pose.position.y, goal.pose.position.z, goal_id, 
-      pcl_ground_->points[goal_id].x, pcl_ground_->points[goal_id].y, pcl_ground_->points[goal_id].z);
+      ground_points.points[goal_id].x, ground_points.points[goal_id].y, ground_points.points[goal_id].z);
   }
   else{
     RCLCPP_DEBUG_THROTTLE(this->get_logger(), *clock_, 5000, "Selected goal: %.2f, %.2f, %.2f, Nearest-> id: %u, x: %.2f, y: %.2f, z: %.2f", 
       goal.pose.position.x, goal.pose.position.y, goal.pose.position.z, goal_id, 
-      pcl_ground_->points[goal_id].x, pcl_ground_->points[goal_id].y, pcl_ground_->points[goal_id].z);
+      ground_points.points[goal_id].x, ground_points.points[goal_id].y, ground_points.points[goal_id].z);
   }
 
   //--------------------------------------------------------------------------------------
@@ -1088,7 +932,10 @@ bool GlobalPlanner::getStartGoalID(
   double start_fallback_z_after = start.pose.position.z;
   double start_fallback_nearest_distance = std::numeric_limits<double>::quiet_NaN();
 
-  if(kdtree_ground_->radiusSearch (pcl_start, search_radius, pointIdxRadiusSearch_start, pointRadiusSquaredDistance_start)<1){
+  if(!scene.ProjectOnGround(
+      pcl_start, search_radius, &pointIdxRadiusSearch_start,
+      &pointRadiusSquaredDistance_start))
+  {
     RCLCPP_WARN(this->get_logger(), "Start is not found within %.2f m.", search_radius);
     bool fallback_search = false;
 
@@ -1096,7 +943,9 @@ bool GlobalPlanner::getStartGoalID(
       pointIdxRadiusSearch_start.clear();
       pointRadiusSquaredDistance_start.clear();
       pcl_start.z = z;
-      if(kdtree_ground_->radiusSearch(pcl_start, fallback_vertical_radius, pointIdxRadiusSearch_start, pointRadiusSquaredDistance_start,0)>0)
+      if(scene.ProjectOnGround(
+          pcl_start, fallback_vertical_radius, &pointIdxRadiusSearch_start,
+          &pointRadiusSquaredDistance_start))
       {
         fallback_search = true;
         start_fallback = "vertical_search";
@@ -1109,7 +958,10 @@ bool GlobalPlanner::getStartGoalID(
       pointIdxRadiusSearch_start.clear();
       pointRadiusSquaredDistance_start.clear();
       pcl_start.z = start.pose.position.z;  // restore query z after vertical scan
-      if(kdtree_ground_->nearestKSearch(pcl_start, 1, pointIdxRadiusSearch_start, pointRadiusSquaredDistance_start) > 0){
+      if(ground_tree->nearestKSearch(
+          pcl_start, 1, pointIdxRadiusSearch_start,
+          pointRadiusSquaredDistance_start) > 0)
+      {
         double nearest_distance = sqrt(pointRadiusSquaredDistance_start[0]);
         if(nearest_distance <= fallback_max_nearest_distance){
           fallback_search = true;
@@ -1127,13 +979,16 @@ bool GlobalPlanner::getStartGoalID(
       return false;
     }
   }
-  
+
   start_id = getClosestIndexFromRadiusSearch(pointIdxRadiusSearch_start, pointRadiusSquaredDistance_start);
+  if(start_id >= ground_points.points.size()){
+    return false;
+  }
   if(start_projection != nullptr){
     start_projection->fallback = start_fallback;
     start_projection->fallback_z_before = start_fallback_z_before;
     start_projection->fallback_z_after =
-      start_fallback == "nearest_fallback" ? pcl_ground_->points[start_id].z : start_fallback_z_after;
+      start_fallback == "nearest_fallback" ? ground_points.points[start_id].z : start_fallback_z_after;
     start_projection->fallback_nearest_distance = start_fallback_nearest_distance;
   }
   finalize_projection(start_projection, start_id, pointRadiusSquaredDistance_start);
@@ -1141,12 +996,12 @@ bool GlobalPlanner::getStartGoalID(
   if(enable_detail_log_){
     RCLCPP_DEBUG(this->get_logger(), "Selected start: %.2f, %.2f, %.2f, Nearest-> id: %u, x: %.2f, y: %.2f, z: %.2f", 
       start.pose.position.x, start.pose.position.y, start.pose.position.z, start_id, 
-      pcl_ground_->points[start_id].x, pcl_ground_->points[start_id].y, pcl_ground_->points[start_id].z);
+      ground_points.points[start_id].x, ground_points.points[start_id].y, ground_points.points[start_id].z);
   }
   else{
     RCLCPP_DEBUG_THROTTLE(this->get_logger(), *clock_, 5000, "Selected start: %.2f, %.2f, %.2f, Nearest-> id: %u, x: %.2f, y: %.2f, z: %.2f", 
       start.pose.position.x, start.pose.position.y, start.pose.position.z, start_id, 
-      pcl_ground_->points[start_id].x, pcl_ground_->points[start_id].y, pcl_ground_->points[start_id].z);
+      ground_points.points[start_id].x, ground_points.points[start_id].y, ground_points.points[start_id].z);
 
   }
 
@@ -1222,9 +1077,256 @@ void GlobalPlanner::publishRouteRequestStageDebug(
   pub_route_request_stage_->publish(message);
 }
 
+bool GlobalPlanner::acquirePinnedScene(
+  ScenePipelineContext * scene,
+  std::string * rejection_reason)
+{
+  if(scene == nullptr){
+    if(rejection_reason != nullptr){
+      *rejection_reason = "scene context pointer is null";
+    }
+    return false;
+  }
+  scene->Reset();
+  if(!perception_3d_ros_){
+    if(rejection_reason != nullptr){
+      *rejection_reason = "perception node is unavailable";
+    }
+    return false;
+  }
+
+  perception_3d::SceneSnapshotRequest request;
+  request.include_evidence = false;
+  request.include_legacy_cost = true;
+  request.include_legacy_static = true;
+  const auto snapshot = perception_3d_ros_->captureSceneSnapshot(
+    request, this->now().nanoseconds(), 0, 0, false);
+
+  LegacySearchParameters parameters;
+  if(auto utils = perception_3d_ros_->getGlobalUtils()){
+    parameters.inscribed_radius = utils->getInscribedRadius();
+    parameters.inflation_descending_rate = utils->getInflationDescendingRate();
+    parameters.max_obstacle_distance = utils->getMaxObstacleDistance();
+  }
+
+  std::string reason;
+  if(!scene->Bind(snapshot, parameters, &reason)){
+    if(rejection_reason != nullptr){
+      *rejection_reason = reason;
+    }
+    RCLCPP_WARN(
+      this->get_logger(),
+      "scene_not_ready: route request aborted without live fallback: %s",
+      reason.c_str());
+    return false;
+  }
+
+  //@ Root sensor status (not the cached cost-view metadata) drives the warning.
+  //@ The original stale policy is retained: costs are not silently cleared.
+  if(!snapshot->sensorsCurrent()){
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger(), *clock_, 2000,
+      "scene_stale_sensors: root sensor status is stale; retained pinned costs are used under the original stale policy");
+  }
+  RCLCPP_DEBUG(
+    this->get_logger(),
+    "scene_pinned: static_revision=%llu content_hash=%llu observation_token=%llu ground=%zu map=%zu sensors_current=%d",
+    static_cast<unsigned long long>(snapshot->sourceMap().revision),
+    static_cast<unsigned long long>(snapshot->sourceMap().content_hash),
+    static_cast<unsigned long long>(snapshot->observationRevision()),
+    snapshot->sourceMap().ground_point_count,
+    snapshot->sourceMap().map_point_count,
+    snapshot->sensorsCurrent() ? 1 : 0);
+  return true;
+}
+
+bool GlobalPlanner::acquireLatestPinnedScene(
+  const ScenePipelineContext & pinned,
+  ScenePipelineContext * latest,
+  bool * static_map_changed,
+  std::string * rejection_reason)
+{
+  if(latest == nullptr){
+    return false;
+  }
+  latest->Reset();
+  if(static_map_changed != nullptr){
+    *static_map_changed = false;
+  }
+  if(!perception_3d_ros_){
+    if(rejection_reason != nullptr){
+      *rejection_reason = "perception node is unavailable";
+    }
+    return false;
+  }
+
+  perception_3d::SceneSnapshotRequest request;
+  request.include_evidence = false;
+  request.include_legacy_cost = true;
+  request.include_legacy_static = true;
+  const auto snapshot = perception_3d_ros_->captureSceneSnapshot(
+    request, this->now().nanoseconds(), 0, 0, false);
+  if(!snapshot){
+    if(rejection_reason != nullptr){
+      *rejection_reason = "latest scene capture returned null";
+    }
+    return false;
+  }
+
+  //@ Compare the known static identity even when the envelope is incomplete.
+  //@ A changed map invalidates the index binding of the route we just built.
+  if(pinned.valid() && pinned.snapshot() && snapshot->sourceMap().known &&
+    !snapshot->sourceMap().SameContent(pinned.snapshot()->sourceMap()))
+  {
+    if(static_map_changed != nullptr){
+      *static_map_changed = true;
+    }
+    if(rejection_reason != nullptr){
+      *rejection_reason = "latest static source-map identity changed";
+    }
+  }
+
+  std::string reason;
+  if(!latest->Bind(snapshot, pinned.parameters(), &reason)){
+    //@ Preserve the stronger static-map-changed reason when it was already
+    //@ detected; otherwise propagate the structural Bind refusal.
+    if(rejection_reason != nullptr &&
+      (!static_map_changed || !*static_map_changed))
+    {
+      *rejection_reason = reason;
+    }
+    return false;
+  }
+  return true;
+}
+
+GlobalPlanner::LatestRouteStatus GlobalPlanner::validateRouteAgainstLatest(
+  const ScenePipelineContext & pinned,
+  const nav_msgs::msg::Path & route,
+  ScenePipelineContext * latest,
+  std::string * result_class,
+  std::string * detail)
+{
+  if(result_class != nullptr){
+    *result_class = "scene_latest_rejected";
+  }
+  if(detail != nullptr){
+    detail->clear();
+  }
+
+  ScenePipelineContext latest_scene;
+  bool static_map_changed = false;
+  std::string reason;
+  if(!acquireLatestPinnedScene(
+      pinned, &latest_scene, &static_map_changed, &reason))
+  {
+    if(detail != nullptr){
+      *detail = reason;
+    }
+    if(static_map_changed){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "scene_static_map_changed: latest capture is not usable for the old route index binding (%s); bounded replan required",
+        reason.c_str());
+      if(result_class != nullptr){
+        *result_class = "scene_static_map_changed";
+      }
+      if(latest != nullptr){
+        *latest = latest_scene;
+      }
+      return LatestRouteStatus::kReplan;
+    }
+    //@ A failed capture/Bind is structurally unusable, not the original
+    //@ complete-but-stale sensor policy. Fail closed instead of authorizing the
+    //@ old route. Stale complete snapshots still Bind successfully and remain
+    //@ report-only below.
+    RCLCPP_WARN(
+      this->get_logger(),
+      "scene_latest_rejected: no structurally complete latest scene (%s); refusing to authorize the pinned route",
+      reason.c_str());
+    return LatestRouteStatus::kRejected;
+  }
+
+  const SceneRelation relation = RelatePinnedToLatest(pinned, latest_scene);
+  if(!relation.static_map_same){
+    RCLCPP_WARN(
+      this->get_logger(),
+      "scene_static_map_changed: %s; bounded replan required",
+      relation.detail.c_str());
+    if(result_class != nullptr){
+      *result_class = "scene_static_map_changed";
+    }
+    if(latest != nullptr){
+      *latest = latest_scene;
+    }
+    return LatestRouteStatus::kReplan;
+  }
+
+  const double sample_step = std::max(
+    0.05, 0.5 * pinned.parameters().inscribed_radius);
+  const ScenePathValidation validation = ValidatePathAgainstLatest(
+    pinned, latest_scene, route, sample_step);
+  if(detail != nullptr){
+    *detail = validation.reason;
+  }
+
+  switch(validation.result){
+    case ScenePathValidation::Result::kAccepted:
+      if(validation.observation_same){
+        RCLCPP_DEBUG(
+          this->get_logger(),
+          "scene_latest_ok: %s", validation.reason.c_str());
+      }
+      else{
+        RCLCPP_INFO(
+          this->get_logger(),
+          "scene_path_unaffected: %s", validation.reason.c_str());
+      }
+      if(result_class != nullptr){
+        *result_class = "succeeded";
+      }
+      return LatestRouteStatus::kAccepted;
+    case ScenePathValidation::Result::kDynamicConflictReplan:
+      RCLCPP_WARN(
+        this->get_logger(),
+        "scene_path_changed: %s; bounded replan required",
+        validation.reason.c_str());
+      if(result_class != nullptr){
+        *result_class = "scene_path_changed";
+      }
+      if(latest != nullptr){
+        *latest = latest_scene;
+      }
+      return LatestRouteStatus::kReplan;
+    case ScenePathValidation::Result::kStaticMismatchReject:
+      RCLCPP_WARN(
+        this->get_logger(),
+        "scene_static_map_changed: %s; bounded replan required",
+        validation.reason.c_str());
+      if(result_class != nullptr){
+        *result_class = "scene_static_map_changed";
+      }
+      if(latest != nullptr){
+        *latest = latest_scene;
+      }
+      return LatestRouteStatus::kReplan;
+    case ScenePathValidation::Result::kNotReady:
+    default:
+      RCLCPP_WARN(
+        this->get_logger(),
+        "scene_latest_rejected: latest scene could not validate the route (%s); refusing to authorize the old route",
+        validation.reason.c_str());
+      if(result_class != nullptr){
+        *result_class = "scene_latest_rejected";
+      }
+      return LatestRouteStatus::kRejected;
+  }
+}
+
 bool GlobalPlanner::buildFrozenRouteLocked(
   const geometry_msgs::msg::PoseStamped & start,
   const geometry_msgs::msg::PoseStamped & goal,
+  const ScenePipelineContext & scene,
   nav_msgs::msg::Path * raw_route,
   nav_msgs::msg::Path * frozen_route,
   const CancelRequestedCallback & cancel_requested,
@@ -1304,6 +1406,7 @@ bool GlobalPlanner::buildFrozenRouteLocked(
     *raw_route = makeGraphRouteLocked(
       start,
       goal,
+      scene,
       cancel_requested,
       was_canceled,
       &raw_route_search_diagnostics,
@@ -1314,6 +1417,7 @@ bool GlobalPlanner::buildFrozenRouteLocked(
     *raw_route = makeROSPlanLocked(
       start,
       goal,
+      scene,
       false,
       false,
       cancel_requested,
@@ -1499,6 +1603,7 @@ bool GlobalPlanner::buildFrozenRouteLocked(
       start,
       goal,
       *raw_route,
+      scene,
       cancel_requested,
       &refine_canceled,
       refine_debug_label.str());
@@ -1555,13 +1660,6 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
       clearCurrentHandleIfMatches(goal_handle);
     };
 
-  if(!perception_3d_ros_->getSharedDataPtr()->is_static_layer_ready_){
-    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *clock_, 1000, "Received the request before static layer is ready");
-    goal_handle->abort(result);
-    clearCurrentHandleIfMatches(goal_handle);
-    return;
-  }
-
   if(!goal_handle->get_goal()->activate_threading){
     RCLCPP_DEBUG_THROTTLE(this->get_logger(), *clock_, 1000, "Deactivate thread");
     goal_handle->succeed(result);
@@ -1574,9 +1672,22 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
   geometry_msgs::msg::PoseStamped start;
   perception_3d_ros_->getGlobalPose(start);
 
+  ScenePipelineContext scene;
+  std::string scene_reason;
+  if(!acquirePinnedScene(&scene, &scene_reason)){
+    RCLCPP_DEBUG_THROTTLE(
+      this->get_logger(), *clock_, 1000,
+      "Received the request before one complete static/cost scene is ready: %s",
+      scene_reason.c_str());
+    goal_handle->abort(result);
+    clearCurrentHandleIfMatches(goal_handle);
+    return;
+  }
+
   nav_msgs::msg::Path raw_route;
   nav_msgs::msg::Path frozen_route;
   bool planner_canceled = false;
+  bool route_validated = false;
   std::string request_result_class = "failed_raw_route";
 
   if(cancel_requested()){
@@ -1584,21 +1695,86 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
     return;
   }
   const auto route_request_started_at = std::chrono::steady_clock::now();
-  {
-    std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
-    if(!buildFrozenRouteLocked(
-         start,
-         goal->goal,
-         &raw_route,
-         &frozen_route,
-         cancel_requested,
-         &planner_canceled,
-         request_id,
-         goal_seq,
-         &request_result_class))
+
+  //@ Same bounded policy as the public makeROSPlan(): one pinned scene per
+  //@ attempt, accept only a complete latest scene, and replan only for a
+  //@ changed static map or an affected dynamic route. A malformed latest scene
+  //@ is a refusal, never a stale-policy acceptance.
+  constexpr int kMaxLatestSceneReplans = 2;
+  for(int attempt = 0; attempt <= kMaxLatestSceneReplans; ++attempt){
+    raw_route.poses.clear();
+    frozen_route.poses.clear();
+    planner_canceled = false;
+    request_result_class = "failed_raw_route";
     {
-      frozen_route = raw_route;
+      std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
+      if(!buildFrozenRouteLocked(
+           start,
+           goal->goal,
+           scene,
+           &raw_route,
+           &frozen_route,
+           cancel_requested,
+           &planner_canceled,
+           request_id,
+           goal_seq,
+           &request_result_class))
+      {
+        frozen_route = raw_route;
+      }
     }
+    if(planner_canceled || cancel_requested()){
+      break;
+    }
+    if(raw_route.poses.empty()){
+      break;
+    }
+
+    ScenePipelineContext latest;
+    std::string result_class;
+    std::string detail;
+    const LatestRouteStatus status = validateRouteAgainstLatest(
+      scene, frozen_route.poses.empty() ? raw_route : frozen_route,
+      &latest, &result_class, &detail);
+    if(status == LatestRouteStatus::kAccepted){
+      route_validated = true;
+      break;
+    }
+    if(status == LatestRouteStatus::kRejected){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "scene_latest_rejected: refusing the action route instead of accepting stale data, result_class=%s, detail=%s",
+        result_class.c_str(),
+        detail.c_str());
+      request_result_class = result_class;
+      break;
+    }
+    if(attempt >= kMaxLatestSceneReplans){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "scene_replan_budget_exhausted: result_class=%s, detail=%s",
+        result_class.c_str(),
+        detail.c_str());
+      request_result_class = result_class;
+      break;
+    }
+
+    if(latest.valid()){
+      scene = latest;
+    }
+    else{
+      std::string reason;
+      if(!acquirePinnedScene(&scene, &reason)){
+        request_result_class = "scene_latest_rejected";
+        break;
+      }
+    }
+    RCLCPP_WARN(
+      this->get_logger(),
+      "scene_replan: attempt=%d, result_class=%s, detail=%s",
+      attempt + 1,
+      result_class.c_str(),
+      detail.c_str());
   }
   const double route_request_finished_sec =
     std::chrono::duration<double>(
@@ -1617,7 +1793,7 @@ void GlobalPlanner::makePlan(const std::shared_ptr<rclcpp_action::ServerGoalHand
     return;
   }
 
-  if(raw_route.poses.empty()){
+  if(!route_validated || raw_route.poses.empty()){
     publishRouteRequestStageDebug(
       request_id,
       goal_seq,
@@ -1683,23 +1859,98 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlan(
   const ForwardHybridAStar::ProgressCallback & progress_callback)
 {
   std::unique_lock<std::mutex> lock(protect_kdtree_ground_);
-  return makeROSPlanLocked(
-    start,
-    goal,
-    force_position_only_goal,
-    force_use_goal_heading,
-    cancel_requested,
-    was_canceled,
-    debug_label,
-    search_diagnostics,
-    start_projection,
-    goal_projection,
-    progress_callback);
+
+  const auto failed_path = [this]() {
+      nav_msgs::msg::Path path;
+      path.header.frame_id = global_frame_;
+      path.header.stamp = clock_->now();
+      return path;
+    };
+
+  ScenePipelineContext scene;
+  std::string scene_reason;
+  if(!acquirePinnedScene(&scene, &scene_reason)){
+    return failed_path();
+  }
+
+  //@ Bounded work only: no new tunable parameter list. The first search uses
+  //@ one pinned scene; a changed map or an affected dynamic route may replan
+  //@ at most twice against the latest pinned scene.
+  constexpr int kMaxLatestSceneReplans = 2;
+  for(int attempt = 0; attempt <= kMaxLatestSceneReplans; ++attempt){
+    nav_msgs::msg::Path path = makeROSPlanLocked(
+      start,
+      goal,
+      scene,
+      force_position_only_goal,
+      force_use_goal_heading,
+      cancel_requested,
+      was_canceled,
+      debug_label,
+      search_diagnostics,
+      start_projection,
+      goal_projection,
+      progress_callback);
+    if(path.poses.empty()){
+      return path;
+    }
+
+    ScenePipelineContext latest;
+    std::string result_class;
+    std::string detail;
+    const LatestRouteStatus status = validateRouteAgainstLatest(
+      scene, path, &latest, &result_class, &detail);
+    if(status == LatestRouteStatus::kAccepted){
+      return path;
+    }
+    if(status == LatestRouteStatus::kRejected){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "scene_latest_rejected: refusing the route instead of accepting stale data, result_class=%s, detail=%s",
+        result_class.c_str(),
+        detail.c_str());
+      if(search_diagnostics != nullptr){
+        search_diagnostics->success = false;
+        search_diagnostics->path_pose_count = 0;
+      }
+      return failed_path();
+    }
+    if(attempt >= kMaxLatestSceneReplans){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "scene_replan_budget_exhausted: result_class=%s, detail=%s",
+        result_class.c_str(),
+        detail.c_str());
+      if(search_diagnostics != nullptr){
+        search_diagnostics->success = false;
+        search_diagnostics->path_pose_count = 0;
+      }
+      return failed_path();
+    }
+
+    if(latest.valid()){
+      scene = latest;
+    }
+    else{
+      std::string reason;
+      if(!acquirePinnedScene(&scene, &reason)){
+        return failed_path();
+      }
+    }
+    RCLCPP_WARN(
+      this->get_logger(),
+      "scene_replan: attempt=%d, result_class=%s, detail=%s",
+      attempt + 1,
+      result_class.c_str(),
+      detail.c_str());
+  }
+  return failed_path();
 }
 
 nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
   const geometry_msgs::msg::PoseStamped& start,
   const geometry_msgs::msg::PoseStamped& goal,
+  const ScenePipelineContext & scene,
   bool force_position_only_goal,
   bool force_use_goal_heading,
   const CancelRequestedCallback & cancel_requested,
@@ -1735,6 +1986,13 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
   if(cancel_requested && cancel_requested()){
     return mark_canceled();
   }
+  if(!scene.valid()){
+    RCLCPP_WARN(
+      this->get_logger(),
+      "scene_not_ready: graph/hybrid planning refused without a pinned scene");
+    ros_path.poses.clear();
+    return ros_path;
+  }
 
   const std::string & route_backend =
     route_backend_override.empty() ? raw_route_backend_ : route_backend_override;
@@ -1746,6 +2004,15 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
     };
 
   if(raw_route_uses_forward_hybrid_astar && forward_hybrid_astar_planner_){
+    std::string scene_reason;
+    if(!forward_hybrid_astar_planner_->SetSceneSnapshot(scene, &scene_reason)){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "scene_not_ready: hybrid planner refused the pinned scene: %s",
+        scene_reason.c_str());
+      ros_path.poses.clear();
+      return ros_path;
+    }
     nav_msgs::msg::Path hybrid_path;
     bool hybrid_planning_canceled = false;
     if(forward_hybrid_astar_planner_->MakePlan(
@@ -1795,10 +2062,31 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
     return mark_canceled();
   }
 
+  {
+    std::string scene_reason;
+    const bool scene_pinned = use_pre_graph_ ?
+      (a_star_planner_pre_graph_ != nullptr &&
+      a_star_planner_pre_graph_->setSceneSnapshot(
+        scene.snapshot(), scene.parameters(), &scene_reason)) :
+      (a_star_planner_ != nullptr &&
+      a_star_planner_->setSceneSnapshot(
+        scene.snapshot(), scene.parameters(), &scene_reason));
+    if(!scene_pinned){
+      RCLCPP_WARN(
+        this->get_logger(),
+        "scene_not_ready: %s A* refused the pinned scene: %s; live fallback is disabled",
+        use_pre_graph_ ? "pre-graph" : "graph",
+        scene_reason.c_str());
+      ros_path.poses.clear();
+      return ros_path;
+    }
+  }
+
   const auto graph_planning_started_at = std::chrono::steady_clock::now();
   const auto endpoint_projection_started_at = std::chrono::steady_clock::now();
   has_start_goal_id =
-    getStartGoalID(start, goal, start_id, goal_id, start_projection, goal_projection);
+    getStartGoalID(
+      start, goal, scene, start_id, goal_id, start_projection, goal_projection);
   const double endpoint_projection_ms = ElapsedMs(endpoint_projection_started_at);
   if(has_start_goal_id && progress_callback){
     ForwardHybridAStar::SearchDiagnostics progress;
@@ -1863,7 +2151,7 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
       RCLCPP_DEBUG(this->get_logger(), "Path found from: %u to %u", start_id, goal_id);
     else
       RCLCPP_DEBUG_THROTTLE(this->get_logger(), *clock_, 5000, "Path found from: %u to %u", start_id, goal_id);
-    getROSPath(path, ros_path);
+    getROSPath(path, ros_path, scene);
     if(search_diagnostics != nullptr){
       search_diagnostics->path_pose_count = ros_path.poses.size();
     }
@@ -1929,7 +2217,7 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
     }
 
     ros_path.poses.push_back(goal);
-    smoothGraphPathForAckermann(&ros_path);
+    smoothGraphPathForAckermann(&ros_path, scene);
     if(search_diagnostics != nullptr){
       search_diagnostics->planning_time_sec = elapsed_seconds(graph_planning_started_at);
       search_diagnostics->path_pose_count = ros_path.poses.size();
@@ -1941,6 +2229,7 @@ nav_msgs::msg::Path GlobalPlanner::makeROSPlanLocked(
 nav_msgs::msg::Path GlobalPlanner::makeGraphRouteLocked(
   const geometry_msgs::msg::PoseStamped & start,
   const geometry_msgs::msg::PoseStamped & goal,
+  const ScenePipelineContext & scene,
   const CancelRequestedCallback & cancel_requested,
   bool * was_canceled,
   ForwardHybridAStar::SearchDiagnostics * search_diagnostics,
@@ -1950,6 +2239,7 @@ nav_msgs::msg::Path GlobalPlanner::makeGraphRouteLocked(
   return makeROSPlanLocked(
     start,
     goal,
+    scene,
     false,
     false,
     cancel_requested,
@@ -1966,6 +2256,7 @@ nav_msgs::msg::Path GlobalPlanner::makeHybridRefinedRouteLocked(
   const geometry_msgs::msg::PoseStamped & start,
   const geometry_msgs::msg::PoseStamped & goal,
   const nav_msgs::msg::Path & graph_route,
+  const ScenePipelineContext & scene,
   const CancelRequestedCallback & cancel_requested,
   bool * was_canceled,
   const std::string & debug_label)
@@ -1979,6 +2270,18 @@ nav_msgs::msg::Path GlobalPlanner::makeHybridRefinedRouteLocked(
     *was_canceled = false;
   }
   if(graph_route.poses.empty() || !forward_hybrid_astar_planner_){
+    return graph_route;
+  }
+
+  //@ Re-pin the exact route scene before every refine request. A failed pin is
+  //@ a hard refusal: keep the already-valid graph route and never let the
+  //@ hybrid backend fall back to live SharedData.
+  std::string scene_reason;
+  if(!forward_hybrid_astar_planner_->SetSceneSnapshot(scene, &scene_reason)){
+    RCLCPP_WARN(
+      this->get_logger(),
+      "scene_not_ready: hybrid refine refused the pinned scene: %s",
+      scene_reason.c_str());
     return graph_route;
   }
 
@@ -2085,49 +2388,45 @@ nav_msgs::msg::Path GlobalPlanner::makeHybridRefinedRouteLocked(
 
 void GlobalPlanner::getStaticGraphFromPerception3D(){
   
-  //@Calculate node weight
-  
-  /*
-  //static graph has been remove 9 Mar 2025
-  graph_t* static_graph; //std::unordered_map<unsigned int, std::set<edge_t>> typedef in static_graph.h
-  static_graph = static_graph_.getGraphPtr();
-  pubStaticGraph();
-  
-  RCLCPP_DEBUG(this->get_logger(), "Static graph is generated with size: %lu", static_graph_.getSize());
-  */
-
   const bool needs_graph_astar =
     raw_route_backend_ == "graph_a_star" || raw_route_backend_ == "hybrid_a_star";
 
   if(!has_initialized_){
     has_initialized_ = true;
     if(needs_graph_astar){
-      if(a_star_expanding_radius_ >= perception_3d_ros_->getGlobalUtils()->getInscribedRadius()*2){
+      if(perception_3d_ros_ && perception_3d_ros_->getGlobalUtils() &&
+        a_star_expanding_radius_ >=
+        perception_3d_ros_->getGlobalUtils()->getInscribedRadius()*2)
+      {
         RCLCPP_WARN(this->get_logger(), "Expanding radius is much larger than InscribedRadius, the planning time will be increased.");
       }
+      //@ Snapshot-only construction: no live ground copy or FLANN tree is
+      //@ built here. Every request pins the immutable view with
+      //@ setSceneSnapshot() before projection/search. The pre-graph
+      //@ StaticGraph argument is only a legacy placeholder.
       if(!use_pre_graph_){
-        a_star_planner_ = std::make_shared<A_Star_on_Graph>(pcl_ground_, perception_3d_ros_, a_star_expanding_radius_);
+        a_star_planner_ = std::make_shared<A_Star_on_Graph>(
+          nullptr, perception_3d_ros_, a_star_expanding_radius_);
         a_star_planner_->setupTurningWeight(turning_weight_);
       }
       else{
-        a_star_planner_pre_graph_ = std::make_shared<A_Star_on_PreGraph>(pcl_ground_, static_graph_, perception_3d_ros_, a_star_expanding_radius_);
+        a_star_planner_pre_graph_ = std::make_shared<A_Star_on_PreGraph>(
+          nullptr, static_graph_, perception_3d_ros_, a_star_expanding_radius_);
         a_star_planner_pre_graph_->setupTurningWeight(turning_weight_);
       }
     }
 
     forward_hybrid_astar_planner_ = std::make_shared<ForwardHybridAStar>(
-      perception_3d_ros_, pcl_ground_, kdtree_ground_, this->get_logger());
+      perception_3d_ros_, nullptr, nullptr, this->get_logger());
     forward_hybrid_astar_planner_->SetConfig(forward_hybrid_astar_config_);
     forward_hybrid_astar_planner_->SetGlobalFrame(global_frame_);
   }
   else{
-    if(needs_graph_astar){
-      if(!use_pre_graph_ && a_star_planner_){
-        a_star_planner_->updateGraph(pcl_ground_);
-      }
-      else if(use_pre_graph_ && a_star_planner_pre_graph_){
-        a_star_planner_pre_graph_->updateGraph(pcl_ground_, static_graph_);
-      }
+    if(a_star_planner_){
+      a_star_planner_->setupTurningWeight(turning_weight_);
+    }
+    if(a_star_planner_pre_graph_){
+      a_star_planner_pre_graph_->setupTurningWeight(turning_weight_);
     }
     if(forward_hybrid_astar_planner_){
       forward_hybrid_astar_planner_->SetConfig(forward_hybrid_astar_config_);
@@ -2136,6 +2435,7 @@ void GlobalPlanner::getStaticGraphFromPerception3D(){
   }
 
   pubWeight();
+  pubStaticGraph();
 
   RCLCPP_INFO(this->get_logger(), "Publish weighted ground point cloud.");
   graph_ready_ = true;
@@ -2144,21 +2444,29 @@ void GlobalPlanner::getStaticGraphFromPerception3D(){
 
 void GlobalPlanner::pubWeight(){
 
+  std::shared_ptr<const perception_3d::LegacyStaticView> static_view;
+  {
+    std::lock_guard<std::mutex> cache_lock(scene_cache_mutex_);
+    static_view = current_static_view_;
+  }
+  if(!static_view || !static_view->groundPoints()){
+    return;
+  }
+
   pcl::PointCloud<pcl::PointXYZI>::Ptr weighted_pc (new pcl::PointCloud<pcl::PointXYZI>);
-  
-  auto shared_data = perception_3d_ros_->getSharedDataPtr();
-  const size_t node_weight_size =
-    (shared_data && shared_data->sGraph_ptr_) ? shared_data->sGraph_ptr_->getNodeWeightSize() : 0;
-  const size_t ground_size = pcl_ground_ ? pcl_ground_->points.size() : 0;
-  const size_t publish_size = std::min(node_weight_size, ground_size);
+
+  const auto & ground_points = *static_view->groundPoints();
+  const perception_3d::LegacyStaticGraph & graph = static_view->graph();
+  const size_t publish_size =
+    std::min(graph.nodeWeightCount(), ground_points.points.size());
   for(size_t it=0; it<publish_size; it++){
 
     pcl::PointXYZI ipt;
 
-    ipt.x = pcl_ground_->points[it].x;
-    ipt.y = pcl_ground_->points[it].y;
-    ipt.z = pcl_ground_->points[it].z;
-    ipt.intensity = static_graph_.getNodeWeight(it);    
+    ipt.x = ground_points.points[it].x;
+    ipt.y = ground_points.points[it].y;
+    ipt.z = ground_points.points[it].z;
+    ipt.intensity = graph.getNodeWeight(it);
     weighted_pc->push_back(ipt);
 
   }
@@ -2170,10 +2478,19 @@ void GlobalPlanner::pubWeight(){
 }
 
 void GlobalPlanner::pubStaticGraph(){
- 
-  //@edge visualization 
+
+  std::shared_ptr<const perception_3d::LegacyStaticView> static_view;
+  {
+    std::lock_guard<std::mutex> cache_lock(scene_cache_mutex_);
+    static_view = current_static_view_;
+  }
+  if(!static_view || !static_view->groundPoints()){
+    return;
+  }
+
+  //@edge visualization
   //@This is just for visulization, therefore reduce edges to let rviz less lag
-  
+
   std::set<std::pair<unsigned int, unsigned int>> duplicate_check;
   visualization_msgs::msg::MarkerArray markerArray;
   visualization_msgs::msg::Marker markerEdge;
@@ -2188,34 +2505,43 @@ void GlobalPlanner::pubStaticGraph(){
   markerEdge.color.r = 0.9; markerEdge.color.g = 1; markerEdge.color.b = 0;
   markerEdge.color.a = 0.2;
 
-  graph_t* static_graph; //std::unordered_map<unsigned int, std::set<edge_t>> typedef in static_graph.h
-  static_graph = static_graph_.getGraphPtr();
+  const auto & ground_points = *static_view->groundPoints();
+  const perception_3d::LegacyStaticGraph & graph = static_view->graph();
+  const unsigned int node_count =
+    static_cast<unsigned int>(graph.nodeCount());
 
   int cnt = 0;
-  for(auto it = (*static_graph).begin();it!=(*static_graph).end();it++){
+  for(unsigned int node = 0; node < node_count; ++node){
+    if(node >= ground_points.points.size()){
+      break;
+    }
     geometry_msgs::msg::Point p;
-    p.x = pcl_ground_->points[(*it).first].x;
-    p.y = pcl_ground_->points[(*it).first].y;
-    p.z = pcl_ground_->points[(*it).first].z;
-    for(auto it_set = (*it).second.begin();it_set != (*it).second.end();it_set++){
+    p.x = ground_points.points[node].x;
+    p.y = ground_points.points[node].y;
+    p.z = ground_points.points[node].z;
+    const edges_t & edges = graph.getEdge(node);
+    for(auto it_set = edges.begin(); it_set != edges.end(); it_set++){
 
       std::pair<unsigned int, unsigned int> edge_marker, edge_marker_inverse;
-      edge_marker.first = (*it).first;
+      edge_marker.first = node;
       edge_marker.second = (*it_set).first;
       edge_marker_inverse.first = (*it_set).first;
-      edge_marker_inverse.second = (*it).first;
+      edge_marker_inverse.second = node;
       if( !duplicate_check.insert(edge_marker).second )
-      {   
+      {
         continue;
       }
       if( !duplicate_check.insert(edge_marker_inverse).second )
-      {   
+      {
         continue;
       }
       markerEdge.points.push_back(p);
-      p.x = pcl_ground_->points[(*it_set).first].x;
-      p.y = pcl_ground_->points[(*it_set).first].y;
-      p.z = pcl_ground_->points[(*it_set).first].z;     
+      if((*it_set).first >= ground_points.points.size()){
+        continue;
+      }
+      p.x = ground_points.points[(*it_set).first].x;
+      p.y = ground_points.points[(*it_set).first].y;
+      p.z = ground_points.points[(*it_set).first].z;
       markerEdge.points.push_back(p);
       markerEdge.id = cnt;
       cnt++;
@@ -2224,5 +2550,6 @@ void GlobalPlanner::pubStaticGraph(){
   markerArray.markers.push_back(markerEdge);
   pub_static_graph_->publish(markerArray);
 }
+
 
 }

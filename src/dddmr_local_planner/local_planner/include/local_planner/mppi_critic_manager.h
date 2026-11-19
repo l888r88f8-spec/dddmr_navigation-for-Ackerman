@@ -46,6 +46,14 @@ struct MppiScoredTrajectory
 {
   std::vector<MppiControl> controls;
   std::vector<MppiTrajectoryPoint> points;
+  // Constant-curvature continuation of the terminal control, sampled by arc
+  // length up to evaluation_distance and stopped at the first contact.
+  // Collision-only: obstacle_clearance stays non-finite on these points so
+  // they never enter the averaged repulsion term.
+  std::vector<MppiTrajectoryPoint> probe_points;
+  // Arc length (m) at which the probe first collided, or -1 when it reached
+  // evaluation_distance without contact. Diagnostic only.
+  double probe_first_block_m = -1.0;
 };
 
 class MppiBypassSideClassifier
@@ -145,7 +153,9 @@ double mppiBypassBandDetour(
   MppiBypassSide side,
   double vehicle_offset);
 
-bool isMppiTrajectoryCollisionFree(const MppiScoredTrajectory & trajectory);
+bool isMppiTrajectoryCollisionFree(
+  const MppiScoredTrajectory & trajectory,
+  bool include_probe = true);
 MppiBypassSide classifyMppiBypassSide(
   const MppiScoredTrajectory & trajectory,
   const std::vector<MppiPathPoint> & path);
@@ -264,10 +274,36 @@ struct MppiCriticData
   std::size_t obstacle_clearance_point_checks = 0;
 };
 
+// Per-critic cost attribution for one candidate. Diagnostic only: it lets a
+// chosen command be explained by the term that produced it instead of by the
+// total score alone.
+struct MppiCriticTermCosts
+{
+  double constraint = 0.0;
+  double obstacles = 0.0;
+  double goal = 0.0;
+  double goal_angle = 0.0;
+  double path_align = 0.0;
+  double path_follow = 0.0;
+  double path_angle = 0.0;
+  double prefer_forward = 0.0;
+};
+
 struct MppiCriticResult
 {
   bool fail_flag = false;
   std::vector<MppiCandidateScore> scores;
+  // Aligned with scores. Empty when no critic ran.
+  std::vector<MppiCriticTermCosts> term_costs;
+  // Diagnostic only. Records whether the progress/path terms actually shaped
+  // this cycle's costs, or were silently dropped by their own gates. Without
+  // this a missing term is indistinguishable from a term that returned zero.
+  bool path_align_applied = false;
+  bool path_align_skipped_blocked = false;
+  bool path_follow_applied = false;
+  bool path_follow_skipped_blocked = false;
+  std::size_t path_follow_target_index = 0;
+  double path_follow_target_distance = 0.0;
 };
 
 bool annotateMppiCandidateMetadata(

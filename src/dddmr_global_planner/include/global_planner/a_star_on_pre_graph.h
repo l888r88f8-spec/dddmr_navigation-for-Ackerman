@@ -48,6 +48,10 @@ type graph_t is defined here
 /*For perception*/
 #include <perception_3d/perception_3d_ros.h>
 #include <global_planner/nanoflann_pcl.hpp>
+#include <global_planner/legacy_scene_adapter.h>
+
+#include <memory>
+#include <string>
 
 typedef struct {
   unsigned int self_index;
@@ -64,6 +68,8 @@ class AstarListPreGraph{
 
     void Initial();
     void setGraph(perception_3d::StaticGraph& static_graph);
+    void setSceneView(
+      const std::shared_ptr<const perception_3d::LegacyStaticView> & view);
     void updateNode(NodePreGraph_t& a_node);
     void closeNode(NodePreGraph_t& a_node);
     float getGVal(NodePreGraph_t& a_node);
@@ -74,8 +80,11 @@ class AstarListPreGraph{
     bool isFrontierEmpty();
   private:
 
-    /*Static graph is for path planning and list*/
-    perception_3d::StaticGraph static_graph_;
+    /*Static graph is for path planning and list. Legacy callers keep their
+    original graph object alive for the planner lifetime; the snapshot path
+    reads the immutable LegacyStaticView directly and never deep-copies it.*/
+    perception_3d::StaticGraph * legacy_graph_{nullptr};
+    std::shared_ptr<const perception_3d::LegacyStaticView> scene_view_;
     
     /*
     We handle closed list and accessory by unordered::map to get time complexity of O(1)
@@ -105,6 +114,25 @@ class A_Star_on_PreGraph{
                                   perception_3d::StaticGraph& static_graph);
 
       void getPath( unsigned int start, unsigned int goal, std::vector<unsigned int>& path);
+
+      void getPath( unsigned int start, unsigned int goal, std::vector<unsigned int>& path,
+        global_planner::AStarPlanTrace * trace);
+
+      /*
+      Pin one validated immutable scene read view for the next searches. On
+      failure the requested state is remembered as rejected, so getPath()
+      returns an empty path instead of silently falling back to live data.
+      */
+      bool setSceneSnapshot(
+        const std::shared_ptr<const perception_3d::SceneSnapshot> & snapshot,
+        const global_planner::LegacySearchParameters & parameters,
+        std::string * rejection_reason = nullptr);
+      void clearSceneSnapshot();
+      bool hasSceneSnapshot() const noexcept {return scene_active_;}
+      const std::string & sceneSnapshotRejectionReason() const noexcept
+      {
+        return scene_rejection_reason_;
+      }
       
       void setupTurningWeight(double m_weight){turning_weight_ = m_weight;}
       
@@ -117,17 +145,28 @@ class A_Star_on_PreGraph{
 
       pcl::PointCloud<pcl::PointXYZI>::Ptr pc_original_z_up_;
 
-      perception_3d::StaticGraph static_graph_; 
+      perception_3d::StaticGraph * legacy_graph_{nullptr};
       /*Provide dynamic graph for obstacle avoidance*/
       std::shared_ptr<perception_3d::Perception3D_ROS> perception_ros_;
       
       /*Create the list*/
-      AstarListPreGraph* ASLS_;
+      AstarListPreGraph* ASLS_{nullptr};
 
       //@ turning weight of the node
-      double turning_weight_;
+      double turning_weight_{0.0};
 
       double getThetaFromParent2Expanding(pcl::PointXYZI m_pcl_current_parent, pcl::PointXYZI m_pcl_current, pcl::PointXYZI m_pcl_expanding);
 
-      double a_star_expanding_radius_;
+      double a_star_expanding_radius_{0.0};
+
+      void ResetSceneSnapshot();
+
+      std::shared_ptr<const perception_3d::LegacyStaticView> scene_static_view_;
+      std::shared_ptr<const perception_3d::LegacyCostView> scene_cost_view_;
+      std::shared_ptr<const nanoflann::KdTreeFLANN<pcl::PointXYZI>>
+      scene_lethal_kdtree_;
+      global_planner::LegacySearchParameters scene_parameters_;
+      bool scene_requested_{false};
+      bool scene_active_{false};
+      std::string scene_rejection_reason_;
 };

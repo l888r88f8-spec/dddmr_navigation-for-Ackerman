@@ -25,9 +25,10 @@
 #include <utility>
 #include <vector>
 
-#include "dddmr_grid_global_planner/grid_search.h"
+#include "grid_global_planner/grid_search.h"
+#include "grid_global_planner/terrain_boundary_cost.h"
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -150,6 +151,10 @@ struct GridGraphAStar::Impl
     // Populated only when the corresponding penalty weight is positive.
     std::vector<double> node_slope;
     std::vector<double> node_roughness;
+    // Per-node boundary risk weight, including the configured multiplier. It is
+    // derived from the snapshot's immutable measured-boundary cache once per
+    // request; the topology cache never depends on this request-specific value.
+    std::vector<double> node_boundary_penalty;
     std::vector<QueueEntry> open;
     std::uint64_t generation{0};
 
@@ -474,7 +479,7 @@ SearchStatus GridGraphAStar::Prepare(
   if (!map.IsReady() || map.fine_terrain() == nullptr) {
     return SearchStatus::kNotReady;
   }
-  if (budget.max_expansions == 0 || budget.max_samples == 0) {
+  if (budget.max_samples == 0) {
     return SearchStatus::kInvalidRequest;
   }
   SearchStats local_stats;
@@ -524,7 +529,7 @@ SearchResult GridGraphAStar::Search(
     result.detail = "distance field is not bound to the supplied snapshot";
     return finish();
   }
-  if (request.budget.max_expansions == 0 || request.budget.max_samples == 0) {
+  if (request.budget.max_samples == 0) {
     result.status = SearchStatus::kInvalidRequest;
     result.detail = "search budgets must be positive";
     return finish();
@@ -536,7 +541,11 @@ SearchResult GridGraphAStar::Search(
     !std::isfinite(options_.slope_penalty_weight) ||
     options_.slope_penalty_weight < 0.0 ||
     !std::isfinite(options_.roughness_penalty_weight) ||
-    options_.roughness_penalty_weight < 0.0)
+    options_.roughness_penalty_weight < 0.0 ||
+    !std::isfinite(options_.boundary_penalty_distance_m) ||
+    options_.boundary_penalty_distance_m < 0.0 ||
+    !std::isfinite(options_.boundary_penalty_weight) ||
+    options_.boundary_penalty_weight < 0.0)
   {
     result.status = SearchStatus::kInvalidRequest;
     result.detail = "graph search cost options are invalid";
@@ -617,15 +626,25 @@ SearchResult GridGraphAStar::Search(
   // Slope/roughness are geometric node attributes, not obstacle state. They are
   // evaluated only when their weight is positive so the zero-weight production
   // path does no acos/rms work and performs no distance-field queries.
+  // Boundary risk consumes only the immutable measured-support-edge cache. A
+  // positive-infinity no-seed sentinel contributes zero (documented component
+  // semantics); insufficient-connection/scan-gap evidence is deliberately not
+  // treated as a physical drop edge.
   const bool slope_enabled = options_.slope_penalty_weight > 0.0;
   const bool roughness_enabled = options_.roughness_penalty_weight > 0.0;
+  const bool boundary_penalty_enabled =
+    options_.boundary_penalty_distance_m > 0.0 &&
+    options_.boundary_penalty_weight > 0.0;
   if (slope_enabled) {
     workspace.node_slope.resize(nodes.size());
   }
   if (roughness_enabled) {
     workspace.node_roughness.resize(nodes.size());
   }
-  if (slope_enabled || roughness_enabled) {
+  if (boundary_penalty_enabled) {
+    workspace.node_boundary_penalty.resize(nodes.size());
+  }
+  if (slope_enabled || roughness_enabled || boundary_penalty_enabled) {
     for (std::size_t index = 0; index < nodes.size(); ++index) {
       if ((index % kBudgetCheckInterval) == 0U) {
         const BudgetTracker::Status budget_status = tracker.Check();
@@ -640,6 +659,13 @@ SearchResult GridGraphAStar::Search(
       }
       if (roughness_enabled) {
         workspace.node_roughness[index] = NodeRoughness(nodes[index]);
+      }
+      if (boundary_penalty_enabled) {
+        workspace.node_boundary_penalty[index] =
+          TerrainBoundaryEvidenceComponentPenalty(
+          terrain.MeasuredSupportBoundaryDistanceM(nodes[index].id),
+          options_.boundary_penalty_distance_m,
+          options_.boundary_penalty_weight);
       }
     }
   }
@@ -666,11 +692,11 @@ SearchResult GridGraphAStar::Search(
     options_.obstacle_penalty_distance_m > 0.0 &&
     options_.obstacle_penalty_weight > 0.0;
   while (!workspace.open.empty()) {
-    const BudgetTracker::Status expansion_budget =
-      tracker.ConsumeExpansion();
-    if (expansion_budget != BudgetTracker::Status::kOk) {
-      result.status = ToSearchStatus(expansion_budget);
-      result.detail = "graph search expansion budget expired";
+    const BudgetTracker::Status loop_budget =
+      tracker.Check();
+    if (loop_budget != BudgetTracker::Status::kOk) {
+      result.status = ToSearchStatus(loop_budget);
+      result.detail = "graph search budget expired";
       break;
     }
     const QueueEntry entry = workspace.open.front();
@@ -726,6 +752,17 @@ SearchResult GridGraphAStar::Search(
       }
       cost *= 1.0 + options_.slope_penalty_weight * slope +
         options_.roughness_penalty_weight * roughness;
+
+      if (boundary_penalty_enabled) {
+        // Max endpoint risk is equivalent to using the minimum endpoint
+        // clearance in the monotone kernel and keeps reverse edges symmetric.
+        // Scaling by edge.length preserves the same per-metre cost at every
+        // resolution. The extra is non-negative, so the Euclidean A* heuristic
+        // remains admissible; it never gates traversability.
+        cost += edge.length * std::max(
+          workspace.node_boundary_penalty[edge.canonical_source],
+          workspace.node_boundary_penalty[edge.canonical_target]);
+      }
 
       if (obstacle_penalty_enabled) {
         ++result.stats.distance_queries;
@@ -831,4 +868,4 @@ SearchResult GridGraphAStar::Search(
   return finish();
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

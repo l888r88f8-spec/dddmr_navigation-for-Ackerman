@@ -25,6 +25,9 @@
   <depend>angles</depend>
   <depend>local_planner</depend>
   <exec_depend>perception_3d</exec_depend>
+  <exec_depend>grid_global_planner</exec_depend>
+  <exec_depend>mcl_3dl</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
   <depend>recovery_behaviors</depend>
   <depend>dddmr_sys_core</depend>
 

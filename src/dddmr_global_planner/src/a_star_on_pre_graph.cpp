@@ -31,17 +31,44 @@
 #include <global_planner/a_star_on_pre_graph.h>
 
 AstarListPreGraph::AstarListPreGraph(perception_3d::StaticGraph& static_graph){
-  static_graph_ = static_graph;
+  legacy_graph_ = &static_graph;
 }
 
 void AstarListPreGraph::setGraph(perception_3d::StaticGraph& static_graph){
-  static_graph_ = static_graph;
+  legacy_graph_ = &static_graph;
+  scene_view_.reset();
+}
+
+void AstarListPreGraph::setSceneView(
+  const std::shared_ptr<const perception_3d::LegacyStaticView> & view)
+{
+  scene_view_ = view;
+  if(view){
+    legacy_graph_ = nullptr;
+  }
 }
 
 void AstarListPreGraph::Initial(){
   as_list_.clear();
+  if(scene_view_){
+    const std::size_t node_count = scene_view_->graph().nodeCount();
+    for(unsigned int it=0; it!=node_count;it++){
+      NodePreGraph_t new_node = {.self_index=0, .g=0, .h=0, .f=0, .parent_index=0, .is_closed=false, .is_opened=false};
+      as_list_[it] = new_node;
+    }
+    f_priority_set_.clear();
+    return;
+  }
+  if(!legacy_graph_){
+    f_priority_set_.clear();
+    return;
+  }
   graph_t* tmp_graph_t; //std::unordered_map<unsigned int, std::set<edge_t>> typedef in static_graph.h
-  tmp_graph_t = static_graph_.getGraphPtr();
+  tmp_graph_t = legacy_graph_->getGraphPtr();
+  if(!tmp_graph_t){
+    f_priority_set_.clear();
+    return;
+  }
   for(auto it=(*tmp_graph_t).begin();it!=(*tmp_graph_t).end();it++){
     NodePreGraph_t new_node = {.self_index=0, .g=0, .h=0, .f=0, .parent_index=0, .is_closed=false, .is_opened=false};
     as_list_[(*it).first] = new_node;
@@ -102,11 +129,13 @@ A_Star_on_PreGraph::A_Star_on_PreGraph(pcl::PointCloud<pcl::PointXYZI>::Ptr pc_o
                                   perception_3d::StaticGraph& static_graph, 
                                   std::shared_ptr<perception_3d::Perception3D_ROS> perception_ros,
                                   double a_star_expanding_radius){
-  static_graph_ = static_graph;
+  legacy_graph_ = &static_graph;
   perception_ros_ = perception_ros;
   a_star_expanding_radius_ = a_star_expanding_radius;
+  turning_weight_ = 0.0;
   pc_original_z_up_ = pc_original_z_up;
-  ASLS_ = new AstarListPreGraph(static_graph_);
+  ResetSceneSnapshot();
+  ASLS_ = new AstarListPreGraph(static_graph);
 }
 
 A_Star_on_PreGraph::~A_Star_on_PreGraph(){
@@ -114,13 +143,74 @@ A_Star_on_PreGraph::~A_Star_on_PreGraph(){
     delete ASLS_;
 }
 
+void A_Star_on_PreGraph::ResetSceneSnapshot(){
+  scene_static_view_.reset();
+  scene_cost_view_.reset();
+  scene_lethal_kdtree_.reset();
+  scene_parameters_ = global_planner::LegacySearchParameters{};
+  scene_requested_ = false;
+  scene_active_ = false;
+  scene_rejection_reason_.clear();
+  if(ASLS_){
+    ASLS_->setSceneView(nullptr);
+  }
+}
+
+void A_Star_on_PreGraph::clearSceneSnapshot(){
+  ResetSceneSnapshot();
+}
+
+bool A_Star_on_PreGraph::setSceneSnapshot(
+  const std::shared_ptr<const perception_3d::SceneSnapshot> & snapshot,
+  const global_planner::LegacySearchParameters & parameters,
+  std::string * rejection_reason)
+{
+  // Reuse the LOS index only for the exact same immutable cost view; all
+  // other snapshot fields are always cleared first.
+  const auto previous_static = scene_static_view_;
+  const auto previous_cost = scene_cost_view_;
+  const auto previous_lethal_tree = scene_lethal_kdtree_;
+  ResetSceneSnapshot();
+  scene_requested_ = true;
+
+  std::shared_ptr<const perception_3d::LegacyStaticView> static_view;
+  std::shared_ptr<const perception_3d::LegacyCostView> cost_view;
+  std::string reason;
+  if(!global_planner::BuildLegacySceneReadView(
+      snapshot, parameters, &static_view, &cost_view, &reason))
+  {
+    scene_rejection_reason_ = reason;
+    if(rejection_reason != nullptr){
+      *rejection_reason = reason;
+    }
+    return false;
+  }
+
+  scene_static_view_ = static_view;
+  scene_cost_view_ = cost_view;
+  scene_lethal_kdtree_ =
+    (static_view == previous_static && cost_view == previous_cost &&
+    previous_lethal_tree) ?
+    previous_lethal_tree :
+    global_planner::BuildLegacyLethalKdTree(cost_view);
+  scene_parameters_ = parameters;
+  scene_active_ = true;
+  scene_rejection_reason_.clear();
+  ASLS_->setSceneView(scene_static_view_);
+  if(rejection_reason != nullptr){
+    rejection_reason->clear();
+  }
+  return true;
+}
+
 void A_Star_on_PreGraph::updateGraph(pcl::PointCloud<pcl::PointXYZI>::Ptr pc_original_z_up, 
                                   perception_3d::StaticGraph& static_graph){
   
   
-  static_graph_ = static_graph;
+  ResetSceneSnapshot();
+  legacy_graph_ = &static_graph;
   pc_original_z_up_ = pc_original_z_up;
-  ASLS_->setGraph(static_graph_);
+  ASLS_->setGraph(static_graph);
 }
 
 double A_Star_on_PreGraph::getThetaFromParent2Expanding(pcl::PointXYZI m_pcl_current_parent, pcl::PointXYZI m_pcl_current, pcl::PointXYZI m_pcl_expanding){
@@ -151,7 +241,13 @@ double A_Star_on_PreGraph::getThetaFromParent2Expanding(pcl::PointXYZI m_pcl_cur
 
 bool A_Star_on_PreGraph::isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::PointXYZI& pcl_expanding, double inscribed_radius){
 
-  if(!kdtree_lethal_ || inscribed_radius <= 1e-6 || !std::isfinite(inscribed_radius)){
+  const nanoflann::KdTreeFLANN<pcl::PointXYZI>::ConstPtr & lethal_tree =
+    scene_active_ ? scene_lethal_kdtree_ : kdtree_lethal_;
+
+  if(!lethal_tree || !lethal_tree->getInputCloud() ||
+    lethal_tree->getInputCloud()->empty() ||
+    inscribed_radius <= 1e-6 || !std::isfinite(inscribed_radius))
+  {
     return true;
   }
 
@@ -180,7 +276,7 @@ bool A_Star_on_PreGraph::isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::Po
     a_pt.z = pcl_current.z + dZ*r;
     std::vector<int> pidx;
     std::vector<float> prsd;
-    kdtree_lethal_->radiusSearch(a_pt, 2*inscribed_radius, pidx, prsd);
+    lethal_tree->radiusSearch(a_pt, 2*inscribed_radius, pidx, prsd);
     if(pidx.size()>1){
       return false;
     }
@@ -191,13 +287,40 @@ bool A_Star_on_PreGraph::isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::Po
 void A_Star_on_PreGraph::getPath(
   unsigned int start, unsigned int goal,
   std::vector<unsigned int>& path){
+  getPath(start, goal, path, nullptr);
+}
+
+void A_Star_on_PreGraph::getPath(
+  unsigned int start, unsigned int goal,
+  std::vector<unsigned int>& path,
+  global_planner::AStarPlanTrace * trace){
+
+  if(trace){
+    trace->reset();
+  }
+
+  // A failed setSceneSnapshot() is a hard refusal for this planner object. It
+  // must not quietly fall back to live perception data.
+  if(scene_requested_ && !scene_active_){
+    return;
+  }
+  const bool frozen = scene_active_;
+  const pcl::PointCloud<pcl::PointXYZI> * ground = frozen ?
+    scene_static_view_->groundPoints().get() : pc_original_z_up_.get();
 
   //ROS_DEBUG("Start: %u, Goal: %u", start, goal);
-  if(!pc_original_z_up_ || pc_original_z_up_->points.empty() ||
-    start >= pc_original_z_up_->points.size() ||
-    goal >= pc_original_z_up_->points.size() ||
+  if(!ground || ground->points.empty() ||
+    start >= ground->points.size() ||
+    goal >= ground->points.size() ||
     !ASLS_)
   {
+    return;
+  }
+  if(frozen){
+    if(!scene_cost_view_ || !scene_static_view_){
+      return;
+    }
+  }else if(!legacy_graph_ || !perception_ros_){
     return;
   }
 
@@ -205,17 +328,30 @@ void A_Star_on_PreGraph::getPath(
   Create the first node which is start and add into frontier
   */
 
-  pcl::PointXYZI pcl_goal = pc_original_z_up_->points[goal];
-  pcl::PointXYZI pcl_start = pc_original_z_up_->points[start];
+  pcl::PointXYZI pcl_goal = ground->points[goal];
+  pcl::PointXYZI pcl_start = ground->points[start];
   float f = sqrt(pcl::geometry::squaredDistance(pcl_start, pcl_goal));
   NodePreGraph_t current_node = {.self_index=start, .g=0, .h=0, .f=f, .parent_index=start, .is_closed=false, .is_opened=true};
 
   ASLS_->Initial();
   ASLS_->updateNode(current_node);
   
-  double inscribed_radius = perception_ros_->getGlobalUtils()->getInscribedRadius();
-  double inflation_descending_rate = perception_ros_->getGlobalUtils()->getInflationDescendingRate();
-  double max_obstacle_distance = perception_ros_->getGlobalUtils()->getMaxObstacleDistance();
+  double inscribed_radius = 0.0;
+  double inflation_descending_rate = 0.0;
+  double max_obstacle_distance = 0.0;
+  if(frozen){
+    inscribed_radius = scene_parameters_.inscribed_radius;
+    inflation_descending_rate = scene_parameters_.inflation_descending_rate;
+    max_obstacle_distance = scene_parameters_.max_obstacle_distance;
+  }else{
+    if(!perception_ros_->getGlobalUtils()){
+      return;
+    }
+    inscribed_radius = perception_ros_->getGlobalUtils()->getInscribedRadius();
+    inflation_descending_rate = perception_ros_->getGlobalUtils()->getInflationDescendingRate();
+    max_obstacle_distance = perception_ros_->getGlobalUtils()->getMaxObstacleDistance();
+  }
+  (void)max_obstacle_distance;
 
   while(!ASLS_->isFrontierEmpty()){ 
     /*Pop minimum F, we leverage prior queue, so we dont need to loop frontier everytime*/
@@ -225,10 +361,23 @@ void A_Star_on_PreGraph::getPath(
     }
     //ROS_DEBUG("Expand node: %u", current_node.self_index);
     /*Get successors*/
-    auto successors = static_graph_.getEdge(current_node.self_index);
+    edges_t live_successors;
+    const edges_t * successors = nullptr;
+    if(frozen){
+      successors = &scene_static_view_->graph().getEdge(current_node.self_index);
+    }else{
+      live_successors = legacy_graph_->getEdge(current_node.self_index);
+      successors = &live_successors;
+    }
+    if(trace){
+      trace->expanded_nodes.push_back(current_node.self_index);
+    }
     
-    for(auto it = successors.begin(); it!=successors.end(); it++){
-      if((*it).first >= pc_original_z_up_->points.size()){
+    for(auto it = successors->begin(); it!=successors->end(); it++){
+      if(trace){
+        trace->neighbor_order.push_back((*it).first);
+      }
+      if((*it).first >= ground->points.size()){
         continue;
       }
       
@@ -236,19 +385,21 @@ void A_Star_on_PreGraph::getPath(
         continue;
       }
       //@ dGraphValue is the distance to lethal
-      double dGraphValue = perception_ros_->get_min_dGraphValue((*it).first);
+      double dGraphValue = frozen ?
+        scene_cost_view_->minDGraphValue((*it).first) :
+        perception_ros_->get_min_dGraphValue((*it).first);
 
       /*This is for lethal*/
       if(dGraphValue<inscribed_radius){
-        //ROS_DEBUG("%.2f,%.2f,%.2f, v: %.2f",pc_original_z_up_->points[(*it).first].x,pc_original_z_up_->points[(*it).first].y,pc_original_z_up_->points[(*it).first].z, dGraphValue);
+        //ROS_DEBUG("%.2f,%.2f,%.2f, v: %.2f",ground->points[(*it).first].x,ground->points[(*it).first].y,ground->points[(*it).first].z, dGraphValue);
         continue;
       }
       
       float current_expanding_g = (*it).second;
 
-      pcl::PointXYZI pcl_current = pc_original_z_up_->points[current_node.self_index];
-      pcl::PointXYZI pcl_current_parent = pc_original_z_up_->points[current_node.parent_index];
-      pcl::PointXYZI pcl_expanding = pc_original_z_up_->points[(*it).first];
+      pcl::PointXYZI pcl_current = ground->points[current_node.self_index];
+      pcl::PointXYZI pcl_current_parent = ground->points[current_node.parent_index];
+      pcl::PointXYZI pcl_expanding = ground->points[(*it).first];
 
       double factor = exp(-1.0 * inflation_descending_rate * (dGraphValue - inscribed_radius));
 
@@ -256,7 +407,7 @@ void A_Star_on_PreGraph::getPath(
       double theta = getThetaFromParent2Expanding(pcl_current_parent, pcl_current, pcl_expanding);
 
       float new_g = current_node.g + (*it).second + factor * 1.0 + 
-                      theta*turning_weight_ + pc_original_z_up_->points[current_node.self_index].intensity;
+                      theta*turning_weight_ + ground->points[current_node.self_index].intensity;
 
       float new_h = sqrt(pcl::geometry::squaredDistance(pcl_expanding, pcl_goal));
       float new_f = new_g + new_h;
@@ -287,6 +438,10 @@ void A_Star_on_PreGraph::getPath(
     if(ASLS_->isClosed(goal)){
       //ROS_DEBUG("Found path");
       NodePreGraph_t trace_back = ASLS_->getNode(goal);
+      if(trace){
+        trace->found = true;
+        trace->goal_g = trace_back.g;
+      }
       while(trace_back.self_index!=trace_back.parent_index){
         path.push_back(trace_back.self_index);
         trace_back = ASLS_->getNode(trace_back.parent_index);

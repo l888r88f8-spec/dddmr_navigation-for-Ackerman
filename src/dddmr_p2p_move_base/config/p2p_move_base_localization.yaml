@@ -115,7 +115,7 @@ global_planner:
       max_projected_vertical_jump: 0.12                           # 投影点最大垂向跳变（m）
       allow_sample_nearest_fallback: false                        # 采样投影失败时是否允许最近邻回退
 
-# 全局感知：公共话题与坐标系直接读取文件顶部的 /** 参数
+# 全局感知
 perception_3d_global:
   ros__parameters:
     enable_detail_log: false                                     # 是否开启感知层详细日志
@@ -180,7 +180,7 @@ local_planner:
     causal_prune_search_window: 40                              # 仅在当前进度附近搜索，防止跳段
     causal_prune_max_index_jump: 15                             # 单周期最大索引跳步
     causal_prune_max_arc_jump: 2.0                              # 单周期最大弧长跳步（m）
-    causal_prune_max_lateral_distance: 2.0                      # 机器人到候选段最大横向距离（m）
+    causal_prune_max_lateral_distance: 20.0                      # 机器人到候选段最大横向距离（m）
     causal_prune_max_heading_error: 1.75                        # 候选切线与车头最大夹角（rad）
     max_prune_failure_cycles: 3                                 # 连续 prune 失败阈值
     allow_offroute_anchor_recovery: true                        # 偏离后允许在前向窗口恢复锚点

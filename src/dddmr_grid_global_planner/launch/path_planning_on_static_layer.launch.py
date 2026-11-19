@@ -5,37 +5,23 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 
-def _offline_pcd_paths(params_file):
-    with open(params_file, 'r', encoding='utf-8') as stream:
-        config = yaml.safe_load(stream)
-    try:
-        offline = config['dddmr_grid_global_planner']['ros__parameters']['offline']
-    except (KeyError, TypeError) as exc:
-        raise RuntimeError(
-            f'{params_file}: missing '
-            'dddmr_grid_global_planner.ros__parameters.offline') from exc
-
-    paths = {}
-    for key in ('global_pcd', 'ground_pcd'):
-        value = offline.get(key)
-        if not isinstance(value, str) or not value.strip():
-            raise RuntimeError(
-                f'{params_file}: offline.{key} must be a non-empty path')
-        paths[key] = value
-    return paths
-
-
 def generate_launch_description():
 
-    grid_share = get_package_share_directory('dddmr_grid_global_planner')
-    params_file = os.path.join(grid_share, 'config', 'dddmr_grid_global_planner.yaml')
-    default_rviz_config = os.path.join(grid_share, 'rviz', 'dddmr_grid_global_planner.rviz')
-    offline_pcd = _offline_pcd_paths(params_file)
+    grid_share = get_package_share_directory('grid_global_planner')
+    params_file = os.path.join(grid_share, 'config', 'grid_global_planner.yaml')
+    visualization_file = os.path.join(
+        grid_share, 'config', 'grid_visualization.yaml')
+    with open(params_file, 'r', encoding='utf-8') as params_stream:
+        common_params = yaml.safe_load(params_stream)['/**']['ros__parameters']
+    global_frame = common_params['global_frame']
+    robot_base_frame = common_params['robot_base_frame']
+    default_rviz_config = os.path.join(grid_share, 'rviz', 'grid_global_planner.rviz')
+    map_path = LaunchConfiguration('map_path')
 
     use_sim = LaunchConfiguration('use_sim')
     rviz_config = LaunchConfiguration('rviz_config')
@@ -43,11 +29,18 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument(
-            'use_sim',
-            default_value='false',
+            "use_sim",
+            default_value=os.environ.get("USE_SIM_TIME") or "false",
             description=(
-                'Set use_sim_time for all five nodes. Use true only when '
-                'replaying with /clock.'),
+                "Use simulation clock if true. Defaults to USE_SIM_TIME from the "
+                "launch process environment, or false when unset; an explicit "
+                "use_sim:=... overrides it."
+            ),
+        ),
+        DeclareLaunchArgument(
+            'map_path',
+            default_value='/home/robot/map/hesai_outdoor_wuyuehua2',
+            description='Directory containing GlobalMap.pcd and GroundMap.pcd.',
         ),
         DeclareLaunchArgument(
             'rviz_config',
@@ -55,8 +48,7 @@ def generate_launch_description():
             description='Path to the RViz configuration file.',
         ),
         SetEnvironmentVariable('RCUTILS_COLORIZED_OUTPUT', '1'),
-        # Display reuses the planner's offline PCD paths from the same YAML.
-        # The launch overrides below never feed the offline planning map.
+        # One publisher loads the files; the planner consumes its latched clouds.
         Node(
             package='mcl_3dl',
             executable='pcl_publisher',
@@ -64,10 +56,13 @@ def generate_launch_description():
             respawn=False,
             emulate_tty=True,
             parameters=[
-                params_file,
+                visualization_file,
                 {
-                    'map_dir': offline_pcd['global_pcd'],
-                    'ground_dir': offline_pcd['ground_pcd'],
+                    'map_dir': PathJoinSubstitution([map_path, 'GlobalMap.pcd']),
+                    'ground_dir': PathJoinSubstitution([map_path, 'GroundMap.pcd']),
+                    'global_frame': global_frame,
+                    'map_topic': common_params['map_topic'],
+                    'ground_topic': common_params['ground_topic'],
                     'use_sim_time': use_sim_time,
                 },
             ],
@@ -75,8 +70,8 @@ def generate_launch_description():
         # Display-only offline pose. The bridge carries explicit start/goal
         # poses, so the planner does not need this transform for planning.
         Node(
-            package='global_planner',
-            executable='static_transform_from_params.py',
+            package='tf2_ros',
+            executable='static_transform_publisher',
             name='map2baselink',
             output='screen',
             respawn=False,
@@ -88,17 +83,18 @@ def generate_launch_description():
                 '--roll', '0.0',
                 '--pitch', '0.0',
                 '--yaw', '0.0',
+                '--frame-id', global_frame,
+                '--child-frame-id', robot_base_frame,
             ],
             parameters=[
-                params_file,
+                visualization_file,
                 {'use_sim_time': use_sim_time},
             ],
         ),
-        # The only /get_plan provider. All planner PCD paths come from YAML;
-        # the display publisher has its own YAML section.
+        # The only /get_plan provider; static map input comes from ROS topics.
         Node(
-            package='dddmr_grid_global_planner',
-            executable='dddmr_grid_offline_planner_node',
+            package='grid_global_planner',
+            executable='grid_global_planner_node',
             output='screen',
             respawn=False,
             emulate_tty=True,
@@ -112,27 +108,30 @@ def generate_launch_description():
         # RViz click -> /get_plan bridge. It never publishes /initialpose or a
         # vehicle command and only displays successful current-generation paths.
         Node(
-            package='dddmr_grid_global_planner',
+            package='grid_global_planner',
             executable='rviz_goal_bridge.py',
-            name='dddmr_grid_rviz_bridge',
+            name='grid_rviz_bridge',
             output='screen',
             respawn=False,
             emulate_tty=True,
             parameters=[
-                params_file,
-                {'use_sim_time': use_sim_time},
+                visualization_file,
+                {
+                    'fixed_frame': global_frame,
+                    'use_sim_time': use_sim_time,
+                },
             ],
         ),
         Node(
             package='rviz2',
             executable='rviz2',
             name='rviz2',
-            arguments=['-d', rviz_config],
+            arguments=['-d', rviz_config, '-f', global_frame],
             output='screen',
             respawn=False,
             emulate_tty=True,
             parameters=[
-                params_file,
+                visualization_file,
                 {'use_sim_time': use_sim_time},
             ],
         ),

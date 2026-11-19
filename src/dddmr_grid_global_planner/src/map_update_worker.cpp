@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/map_update_worker.h"
+#include "grid_global_planner/map_update_worker.h"
 
 #include <algorithm>
 #include <atomic>
@@ -35,11 +35,11 @@
 #include <utility>
 #include <vector>
 
-#include "dddmr_grid_global_planner/distance_field.h"
-#include "dddmr_grid_global_planner/obstacle_tile.h"
-#include "dddmr_grid_global_planner/source_observation.h"
+#include "grid_global_planner/distance_field.h"
+#include "grid_global_planner/obstacle_tile.h"
+#include "grid_global_planner/source_observation.h"
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -215,6 +215,7 @@ struct Request
 {
   MapUpdateRequestKind kind{MapUpdateRequestKind::kExpireSources};
   std::optional<TerrainPointObservation> terrain;
+  std::optional<std::shared_ptr<const MapSnapshot>> adopted_snapshot;
   std::optional<SourceObservationSnapshot> source;
   std::string source_id;
   std::uint64_t source_sequence{0};
@@ -233,6 +234,90 @@ bool HasEvidence(const LayerAggregate & layer) noexcept
 bool HasKnownClearance(const LayerAggregate & layer) noexcept
 {
   return layer.clearance_known && std::isfinite(layer.clearance_m);
+}
+
+// Merges two explicit layer states conservatively. Occupancy wins over clear
+// evidence so adopted static obstacles can never be erased by a later dynamic
+// clear; unknown is retained only when neither side carries a state.
+ObstacleState MergeLayerState(
+  ObstacleState base, ObstacleState overlay) noexcept
+{
+  if (base == ObstacleState::kOccupied ||
+    overlay == ObstacleState::kOccupied)
+  {
+    return ObstacleState::kOccupied;
+  }
+  if (base == ObstacleState::kClear || overlay == ObstacleState::kClear) {
+    return ObstacleState::kClear;
+  }
+  return ObstacleState::kUnknown;
+}
+
+// Merges one adopted base attribute with a live aggregate for the same layer
+// and node. Vertical intervals are unioned, headroom keeps the smallest known
+// value, and stamps keep the newest evidence.
+ObstacleAttributes MergeBaseAttributes(
+  const ObstacleAttributes & base, const ObstacleAttributes & overlay,
+  bool is_static)
+{
+  ObstacleAttributes merged = base;
+  if (is_static) {
+    merged.static_state =
+      MergeLayerState(base.static_state, overlay.static_state);
+    if (std::isfinite(overlay.static_distance_m) &&
+      (!std::isfinite(merged.static_distance_m) ||
+      overlay.static_distance_m < merged.static_distance_m))
+    {
+      merged.static_distance_m = overlay.static_distance_m;
+    }
+  } else {
+    merged.dynamic_state =
+      MergeLayerState(base.dynamic_state, overlay.dynamic_state);
+    if (std::isfinite(overlay.dynamic_distance_m) &&
+      (!std::isfinite(merged.dynamic_distance_m) ||
+      overlay.dynamic_distance_m < merged.dynamic_distance_m))
+    {
+      merged.dynamic_distance_m = overlay.dynamic_distance_m;
+    }
+  }
+  if (overlay.clearance_known) {
+    if (merged.clearance_known) {
+      merged.clearance_above_m =
+        std::min(merged.clearance_above_m, overlay.clearance_above_m);
+    } else {
+      merged.clearance_above_m = overlay.clearance_above_m;
+      merged.clearance_known = true;
+    }
+  }
+  if (overlay.occupied_vertical_extent_known) {
+    if (merged.occupied_vertical_extent_known) {
+      merged.occupied_min_z =
+        std::min(merged.occupied_min_z, overlay.occupied_min_z);
+      merged.occupied_max_z =
+        std::max(merged.occupied_max_z, overlay.occupied_max_z);
+    } else {
+      merged.occupied_vertical_extent_known = true;
+      merged.occupied_min_z = overlay.occupied_min_z;
+      merged.occupied_max_z = overlay.occupied_max_z;
+    }
+  }
+  if (overlay.observed_vertical_extent_known) {
+    if (merged.observed_vertical_extent_known) {
+      merged.observed_min_z =
+        std::min(merged.observed_min_z, overlay.observed_min_z);
+      merged.observed_max_z =
+        std::max(merged.observed_max_z, overlay.observed_max_z);
+    } else {
+      merged.observed_vertical_extent_known = true;
+      merged.observed_min_z = overlay.observed_min_z;
+      merged.observed_max_z = overlay.observed_max_z;
+    }
+  }
+  merged.observation_stamp_ns =
+    std::max(merged.observation_stamp_ns, overlay.observation_stamp_ns);
+  merged.received_steady_ns =
+    std::max(merged.received_steady_ns, overlay.received_steady_ns);
+  return merged;
 }
 
 // Converts a finite non-negative seconds value to saturated nanoseconds.
@@ -362,6 +447,12 @@ struct MapUpdateWorker::Impl
             event_metrics.kind =
               MapUpdateMetrics::Kind::kTerrainReplacement;
             break;
+          case MapUpdateRequestKind::kSnapshotAdoption:
+            // Adoption is a complete baseline replacement; it uses the same
+            // telemetry kind as a terrain replacement.
+            event_metrics.kind =
+              MapUpdateMetrics::Kind::kTerrainReplacement;
+            break;
           case MapUpdateRequestKind::kSourceObservation:
             event_metrics.kind =
               MapUpdateMetrics::Kind::kSourceObservation;
@@ -412,6 +503,11 @@ struct MapUpdateWorker::Impl
           ProcessTerrain(*request.terrain, metrics);
         }
         break;
+      case MapUpdateRequestKind::kSnapshotAdoption:
+        if (request.adopted_snapshot.has_value()) {
+          ProcessAdoption(*request.adopted_snapshot, metrics);
+        }
+        break;
       case MapUpdateRequestKind::kSourceObservation:
         if (request.source.has_value()) {
           ProcessSource(*request.source, metrics);
@@ -439,6 +535,69 @@ struct MapUpdateWorker::Impl
     } catch (...) {
       // Telemetry must never break map publication or ingestion.
     }
+  }
+
+  // Installs one prebuilt map as the worker baseline. The adopted fine terrain
+  // pointer, static layer and ready distance field are retained verbatim so graph
+  // topology and the static obstacle evidence survive later dynamic updates. Any
+  // deferred source observation is replayed before the first adoption publish.
+  void ProcessAdoption(
+    const std::shared_ptr<const MapSnapshot> & snapshot,
+    MapUpdateMetrics * metrics)
+  {
+    const auto adoption_start = std::chrono::steady_clock::now();
+    if (snapshot == nullptr || !snapshot->IsReady() ||
+      !snapshot->HasReadyDistanceField())
+    {
+      if (metrics != nullptr) {
+        metrics->detail = "adopted snapshot is not ready or has no bound field";
+      }
+      return;
+    }
+    const std::shared_ptr<const TerrainSnapshot> adopted_terrain =
+      snapshot->fine_terrain();
+    if (adopted_terrain == nullptr || snapshot->distance_field() == nullptr) {
+      if (metrics != nullptr) {
+        metrics->detail = "adopted snapshot has no terrain or distance field";
+      }
+      return;
+    }
+
+    terrain = adopted_terrain;
+    coarse = snapshot->coarse_terrain();
+    base_static_layer_ = snapshot->static_obstacles().tiles_layer();
+    base_dynamic_layer_ = snapshot->dynamic_obstacles().tiles_layer();
+    static_layer = base_static_layer_;
+    dynamic_layer = base_dynamic_layer_;
+    field = snapshot->distance_field();
+    // The adopted field is authoritative for this baseline. Reusing its options
+    // is what lets subsequent overlay publishes take the incremental path
+    // instead of falling back to a full rebuild with a different policy.
+    options.distance = field->options();
+    version = snapshot->obstacle_version();
+    latest_terrain_revision.store(
+      terrain->revision(), std::memory_order_release);
+
+    // Adoption normally happens before any source. If an observation arrived
+    // first it was deferred; replay it against the adopted terrain before the
+    // baseline is published so the first consumer sees the current overlay.
+    ReassociateAllSources();
+    ReplayDeferredObservations();
+    if (metrics != nullptr) {
+      metrics->contribution_ms = DurationToMs(
+        std::chrono::steady_clock::now() - adoption_start);
+    }
+    if (!dirty_nodes.empty()) {
+      BuildAndPublishObstacles(metrics);
+      return;
+    }
+    pending_publish_ = snapshot;
+    if (metrics != nullptr) {
+      metrics->version = version;
+      metrics->snapshot_ms = DurationToMs(
+        std::chrono::steady_clock::now() - adoption_start);
+    }
+    static_cast<void>(TryFlushPending(metrics));
   }
 
   // Builds a fresh terrain baseline only when the content hash changed. Old
@@ -476,6 +635,11 @@ struct MapUpdateWorker::Impl
       return;
     }
     terrain = result.snapshot;
+    // An adopted base layer is keyed by the adopted terrain node IDs. A genuine
+    // terrain content change starts a new node identity space, so the stale base
+    // is dropped and the published layers are rebuilt from re-associated sources.
+    base_static_layer_ = ObstacleTileLayer{};
+    base_dynamic_layer_ = ObstacleTileLayer{};
     const auto coarse_start = std::chrono::steady_clock::now();
     coarse = OverlayCoarseTerrain(nullptr, terrain, {}, options.coarse);
     if (metrics != nullptr) {
@@ -1457,6 +1621,7 @@ struct MapUpdateWorker::Impl
       const TerrainNode * node = terrain->FindNode(node_id);
       if (node != nullptr) {
         changed_tiles[static_layer.TileKeyForCell(node->cell)] = 0U;
+        changed_tiles[dynamic_layer.TileKeyForCell(node->cell)] = 0U;
       }
     }
     // Copy volume is an estimate from the actual base payload attribute counts
@@ -1487,41 +1652,57 @@ struct MapUpdateWorker::Impl
     std::int64_t static_received = static_layer.received_steady_ns();
     std::int64_t dynamic_stamp = dynamic_layer.observation_stamp_ns();
     std::int64_t dynamic_received = dynamic_layer.received_steady_ns();
+    // Applies one layer's live aggregate over the adopted base. With no live
+    // aggregate the base record is restored verbatim; only a node that has
+    // neither live nor adopted evidence is erased. This is what keeps an adopted
+    // static wall present while dynamic sources add/clear/expire.
+    auto apply_layer = [&](ObstacleTileBuilder * builder,
+        TerrainNodeId node_id, const FineCellIndex & node_cell,
+        const LayerAggregate * aggregate,
+        const ObstacleAttributes * base_attributes, bool is_static,
+        std::int64_t * stamp, std::int64_t * received)
+      {
+        if (aggregate != nullptr && HasEvidence(*aggregate)) {
+          ObstacleAttributes attributes = MakeAttributes(*aggregate, is_static);
+          if (base_attributes != nullptr) {
+            attributes = MergeBaseAttributes(
+              *base_attributes, attributes, is_static);
+          }
+          *stamp = std::max(*stamp, attributes.observation_stamp_ns);
+          *received = std::max(*received, attributes.received_steady_ns);
+          builder->Set(node_cell, node_id, std::move(attributes));
+          return;
+        }
+        if (base_attributes != nullptr) {
+          *stamp = std::max(*stamp, base_attributes->observation_stamp_ns);
+          *received = std::max(*received, base_attributes->received_steady_ns);
+          builder->Set(node_cell, node_id, *base_attributes);
+          return;
+        }
+        builder->Erase(node_cell, node_id);
+      };
     for (const TerrainNodeId node_id : dirty_nodes) {
       const TerrainNode * node = terrain->FindNode(node_id);
       if (node == nullptr) {
         continue;
       }
-      changed_cells.push_back(node->cell);
+      const FineCellIndex node_cell = node->cell;
+      changed_cells.push_back(node_cell);
+      const ObstacleAttributes * base_static =
+        base_static_layer_.Find(node_id);
+      const ObstacleAttributes * base_dynamic =
+        base_dynamic_layer_.Find(node_id);
       const auto aggregate_iterator = node_aggregates.find(node_id);
-      if (aggregate_iterator == node_aggregates.end()) {
-        static_builder.Erase(node->cell, node_id);
-        dynamic_builder.Erase(node->cell, node_id);
-        continue;
-      }
-      const NodeAggregate & aggregate = aggregate_iterator->second;
-      if (HasEvidence(aggregate.static_layer)) {
-        static_builder.Set(
-          node->cell, node_id,
-          MakeAttributes(aggregate.static_layer, true));
-        static_stamp = std::max(
-          static_stamp, aggregate.static_layer.observation_stamp_ns);
-        static_received = std::max(
-          static_received, aggregate.static_layer.received_steady_ns);
-      } else {
-        static_builder.Erase(node->cell, node_id);
-      }
-      if (HasEvidence(aggregate.dynamic_layer)) {
-        dynamic_builder.Set(
-          node->cell, node_id,
-          MakeAttributes(aggregate.dynamic_layer, false));
-        dynamic_stamp = std::max(
-          dynamic_stamp, aggregate.dynamic_layer.observation_stamp_ns);
-        dynamic_received = std::max(
-          dynamic_received, aggregate.dynamic_layer.received_steady_ns);
-      } else {
-        dynamic_builder.Erase(node->cell, node_id);
-      }
+      const NodeAggregate * aggregate = aggregate_iterator ==
+        node_aggregates.end() ? nullptr : &aggregate_iterator->second;
+      apply_layer(
+        &static_builder, node_id, node_cell,
+        aggregate == nullptr ? nullptr : &aggregate->static_layer,
+        base_static, true, &static_stamp, &static_received);
+      apply_layer(
+        &dynamic_builder, node_id, node_cell,
+        aggregate == nullptr ? nullptr : &aggregate->dynamic_layer,
+        base_dynamic, false, &dynamic_stamp, &dynamic_received);
     }
     std::sort(changed_cells.begin(), changed_cells.end());
     changed_cells.erase(
@@ -1759,6 +1940,11 @@ struct MapUpdateWorker::Impl
     const bool overhead_enabled =
       std::isfinite(options.association_max_clearance_m) &&
       options.association_max_clearance_m > 0.0;
+    const double blocking_height =
+      std::isfinite(options.association_blocking_height_m) &&
+      options.association_blocking_height_m > 0.0 ?
+      std::max(kDeckOverlapToleranceM, options.association_blocking_height_m) :
+      kDeckOverlapToleranceM;
     for (const TerrainNodeId node_id : *node_ids) {
       const TerrainNode * node = terrain->FindNode(node_id);
       if (node == nullptr) {
@@ -1771,7 +1957,7 @@ struct MapUpdateWorker::Impl
         node->support.z_max :
         node->representative.z;
       if (observed_max >= deck_min - kDeckOverlapToleranceM &&
-        observed_min <= deck_max + kDeckOverlapToleranceM)
+        observed_min <= deck_max + blocking_height)
       {
         overlap.push_back(NodeAssociation{node_id, AssociationKind::kSurface});
         continue;
@@ -1933,7 +2119,8 @@ struct MapUpdateWorker::Impl
     return true;
   }
 
-  // Returns true when any source currently contributes to this layer.
+  // Returns true when any source currently contributes to this layer or an
+  // adopted base layer carries records for it.
   bool LayerObserved(SourceLayer layer) const
   {
     for (const auto & entry : sources) {
@@ -1941,7 +2128,9 @@ struct MapUpdateWorker::Impl
         return true;
       }
     }
-    return false;
+    return layer == SourceLayer::kStatic ?
+           base_static_layer_.observed() :
+           base_dynamic_layer_.observed();
   }
 
   // Builds one layer's attribute record from its aggregate.
@@ -2073,6 +2262,50 @@ struct MapUpdateWorker::Impl
     request.now_steady_ns = now;
     request.enqueued_steady_ns = NowSteadyNs();
     pending.push_back(std::move(request));
+    terrain_submitted = true;
+    queue_cv.notify_one();
+    return MapUpdateResult{MapUpdateStatus::kAccepted, ""};
+  }
+
+  MapUpdateResult SubmitAdoptSnapshot(
+    std::shared_ptr<const MapSnapshot> snapshot)
+  {
+    if (snapshot == nullptr) {
+      return MapUpdateResult{MapUpdateStatus::kRejectedInvalid,
+        "adopted snapshot is null"};
+    }
+    if (!snapshot->IsReady()) {
+      return MapUpdateResult{MapUpdateStatus::kRejectedInvalid,
+        "adopted snapshot has no usable fine terrain"};
+    }
+    if (!snapshot->HasReadyDistanceField()) {
+      return MapUpdateResult{MapUpdateStatus::kRejectedInvalid,
+        "adopted snapshot has no ready distance field bound to its terrain"};
+    }
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    if (stop) {
+      return MapUpdateResult{MapUpdateStatus::kStopped,
+        "worker is stopped"};
+    }
+    if (adoption_submitted) {
+      return MapUpdateResult{MapUpdateStatus::kRejectedInvalid,
+        "snapshot adoption was already accepted"};
+    }
+    if (terrain_submitted) {
+      return MapUpdateResult{MapUpdateStatus::kRejectedInvalid,
+        "snapshot adoption must precede a terrain replacement"};
+    }
+    const std::size_t projected_size = pending.size() + 1U;
+    if (projected_size > options.max_pending_batches) {
+      return MapUpdateResult{MapUpdateStatus::kQueueFull,
+        "adoption queue is at its hard bound"};
+    }
+    Request request;
+    request.kind = MapUpdateRequestKind::kSnapshotAdoption;
+    request.adopted_snapshot = std::move(snapshot);
+    request.enqueued_steady_ns = NowSteadyNs();
+    pending.push_back(std::move(request));
+    adoption_submitted = true;
     queue_cv.notify_one();
     return MapUpdateResult{MapUpdateStatus::kAccepted, ""};
   }
@@ -2359,6 +2592,10 @@ struct MapUpdateWorker::Impl
   std::list<std::string> highwater_lru;
   std::unordered_map<std::string, std::size_t> submitted_record_counts;
   std::size_t submitted_records_total{0};
+  // One-shot baseline admissions. Guarded by queue_mutex; adoption is allowed
+  // only before a terrain replacement has been accepted.
+  bool terrain_submitted{false};
+  bool adoption_submitted{false};
 
   // Worker-owned pipeline state.
   TerrainGridBuilder terrain_builder;
@@ -2366,6 +2603,11 @@ struct MapUpdateWorker::Impl
   std::shared_ptr<const CoarseTerrainMap> coarse;
   ObstacleTileLayer static_layer;
   ObstacleTileLayer dynamic_layer;
+  // Immutable evidence adopted with the offline baseline. A dynamic source
+  // update never removes these records; BuildAndPublishObstacles restores them
+  // for every touched node that has no live contribution in that layer.
+  ObstacleTileLayer base_static_layer_;
+  ObstacleTileLayer base_dynamic_layer_;
   std::shared_ptr<const ObstacleDistanceField> field;
   std::uint64_t version{0};
   std::atomic<std::uint64_t> published_version{0};
@@ -2418,6 +2660,12 @@ MapUpdateResult MapUpdateWorker::SubmitTerrain(
   return impl_->SubmitTerrain(std::move(observation));
 }
 
+MapUpdateResult MapUpdateWorker::AdoptSnapshot(
+  std::shared_ptr<const MapSnapshot> snapshot)
+{
+  return impl_->SubmitAdoptSnapshot(std::move(snapshot));
+}
+
 MapUpdateResult MapUpdateWorker::SubmitSource(
   SourceObservationSnapshot observation)
 {
@@ -2447,4 +2695,4 @@ std::uint64_t MapUpdateWorker::published_version() const noexcept
          impl_->published_version.load(std::memory_order_acquire);
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

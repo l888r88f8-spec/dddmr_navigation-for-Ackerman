@@ -68,6 +68,20 @@ public:
   std::size_t lastRouteValidationCalls() const { return route_validation_calls_; }
   double lastCycleMs() const { return cycle_ms_; }
   const std::string & reason() const { return reason_; }
+  // Evidence for a stalling retreat: how many times the sliced search was
+  // discarded because the vehicle had moved past its restart tolerance, how
+  // many A* expansions the last search reached, and how many complete searches
+  // have produced a route. Counters are cumulative for the lifetime of this
+  // object; reset() deliberately keeps them so a stop/retry cycle stays visible.
+  std::size_t searchRestartCount() const { return search_restarts_; }
+  std::size_t lastSearchExpansions() const { return last_search_expansions_; }
+  std::size_t routesSelectedCount() const { return routes_selected_; }
+  void resetSearchCounters()
+  {
+    search_restarts_ = 0;
+    last_search_expansions_ = 0;
+    routes_selected_ = 0;
+  }
 
 private:
   enum class Phase
@@ -92,6 +106,9 @@ private:
   std::size_t validation_calls_ = 0;
   std::size_t route_validation_calls_ = 0;
   double cycle_ms_ = 0.0;
+  std::size_t search_restarts_ = 0;
+  std::size_t last_search_expansions_ = 0;
+  std::size_t routes_selected_ = 0;
 
   bool search(
     const MppiRetreatPose & start,

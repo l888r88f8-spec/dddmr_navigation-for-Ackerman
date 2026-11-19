@@ -66,6 +66,21 @@ class Perception3D_ROS : public rclcpp::Node {
     */
     std::shared_ptr<const PerceptionSnapshot> getLatestPerceptionSnapshot() const;
 
+    /*
+    Unified immutable scene API. configureSceneProducer() selects producer
+    evidence and/or legacy-cost preparation; captureSceneSnapshot() freezes one
+    coherent requested view without waiting for a new scan. getLatestSceneSnapshot()
+    is an atomic load of the last captured envelope.
+    */
+    void configureSceneProducer(const SceneProducerConfig & config);
+    std::shared_ptr<const SceneSnapshot> captureSceneSnapshot(
+      const SceneSnapshotRequest & request,
+      std::int64_t cycle_stamp_ns,
+      std::int64_t received_steady_ns,
+      std::uint64_t terrain_revision,
+      bool terrain_revision_known);
+    std::shared_ptr<const SceneSnapshot> getLatestSceneSnapshot() const;
+
   private:
 
     /*For plugin loader*/

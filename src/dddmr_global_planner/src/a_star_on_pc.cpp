@@ -45,13 +45,21 @@ double ElapsedMs(const std::chrono::steady_clock::time_point & started_at)
 
 AstarList::AstarList(pcl::PointCloud<pcl::PointXYZI>::Ptr& pc_original_z_up){
   pc_original_z_up_ = pc_original_z_up;
-  kdtree_ground_.reset(new nanoflann::KdTreeFLANN<pcl::PointXYZI>());
-  kdtree_ground_->setInputCloud(pc_original_z_up_);
+  // Snapshot-only callers pass a null live-ground placeholder, so they do not
+  // pay for an unused nanoflann index over an immutable scene cloud.
+  if(pc_original_z_up_){
+    kdtree_ground_.reset(new nanoflann::KdTreeFLANN<pcl::PointXYZI>());
+    kdtree_ground_->setInputCloud(pc_original_z_up_);
+  }
 }
 
 void AstarList::Initial(){
+  Initial(pc_original_z_up_ ? pc_original_z_up_->points.size() : 0);
+}
+
+void AstarList::Initial(std::size_t node_count){
   as_list_.clear(); 
-  for(unsigned int it=0; it!=pc_original_z_up_->points.size();it++){
+  for(unsigned int it=0; it!=node_count;it++){
     Node_t new_node = {.self_index=0, .g=0, .h=0, .f=0, .parent_index=0, .is_closed=false, .is_opened=false};
     as_list_[it] = new_node;
   }
@@ -114,6 +122,8 @@ A_Star_on_Graph::A_Star_on_Graph(pcl::PointCloud<pcl::PointXYZI>::Ptr pc_origina
   perception_ros_ = perception_ros;
   pc_original_z_up_ = pc_original_z_up;
   a_star_expanding_radius_ = a_star_expanding_radius;
+  turning_weight_ = 0.0;
+  ResetSceneSnapshot();
   ASLS_ = new AstarList(pc_original_z_up_);
 }
 
@@ -123,9 +133,67 @@ A_Star_on_Graph::~A_Star_on_Graph(){
 }
 
 void A_Star_on_Graph::updateGraph(pcl::PointCloud<pcl::PointXYZI>::Ptr pc_original_z_up){
+  ResetSceneSnapshot();
   ASLS_->pc_original_z_up_ = pc_original_z_up;
   ASLS_->kdtree_ground_.reset(new nanoflann::KdTreeFLANN<pcl::PointXYZI>());
   ASLS_->kdtree_ground_->setInputCloud(pc_original_z_up_);
+}
+
+void A_Star_on_Graph::ResetSceneSnapshot(){
+  scene_static_view_.reset();
+  scene_cost_view_.reset();
+  scene_lethal_kdtree_.reset();
+  scene_parameters_ = global_planner::LegacySearchParameters{};
+  scene_requested_ = false;
+  scene_active_ = false;
+  scene_rejection_reason_.clear();
+}
+
+void A_Star_on_Graph::clearSceneSnapshot(){
+  ResetSceneSnapshot();
+}
+
+bool A_Star_on_Graph::setSceneSnapshot(
+  const std::shared_ptr<const perception_3d::SceneSnapshot> & snapshot,
+  const global_planner::LegacySearchParameters & parameters,
+  std::string * rejection_reason)
+{
+  // Preserve the lethal index only when the exact same immutable cost view is
+  // being re-pinned. Every field is still cleared below, so an old
+  // updateGraph() can never inherit a stale snapshot.
+  const auto previous_static = scene_static_view_;
+  const auto previous_cost = scene_cost_view_;
+  const auto previous_lethal_tree = scene_lethal_kdtree_;
+  ResetSceneSnapshot();
+  scene_requested_ = true;
+
+  std::shared_ptr<const perception_3d::LegacyStaticView> static_view;
+  std::shared_ptr<const perception_3d::LegacyCostView> cost_view;
+  std::string reason;
+  if(!global_planner::BuildLegacySceneReadView(
+      snapshot, parameters, &static_view, &cost_view, &reason))
+  {
+    scene_rejection_reason_ = reason;
+    if(rejection_reason != nullptr){
+      *rejection_reason = reason;
+    }
+    return false;
+  }
+
+  scene_static_view_ = static_view;
+  scene_cost_view_ = cost_view;
+  scene_lethal_kdtree_ =
+    (static_view == previous_static && cost_view == previous_cost &&
+    previous_lethal_tree) ?
+    previous_lethal_tree :
+    global_planner::BuildLegacyLethalKdTree(cost_view);
+  scene_parameters_ = parameters;
+  scene_active_ = true;
+  scene_rejection_reason_.clear();
+  if(rejection_reason != nullptr){
+    rejection_reason->clear();
+  }
+  return true;
 }
 
 double A_Star_on_Graph::getPitchFromParent2Expanding(pcl::PointXYZI m_pcl_current_parent, pcl::PointXYZI m_pcl_current, pcl::PointXYZI m_pcl_expanding){
@@ -173,9 +241,11 @@ double A_Star_on_Graph::getThetaFromParent2Expanding(pcl::PointXYZI m_pcl_curren
 
 bool A_Star_on_Graph::isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::PointXYZI& pcl_expanding, double inscribed_radius){
 
-  if(!kdtree_lethal_ || !perception_ros_ || !perception_ros_->getSharedDataPtr() ||
-    !perception_ros_->getSharedDataPtr()->aggregate_lethal_ ||
-    perception_ros_->getSharedDataPtr()->aggregate_lethal_->empty() ||
+  const nanoflann::KdTreeFLANN<pcl::PointXYZI>::ConstPtr & lethal_tree =
+    scene_active_ ? scene_lethal_kdtree_ : kdtree_lethal_;
+
+  if(!lethal_tree || !lethal_tree->getInputCloud() ||
+    lethal_tree->getInputCloud()->empty() ||
     inscribed_radius <= 1e-6 || !std::isfinite(inscribed_radius))
   {
     return true;
@@ -206,7 +276,7 @@ bool A_Star_on_Graph::isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::Point
     a_pt.z = pcl_current.z + dZ*r;
     std::vector<int> pidx;
     std::vector<float> prsd;
-    kdtree_lethal_->radiusSearch(a_pt, 2*inscribed_radius, pidx, prsd);
+    lethal_tree->radiusSearch(a_pt, 2*inscribed_radius, pidx, prsd);
     if(pidx.size()>1){
       return false;
     }
@@ -218,17 +288,45 @@ void A_Star_on_Graph::getPath(
   unsigned int start, unsigned int goal,
   std::vector<unsigned int>& path,
   GraphPlanDiagnostics * diagnostics){
+  getPath(start, goal, path, diagnostics, nullptr);
+}
+
+void A_Star_on_Graph::getPath(
+  unsigned int start, unsigned int goal,
+  std::vector<unsigned int>& path,
+  GraphPlanDiagnostics * diagnostics,
+  global_planner::AStarPlanTrace * trace){
 
   if(diagnostics){
     diagnostics->reset();
   }
+  if(trace){
+    trace->reset();
+  }
 
-  //RCLCPP_DEBUG(rclcpp::get_logger("astar"),"Start: %u, Goal: %u", start, goal);
-  if(!pc_original_z_up_ || pc_original_z_up_->points.empty() ||
-    start >= pc_original_z_up_->points.size() ||
-    goal >= pc_original_z_up_->points.size() ||
-    !ASLS_ || !ASLS_->kdtree_ground_)
+  // A failed setSceneSnapshot() is a hard refusal for this planner object. It
+  // must not quietly fall back to live perception data.
+  if(scene_requested_ && !scene_active_){
+    return;
+  }
+  const bool frozen = scene_active_;
+  const pcl::PointCloud<pcl::PointXYZI> * ground = frozen ?
+    scene_static_view_->groundPoints().get() : pc_original_z_up_.get();
+
+  if(!ground || ground->points.empty() ||
+    start >= ground->points.size() ||
+    goal >= ground->points.size() ||
+    !ASLS_)
   {
+    return;
+  }
+  if(frozen){
+    if(!scene_cost_view_ || !scene_static_view_ ||
+      !scene_static_view_->groundKdtree())
+    {
+      return;
+    }
+  }else if(!perception_ros_ || !ASLS_->kdtree_ground_){
     return;
   }
 
@@ -236,30 +334,52 @@ void A_Star_on_Graph::getPath(
   Create the first node which is start and add into frontier
   */
 
-  pcl::PointXYZI pcl_goal = pc_original_z_up_->points[goal];
-  pcl::PointXYZI pcl_start = pc_original_z_up_->points[start];
+  pcl::PointXYZI pcl_goal = ground->points[goal];
+  pcl::PointXYZI pcl_start = ground->points[start];
   float f = sqrt(pcl::geometry::squaredDistance(pcl_start, pcl_goal));
   Node_t current_node = {.self_index=start, .g=0, .h=0, .f=f, .parent_index=start, .is_closed=false, .is_opened=true};
 
-  ASLS_->Initial();
+  if(frozen){
+    ASLS_->Initial(ground->points.size());
+  }else{
+    ASLS_->Initial();
+  }
   ASLS_->updateNode(current_node);
   
-  double inscribed_radius = perception_ros_->getGlobalUtils()->getInscribedRadius();
-  double inflation_descending_rate = perception_ros_->getGlobalUtils()->getInflationDescendingRate();
-  double max_obstacle_distance = perception_ros_->getGlobalUtils()->getMaxObstacleDistance();
-  
-  const auto aggregate_lethal_started_at = std::chrono::steady_clock::now();
-  perception_ros_->getStackedPerception()->aggregateLethal();
-  if(diagnostics){
-    diagnostics->aggregate_lethal_ms = ElapsedMs(aggregate_lethal_started_at);
+  double inscribed_radius = 0.0;
+  double inflation_descending_rate = 0.0;
+  double max_obstacle_distance = 0.0;
+  if(frozen){
+    inscribed_radius = scene_parameters_.inscribed_radius;
+    inflation_descending_rate = scene_parameters_.inflation_descending_rate;
+    max_obstacle_distance = scene_parameters_.max_obstacle_distance;
+  }else{
+    if(!perception_ros_->getGlobalUtils()){
+      return;
+    }
+    inscribed_radius = perception_ros_->getGlobalUtils()->getInscribedRadius();
+    inflation_descending_rate = perception_ros_->getGlobalUtils()->getInflationDescendingRate();
+    max_obstacle_distance = perception_ros_->getGlobalUtils()->getMaxObstacleDistance();
   }
-  //@ generate kd-tree and handle no point cloud edge case
-  kdtree_lethal_.reset(new nanoflann::KdTreeFLANN<pcl::PointXYZI>());
-  
-  if(perception_ros_->getSharedDataPtr()->aggregate_lethal_->points.size()>0){
-    kdtree_lethal_->setInputCloud(perception_ros_->getSharedDataPtr()->aggregate_lethal_);
+  (void)max_obstacle_distance;
+
+  if(!frozen){
+    const auto aggregate_lethal_started_at = std::chrono::steady_clock::now();
+    perception_ros_->getStackedPerception()->aggregateLethal();
+    if(diagnostics){
+      diagnostics->aggregate_lethal_ms = ElapsedMs(aggregate_lethal_started_at);
+    }
+    //@ generate kd-tree and handle no point cloud edge case
+    kdtree_lethal_.reset();
+    auto shared_data = perception_ros_->getSharedDataPtr();
+    if(shared_data && shared_data->aggregate_lethal_ &&
+      shared_data->aggregate_lethal_->points.size()>0)
+    {
+      kdtree_lethal_ = std::make_shared<
+        nanoflann::KdTreeFLANN<pcl::PointXYZI>>();
+      kdtree_lethal_->setInputCloud(shared_data->aggregate_lethal_);
+    }
   }
-    
 
   while(!ASLS_->isFrontierEmpty()){ 
     /*Pop minimum F, we leverage prior queue, so we dont need to loop frontier everytime*/
@@ -270,15 +390,42 @@ void A_Star_on_Graph::getPath(
 
     //RCLCPP_DEBUG(rclcpp::get_logger("astar"), "Expand node: %u", current_node.self_index);
     /*Get successors*/
-    pcl::PointXYZI pcl_now = pc_original_z_up_->points[current_node.self_index];
+    pcl::PointXYZI pcl_now = ground->points[current_node.self_index];
     std::vector<int> pointIdxRadiusSearch;
     std::vector<float> pointRadiusSquaredDistance;
-    ASLS_->kdtree_ground_->radiusSearch(pcl_now, a_star_expanding_radius_, pointIdxRadiusSearch, pointRadiusSquaredDistance);
-
-    //@dealing with orphan node
-    if(pointIdxRadiusSearch.size()<8){
-      ASLS_->kdtree_ground_->nearestKSearch(pcl_now, 8, pointIdxRadiusSearch, pointRadiusSquaredDistance);
+    if(frozen){
+      const auto & ground_tree = scene_static_view_->groundKdtree();
+      ground_tree->radiusSearch(
+        pcl_now, a_star_expanding_radius_, pointIdxRadiusSearch,
+        pointRadiusSquaredDistance);
+      //@dealing with orphan node
+      if(pointIdxRadiusSearch.size()<8){
+        ground_tree->nearestKSearch(
+          pcl_now, 8, pointIdxRadiusSearch, pointRadiusSquaredDistance);
+      }
+    }else{
+      ASLS_->kdtree_ground_->radiusSearch(
+        pcl_now, a_star_expanding_radius_, pointIdxRadiusSearch,
+        pointRadiusSquaredDistance);
+      //@dealing with orphan node
+      if(pointIdxRadiusSearch.size()<8){
+        ASLS_->kdtree_ground_->nearestKSearch(
+          pcl_now, 8, pointIdxRadiusSearch, pointRadiusSquaredDistance);
+      }
     }
+
+    if(trace){
+      trace->expanded_nodes.push_back(current_node.self_index);
+      for(const int neighbor_index : pointIdxRadiusSearch){
+        if(neighbor_index >= 0 &&
+          static_cast<std::size_t>(neighbor_index) < ground->points.size())
+        {
+          trace->neighbor_order.push_back(
+            static_cast<unsigned int>(neighbor_index));
+        }
+      }
+    }
+
     if(pointIdxRadiusSearch.empty()){
       ASLS_->closeNode(current_node);
       continue;
@@ -289,11 +436,11 @@ void A_Star_on_Graph::getPath(
     std::size_t valid_neighbor_count = 0;
     for(unsigned int it = 0; it!=pointIdxRadiusSearch.size(); it++){
       if(pointIdxRadiusSearch[it] < 0 ||
-        static_cast<std::size_t>(pointIdxRadiusSearch[it]) >= pc_original_z_up_->points.size())
+        static_cast<std::size_t>(pointIdxRadiusSearch[it]) >= ground->points.size())
       {
         continue;
       }
-      avg_intensity += pc_original_z_up_->points[pointIdxRadiusSearch[it]].intensity;
+      avg_intensity += ground->points[pointIdxRadiusSearch[it]].intensity;
       valid_neighbor_count++;
     }
     if(valid_neighbor_count == 0){
@@ -302,43 +449,63 @@ void A_Star_on_Graph::getPath(
     }
     avg_intensity = avg_intensity/valid_neighbor_count;
 
-    // One short shared-map read lock for this expanded node's neighbor batch.
-    // Only the dGraph and static node-weight reads need the production guard;
-    // LOS, cost math and A* bookkeeping run after it is released.
     const std::size_t neighbor_count = pointIdxRadiusSearch.size();
     std::vector<double> neighbor_dgraph(neighbor_count, 0.0);
     std::vector<float> neighbor_weight(neighbor_count, 0.0f);
-    {
-      auto shared_data = perception_ros_->getSharedDataPtr();
-      std::unique_lock<std::recursive_mutex> batch_lock;
-      if(shared_data){
-        const auto batch_lock_started_at = std::chrono::steady_clock::now();
-        batch_lock = std::unique_lock<std::recursive_mutex>(
-          shared_data->ground_kdtree_cb_mutex_);
-        if(diagnostics){
-          diagnostics->recordBatchLock(ElapsedMs(batch_lock_started_at));
-        }
-      }
-
+    if(frozen){
+      // The pinned cost/static views are immutable, so no live guard, getter
+      // call or lock participates in the frozen search.
       for(unsigned int it = 0; it!=pointIdxRadiusSearch.size(); it++){
-        int current_expanding_index = pointIdxRadiusSearch[it];
+        const int current_expanding_index = pointIdxRadiusSearch[it];
         if(current_expanding_index < 0 ||
-          static_cast<std::size_t>(current_expanding_index) >= pc_original_z_up_->points.size())
+          static_cast<std::size_t>(current_expanding_index) >= ground->points.size())
         {
           continue;
         }
 
-        //@ dGraphValue is the distance to lethal
-        const auto dgraph_query_started_at = std::chrono::steady_clock::now();
-        neighbor_dgraph[it] = perception_ros_->get_min_dGraphValue(current_expanding_index);
-        if(diagnostics){
-          diagnostics->recordDGraphQuery(ElapsedMs(dgraph_query_started_at));
+        neighbor_dgraph[it] = scene_cost_view_->minDGraphValue(
+          static_cast<std::size_t>(current_expanding_index));
+        if(neighbor_dgraph[it] >= inscribed_radius){
+          neighbor_weight[it] = scene_static_view_->graph().getNodeWeight(
+            static_cast<unsigned int>(current_expanding_index));
+        }
+      }
+    }else{
+      // One short shared-map read lock for this expanded node's neighbor batch.
+      // Only the dGraph and static node-weight reads need the production guard;
+      // LOS, cost math and A* bookkeeping run after it is released.
+      {
+        auto shared_data = perception_ros_->getSharedDataPtr();
+        std::unique_lock<std::recursive_mutex> batch_lock;
+        if(shared_data){
+          const auto batch_lock_started_at = std::chrono::steady_clock::now();
+          batch_lock = std::unique_lock<std::recursive_mutex>(
+            shared_data->ground_kdtree_cb_mutex_);
+          if(diagnostics){
+            diagnostics->recordBatchLock(ElapsedMs(batch_lock_started_at));
+          }
         }
 
-        // Static node weights are O(1) in production. Only non-lethal
-        // neighbours need a weight; LOS-rejected reads stay unused.
-        if(shared_data && neighbor_dgraph[it] >= inscribed_radius){
-          neighbor_weight[it] = shared_data->sGraph_ptr_->getNodeWeight(current_expanding_index);
+        for(unsigned int it = 0; it!=pointIdxRadiusSearch.size(); it++){
+          int current_expanding_index = pointIdxRadiusSearch[it];
+          if(current_expanding_index < 0 ||
+            static_cast<std::size_t>(current_expanding_index) >= ground->points.size())
+          {
+            continue;
+          }
+
+          //@ dGraphValue is the distance to lethal
+          const auto dgraph_query_started_at = std::chrono::steady_clock::now();
+          neighbor_dgraph[it] = perception_ros_->get_min_dGraphValue(current_expanding_index);
+          if(diagnostics){
+            diagnostics->recordDGraphQuery(ElapsedMs(dgraph_query_started_at));
+          }
+
+          // Static node weights are O(1) in production. Only non-lethal
+          // neighbours need a weight; LOS-rejected reads stay unused.
+          if(shared_data && neighbor_dgraph[it] >= inscribed_radius){
+            neighbor_weight[it] = shared_data->sGraph_ptr_->getNodeWeight(current_expanding_index);
+          }
         }
       }
     }
@@ -347,7 +514,7 @@ void A_Star_on_Graph::getPath(
       
       int current_expanding_index = pointIdxRadiusSearch[it];
       if(current_expanding_index < 0 ||
-        static_cast<std::size_t>(current_expanding_index) >= pc_original_z_up_->points.size())
+        static_cast<std::size_t>(current_expanding_index) >= ground->points.size())
       {
         continue;
       }
@@ -358,13 +525,13 @@ void A_Star_on_Graph::getPath(
 
       /*This is for lethal*/
       if(dGraphValue<inscribed_radius){
-        //RCLCPP_DEBUG(rclcpp::get_logger("astar"), "%.2f,%.2f,%.2f, v: %.2f",pc_original_z_up_->points[(*it).first].x,pc_original_z_up_->points[(*it).first].y,pc_original_z_up_->points[(*it).first].z, dGraphValue);
+        //RCLCPP_DEBUG(rclcpp::get_logger("astar"), "%.2f,%.2f,%.2f, v: %.2f",ground->points[(*it).first].x,ground->points[(*it).first].y,ground->points[(*it).first].z, dGraphValue);
         continue;
       }
 
-      pcl::PointXYZI pcl_current = pc_original_z_up_->points[current_node.self_index];
-      pcl::PointXYZI pcl_current_parent = pc_original_z_up_->points[current_node.parent_index];
-      pcl::PointXYZI pcl_expanding = pc_original_z_up_->points[current_expanding_index];
+      pcl::PointXYZI pcl_current = ground->points[current_node.self_index];
+      pcl::PointXYZI pcl_current_parent = ground->points[current_node.parent_index];
+      pcl::PointXYZI pcl_expanding = ground->points[current_expanding_index];
 
       //@ check line-of-sight when distance is 2 times larger than inscribed_radius
       if(current_expanding_g>=2*inscribed_radius){
@@ -411,6 +578,10 @@ void A_Star_on_Graph::getPath(
     /*If goal is in closed list, we are done*/
     if(ASLS_->isClosed(goal)){
       Node_t trace_back = ASLS_->getNode(goal);
+      if(trace){
+        trace->found = true;
+        trace->goal_g = trace_back.g;
+      }
       while(trace_back.self_index!=trace_back.parent_index){
         path.push_back(trace_back.self_index);
         trace_back = ASLS_->getNode(trace_back.parent_index);

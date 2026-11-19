@@ -124,6 +124,11 @@ class StaticLayer: public Sensor{
     bool merge_ground_layers_;
     double merge_ground_xy_resolution_;
     double merge_ground_z_tolerance_;
+
+    //@ Same-size content replacement detection. These fingerprints are
+    //@ computed when a cloud is accepted, never from a lidar scan.
+    std::uint64_t last_map_content_hash_{0};
+    std::uint64_t last_ground_content_hash_{0};
 };
 
 }//end of name space

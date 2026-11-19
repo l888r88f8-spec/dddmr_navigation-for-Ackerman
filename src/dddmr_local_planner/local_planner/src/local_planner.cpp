@@ -494,6 +494,22 @@ void Local_Planner::initial(
     return this->get_parameter(param_name).as_bool();
   };
 
+  // Declared here so the value is visible even before the first optimization.
+  this->declare_parameter("mppi.evaluation_distance", rclcpp::ParameterValue(6.5));
+  this->declare_parameter("mppi.evaluation_step", rclcpp::ParameterValue(0.15));
+  this->declare_parameter("mppi.evaluation_max_points", rclcpp::ParameterValue(64));
+  mppi_config.evaluation_distance =
+    std::max(0.0, this->get_parameter("mppi.evaluation_distance").as_double());
+  mppi_config.evaluation_step =
+    std::max(0.02, this->get_parameter("mppi.evaluation_step").as_double());
+  mppi_config.evaluation_max_points = static_cast<std::size_t>(
+    std::max<int64_t>(1, this->get_parameter("mppi.evaluation_max_points").as_int()));
+  RCLCPP_INFO(
+    this->get_logger().get_child(name_),
+    "mppi distance probe: range=%.2f m step=%.2f m max_points=%zu",
+    mppi_config.evaluation_distance, mppi_config.evaluation_step,
+    mppi_config.evaluation_max_points);
+
   this->get_parameter("mppi.prediction_horizon_sec", mppi_prediction_horizon_sec);
   this->get_parameter("mppi.model_dt", mppi_config.model_dt);
   mppi_config.controller_period = 1.0 / std::max(1e-3, controller_frequency_);
@@ -777,6 +793,12 @@ void Local_Planner::initial(
     this->create_publisher<nav_msgs::msg::Path>("/debug/local_pruned_path", debug_path_qos);
   pub_best_trajectory_path_ =
     this->create_publisher<nav_msgs::msg::Path>("/debug/best_trajectory", debug_path_qos);
+  pub_best_trajectory_markers_ =
+    this->create_publisher<visualization_msgs::msg::MarkerArray>(
+    "/debug/best_trajectory_markers", debug_path_qos);
+  pub_best_trajectory_probe_pose_ =
+    this->create_publisher<geometry_msgs::msg::PoseArray>(
+    "/best_trajectory_probe", debug_path_qos);
   pub_accepted_trajectory_pose_array_ = this->create_publisher<geometry_msgs::msg::PoseArray>("accepted_trajectory", 1);
   pub_best_trajectory_pose_ = this->create_publisher<geometry_msgs::msg::PoseArray>("best_trajectory", 2);
   pub_trajectory_pose_array_ = this->create_publisher<geometry_msgs::msg::PoseArray>("trajectory", 2);
@@ -1372,6 +1394,7 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
   const std::size_t obstacle_point_step = check_every_obstacle_point ? 1 :
     std::max<std::size_t>(1, mppi_critic_manager_.config().obstacles.trajectory_point_step);
   std::size_t point_index = 0;
+  bool time_channel_collided = false;
   std::vector<int> obstacle_ids;
   std::vector<float> squared_distances;
 
@@ -1394,6 +1417,9 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
     const auto cuboid = transformRobotCuboid(pose);
     const auto collision = evaluateMppiObstacleCollisionForCuboid(
       cuboid, obstacle_snapshot, &obstacle_ids);
+    if(collision.in_collision){
+      time_channel_collided = true;
+    }
     double obstacle_clearance = std::numeric_limits<double>::infinity();
     MppiObstacleClearanceResult clearance_result;
     const bool evaluate_clearance =
@@ -1432,7 +1458,110 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
     ++point_index;
   }
 
+  // Distance-parameterized collision probe: continue the terminal command as
+  // an arc so a creeping candidate still reaches the obstacle its time
+  // rollout never approached. Shared with the debug publisher, which appends
+  // the same tail to /debug/best_trajectory.
+  if(!controls.empty() && !time_channel_collided){
+    geometry_msgs::msg::Pose terminal_pose;
+    terminal_pose.position.x = x;
+    terminal_pose.position.y = y;
+    terminal_pose.position.z = z;
+    tf2::Quaternion terminal_q;
+    terminal_q.setRPY(0.0, 0.0, yaw);
+    terminal_pose.orientation = tf2::toMsg(terminal_q);
+    trajectory.probe_points = buildMppiDistanceProbe(
+      terminal_pose, controls.back(), obstacle_snapshot,
+      &trajectory.probe_first_block_m);
+  }
+
   return trajectory;
+}
+
+std::vector<MppiTrajectoryPoint> Local_Planner::buildMppiDistanceProbe(
+  const geometry_msgs::msg::Pose & terminal_pose,
+  const MppiControl & terminal,
+  const MppiObstacleSnapshot & obstacle_snapshot,
+  double * first_block_m) const
+{
+  std::vector<MppiTrajectoryPoint> probe;
+  if(first_block_m != nullptr){
+    *first_block_m = -1.0;
+  }
+  const auto & probe_config = mppi_controller_.config();
+  if(probe_config.evaluation_distance <= 1e-3 ||
+    probe_config.evaluation_step <= 1e-3 ||
+    !obstacle_snapshot.cloud || obstacle_snapshot.cloud->points.empty())
+  {
+    return probe;
+  }
+
+  double x = terminal_pose.position.x;
+  double y = terminal_pose.position.y;
+  const double z = terminal_pose.position.z;
+  double yaw = tf2::getYaw(terminal_pose.orientation);
+  // The arc geometry depends only on the curvature ratio, so the probe stays
+  // meaningful at near-zero speed where the time rollout covers almost nothing.
+  const double direction = terminal.vx >= 0.0 ? 1.0 : -1.0;
+  const double curvature =
+    std::fabs(terminal.vx) > 1e-6 ? terminal.wz / terminal.vx : 0.0;
+  const double step = std::max(0.02, probe_config.evaluation_step);
+  const std::size_t limit = std::max<std::size_t>(
+    1, probe_config.evaluation_max_points);
+  probe.reserve(std::min(
+      limit, static_cast<std::size_t>(
+        std::ceil(probe_config.evaluation_distance / step))));
+
+  std::vector<int> obstacle_ids;
+  double arc = 0.0;
+  while(arc < probe_config.evaluation_distance && probe.size() < limit){
+    const double next_arc = std::min(
+      arc + step, probe_config.evaluation_distance);
+    const double ds_signed = direction * (next_arc - arc);
+    arc = next_arc;
+    const double dtheta = curvature * ds_signed;
+    if(std::fabs(curvature) > 1e-9){
+      x += (std::sin(yaw + dtheta) - std::sin(yaw)) / curvature;
+      y -= (std::cos(yaw + dtheta) - std::cos(yaw)) / curvature;
+    }
+    else{
+      x += ds_signed * std::cos(yaw);
+      y += ds_signed * std::sin(yaw);
+    }
+    yaw = angles::normalize_angle(yaw + dtheta);
+
+    geometry_msgs::msg::PoseStamped probe_pose;
+    probe_pose.header.frame_id = global_frame_;
+    probe_pose.header.stamp = clock_->now();
+    probe_pose.pose.position.x = x;
+    probe_pose.pose.position.y = y;
+    probe_pose.pose.position.z = z;
+    tf2::Quaternion probe_q;
+    probe_q.setRPY(0.0, 0.0, yaw);
+    probe_q.normalize();
+    probe_pose.pose.orientation = tf2::toMsg(probe_q);
+
+    const auto collision = evaluateMppiObstacleCollisionForCuboid(
+      transformRobotCuboid(probe_pose), obstacle_snapshot, &obstacle_ids);
+    probe.push_back(MppiTrajectoryPoint{
+      x,
+      y,
+      yaw,
+      collision.in_collision,
+      std::numeric_limits<double>::infinity(),
+      collision.evaluated,
+      collision.node_checks,
+      collision.point_checks,
+      0,
+      0});
+    if(collision.in_collision){
+      if(first_block_m != nullptr){
+        *first_block_m = arc;
+      }
+      break;
+    }
+  }
+  return probe;
 }
 
 MppiCriticData Local_Planner::buildMppiCriticData(
@@ -1570,11 +1699,14 @@ MppiResult Local_Planner::computeMppiDirectedRetreat(
   result.reverse_recovery_active = mppi_directed_retreat_.active();
   RCLCPP_WARN_THROTTLE(
     this->get_logger().get_child(name_), *clock_, 2000,
-    "MPPI directed retreat: backend=%s, reason=%s, active=%d, reverse=%d, direction=%d, route_points=%zu, validation_calls=%zu, cycle_ms=%.2f, cmd_vx=%.3f, cmd_wz=%.3f%s",
+    "MPPI directed retreat: backend=%s, reason=%s, active=%d, reverse=%d, direction=%d, route_points=%zu, validation_calls=%zu, cycle_ms=%.2f, search_restarts=%zu, expansions=%zu, routes_selected=%zu, cmd_vx=%.3f, cmd_wz=%.3f%s",
     mppi_environment_backend_name_.c_str(), mppi_directed_retreat_.reason().c_str(),
     result.reverse_recovery_active ? 1 : 0, result.reverse_motion_active ? 1 : 0,
     mppi_directed_retreat_.direction(), mppi_directed_retreat_.route().size(),
     mppi_directed_retreat_.lastValidationCalls(), mppi_directed_retreat_.lastCycleMs(),
+    mppi_directed_retreat_.searchRestartCount(),
+    mppi_directed_retreat_.lastSearchExpansions(),
+    mppi_directed_retreat_.routesSelectedCount(),
     result.command.vx, result.command.wz,
     mppi_environment_backend_ == MppiEnvironmentBackend::kLegacyPoints ?
       "; legacy validates supplied obstacle points only; unseen space is not certified free" : "");
@@ -3880,9 +4012,36 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
   double mppi_right_detour = 0.0;
   bool mppi_detour_valid = false;
 
+  // Instrumentation for decision reach. These are measurements, not controls:
+  // lookahead_m is the along-track distance the batch actually predicts,
+  // end_lat/end_along bound the spread of collision-free trajectory endpoints,
+  // and clear_* quantify how much of the obstacle field can influence cost.
+  double mppi_lookahead_m = 0.0;
+  std::size_t mppi_clear_capped_points = 0;
+  std::size_t mppi_clear_evaluated_points = 0;
+  double mppi_clear_sum = 0.0;
+  double mppi_end_lateral_min = std::numeric_limits<double>::infinity();
+  double mppi_end_lateral_max = -std::numeric_limits<double>::infinity();
+  double mppi_end_along_max = -std::numeric_limits<double>::infinity();
+  std::size_t mppi_struct_total = 0;
+  std::size_t mppi_struct_free = 0;
+  double mppi_struct_best_cost = std::numeric_limits<double>::infinity();
+  double mppi_noise_best_cost = std::numeric_limits<double>::infinity();
+  bool mppi_path_align_applied = false;
+  bool mppi_path_align_skipped_blocked = false;
+  bool mppi_path_follow_applied = false;
+  bool mppi_path_follow_skipped_blocked = false;
+  double mppi_path_follow_target_m = -1.0;
+  std::vector<MppiCriticTermCosts> mppi_term_costs;
+  std::vector<MppiCandidateScore> mppi_last_scores;
+  std::size_t mppi_probe_points = 0;
+  double mppi_probe_block_m = -1.0;
+
   MppiResult result;
   auto score_function =
     [&](const std::vector<MppiCandidate> & candidates) -> std::vector<MppiCandidateScore> {
+      mppi_term_costs.clear();
+      mppi_last_scores.clear();
       auto critic_data = buildMppiCriticData(
         candidates,
         obstacle_snapshot);
@@ -3894,6 +4053,14 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
       mppi_valid_scores = 0;
       mppi_critic_fail_flag = critic_result.fail_flag;
       mppi_min_clearance = std::numeric_limits<double>::infinity();
+      mppi_clear_capped_points = 0;
+      mppi_clear_evaluated_points = 0;
+      mppi_clear_sum = 0.0;
+      mppi_end_lateral_min = std::numeric_limits<double>::infinity();
+      mppi_end_lateral_max = -std::numeric_limits<double>::infinity();
+      mppi_end_along_max = -std::numeric_limits<double>::infinity();
+      mppi_probe_points = 0;
+      mppi_probe_block_m = std::numeric_limits<double>::infinity();
       mppi_path_occupancy_ratio = critic_data.path_obstacle_occupancy_ratio;
       mppi_blocked_path_points = critic_data.blocked_path_points;
       mppi_diagnostic_path_ = critic_data.path;
@@ -3914,6 +4081,11 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
       mppi_clearance_node_checks += critic_data.obstacle_clearance_node_checks;
       mppi_clearance_candidate_checks += critic_data.obstacle_clearance_point_checks;
 
+      const double robot_x = trans_gbl2b_.transform.translation.x;
+      const double robot_y = trans_gbl2b_.transform.translation.y;
+      const double robot_yaw = getRobotYaw();
+      const double clearance_cap =
+        std::max(0.0, mppi_critic_manager_.config().obstacles.inflation_radius);
       for(const auto & trajectory : critic_data.trajectories){
         bool trajectory_collides = false;
         for(const auto & point : trajectory.points){
@@ -3924,10 +4096,30 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
           if(std::isfinite(point.obstacle_clearance)){
             ++mppi_finite_clearance_points;
             mppi_min_clearance = std::min(mppi_min_clearance, point.obstacle_clearance);
+            ++mppi_clear_evaluated_points;
+            mppi_clear_sum += point.obstacle_clearance;
+            if(clearance_cap > 0.0 && point.obstacle_clearance >= clearance_cap - 1e-9){
+              ++mppi_clear_capped_points;
+            }
           }
         }
         if(trajectory_collides){
           ++mppi_collision_trajectories;
+        }
+        else if(!trajectory.points.empty()){
+          const auto & end = trajectory.points.back();
+          const double dx = end.x - robot_x;
+          const double dy = end.y - robot_y;
+          const double along = std::cos(robot_yaw) * dx + std::sin(robot_yaw) * dy;
+          const double lateral = -std::sin(robot_yaw) * dx + std::cos(robot_yaw) * dy;
+          mppi_end_along_max = std::max(mppi_end_along_max, along);
+          mppi_end_lateral_min = std::min(mppi_end_lateral_min, lateral);
+          mppi_end_lateral_max = std::max(mppi_end_lateral_max, lateral);
+        }
+        mppi_probe_points += trajectory.probe_points.size();
+        if(trajectory.probe_first_block_m >= 0.0){
+          mppi_probe_block_m = std::min(
+            mppi_probe_block_m, trajectory.probe_first_block_m);
         }
       }
 
@@ -3961,6 +4153,17 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
       }
 
       annotateMppiCandidateMetadata(critic_data, &critic_result);
+
+      mppi_path_align_applied = critic_result.path_align_applied;
+      mppi_path_align_skipped_blocked = critic_result.path_align_skipped_blocked;
+      mppi_path_follow_applied = critic_result.path_follow_applied;
+      mppi_path_follow_skipped_blocked = critic_result.path_follow_skipped_blocked;
+      mppi_path_follow_target_m = critic_result.path_follow_target_distance;
+      mppi_term_costs = critic_result.term_costs;
+      mppi_last_scores = critic_result.scores;
+
+      // Structured-sample attribution is resolved at the print site, where the
+      // controller's actual active structured count is known.
 
       for(const auto & score : critic_result.scores){
         if(score.valid && std::isfinite(score.cost) && score.cost >= 0.0){
@@ -4033,7 +4236,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
       mppi_clearance_candidate_checks += point.clearance_point_checks;
     }
     optimal_sequence_collision_free =
-      isMppiTrajectoryCollisionFree(optimal_scored_trajectory);
+      isMppiTrajectoryCollisionFree(optimal_scored_trajectory, false);
     if(mppi_cycle_speed_cap > 0.0 &&
        !mppiSequenceRespectsSpeedCap(
          result.optimal_sequence,
@@ -4089,9 +4292,45 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     mppi_collision_candidate_checks,
     mppi_clearance_node_checks,
     mppi_clearance_candidate_checks);
+  mppi_lookahead_m = std::fabs(measured_speed.vx) *
+    static_cast<double>(mppi_controller_.config().time_steps) *
+    mppi_controller_.config().model_dt;
+  const double mppi_clear_mean = mppi_clear_evaluated_points > 0 ?
+    mppi_clear_sum / static_cast<double>(mppi_clear_evaluated_points) : -1.0;
+  const double mppi_end_lateral_spread =
+    (std::isfinite(mppi_end_lateral_min) && std::isfinite(mppi_end_lateral_max)) ?
+    (mppi_end_lateral_max - mppi_end_lateral_min) : -1.0;
+  const double mppi_end_along_max_m =
+    std::isfinite(mppi_end_along_max) ? mppi_end_along_max : -1.0;
+  MppiCriticTermCosts mppi_best_terms;
+  if(result.best_sample_index < mppi_term_costs.size()){
+    mppi_best_terms = mppi_term_costs[result.best_sample_index];
+  }
+  // Structured samples are always the first active count of the batch. The
+  // active count is 4 when a side is latched, so it must come from the MPPI
+  // result rather than the configured maximum.
+  mppi_struct_total = std::min(result.structured_candidates, mppi_last_scores.size());
+  mppi_struct_free = 0;
+  mppi_struct_best_cost = std::numeric_limits<double>::infinity();
+  mppi_noise_best_cost = std::numeric_limits<double>::infinity();
+  for(std::size_t i = 0; i < mppi_last_scores.size(); ++i){
+    const auto & score = mppi_last_scores[i];
+    const bool usable = score.valid && std::isfinite(score.cost) && score.cost >= 0.0;
+    if(i < mppi_struct_total){
+      if(usable && score.collision_free){
+        ++mppi_struct_free;
+      }
+      if(usable){
+        mppi_struct_best_cost = std::min(mppi_struct_best_cost, score.cost);
+      }
+    }
+    else if(usable){
+      mppi_noise_best_cost = std::min(mppi_noise_best_cost, score.cost);
+    }
+  }
   RCLCPP_INFO_THROTTLE(
     this->get_logger().get_child(name_), *clock_, 2000,
-    "MPPI debug: controller=%s, obstacle_points=%zu, scoring_ms=%.2f, trajectories=%zu, trajectory_points=%zu, %s, finite_clearances=%zu, min_clearance=%.3f, path_occupancy=%.3f, collision_trajectories=%zu, valid_scores=%zu, critic_fail=%d, rejected=%zu, best_cost=%.3f, best_vx=%.3f, best_wz=%.3f, prefilter_wz=%.3f, cmd_vx=%.3f, cmd_wz=%.3f, effective_samples=%.2f, weight_pos=%.3f, weight_neg=%.3f, weight_neutral=%.3f, structured=%zu, structured_weight=%.3f, selected_side=%s, best_side=%s, feasible_left=%zu, feasible_right=%zu, feasible_neutral=%zu, phase_compatible=%zu, side_failures=%zu, quality_advantage=%zu, best_left_cost=%.3f, best_right_cost=%.3f, avoidance_stage=%s, path_offset=%.3f, path_offset_valid=%d, preferred_side=%s, obstacle_offset=%.3f, lateral_profile_valid=%d, departure_offset=%.3f, best_sample=%zu, best_critic_cost=%.3f, best_energy=%.3f, optimal_valid=%d, attempts=%zu, allowed_max_speed=%.3f",
+    "MPPI debug: controller=%s, obstacle_points=%zu, scoring_ms=%.2f, trajectories=%zu, trajectory_points=%zu, %s, finite_clearances=%zu, min_clearance=%.3f, path_occupancy=%.3f, collision_trajectories=%zu, valid_scores=%zu, critic_fail=%d, rejected=%zu, best_cost=%.3f, best_vx=%.3f, best_wz=%.3f, prefilter_wz=%.3f, cmd_vx=%.3f, cmd_wz=%.3f, effective_samples=%.2f, weight_pos=%.3f, weight_neg=%.3f, weight_neutral=%.3f, structured=%zu, structured_weight=%.3f, selected_side=%s, best_side=%s, feasible_left=%zu, feasible_right=%zu, feasible_neutral=%zu, phase_compatible=%zu, side_failures=%zu, quality_advantage=%zu, best_left_cost=%.3f, best_right_cost=%.3f, avoidance_stage=%s, path_offset=%.3f, path_offset_valid=%d, preferred_side=%s, obstacle_offset=%.3f, lateral_profile_valid=%d, departure_offset=%.3f, best_sample=%zu, best_critic_cost=%.3f, best_energy=%.3f, optimal_valid=%d, attempts=%zu, allowed_max_speed=%.3f, lookahead_m=%.2f, end_along_max_m=%.2f, end_lat_spread_m=%.3f, clear_mean=%.3f, clear_capped=%zu/%zu, align_applied=%d, align_skip_blocked=%d, follow_applied=%d, follow_skip_blocked=%d, follow_target_m=%.2f, struct_free=%zu/%zu, struct_best_cost=%.2f, noise_best_cost=%.2f, guard_applied=%d, guard_removed=%zu, best_terms=obs:%.2f,align:%.2f,follow:%.2f,angle:%.2f,constr:%.2f,prefer:%.2f,goal:%.2f,term_sum:%.2f, probe_points=%zu, probe_block_m=%.2f",
     controller_name.c_str(),
     mppi_obstacle_points,
     mppi_scoring_ms,
@@ -4139,7 +4378,37 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     result.best_control_energy,
     optimal_sequence_collision_free ? 1 : 0,
     optimization_attempts,
-    context.current_allowed_max_linear_speed);
+    context.current_allowed_max_linear_speed,
+    mppi_lookahead_m,
+    mppi_end_along_max_m,
+    mppi_end_lateral_spread,
+    mppi_clear_mean,
+    mppi_clear_capped_points,
+    mppi_clear_evaluated_points,
+    mppi_path_align_applied ? 1 : 0,
+    mppi_path_align_skipped_blocked ? 1 : 0,
+    mppi_path_follow_applied ? 1 : 0,
+    mppi_path_follow_skipped_blocked ? 1 : 0,
+    mppi_path_follow_target_m,
+    mppi_struct_free,
+    mppi_struct_total,
+    std::isfinite(mppi_struct_best_cost) ? mppi_struct_best_cost : -1.0,
+    std::isfinite(mppi_noise_best_cost) ? mppi_noise_best_cost : -1.0,
+    result.bypass_guard_applied ? 1 : 0,
+    result.bypass_guard_removed,
+    mppi_best_terms.obstacles,
+    mppi_best_terms.path_align,
+    mppi_best_terms.path_follow,
+    mppi_best_terms.path_angle,
+    mppi_best_terms.constraint,
+    mppi_best_terms.prefer_forward,
+    mppi_best_terms.goal + mppi_best_terms.goal_angle,
+    mppi_best_terms.obstacles + mppi_best_terms.path_align +
+    mppi_best_terms.path_follow + mppi_best_terms.path_angle +
+    mppi_best_terms.constraint + mppi_best_terms.prefer_forward +
+    mppi_best_terms.goal + mppi_best_terms.goal_angle,
+    mppi_probe_points,
+    std::isfinite(mppi_probe_block_m) ? mppi_probe_block_m : -1.0);
 
   maybeLogMppiBlockedDiagnostics(
     obstacle_snapshot, result, best_sample_command, mppi_lateral_profile,
@@ -4249,6 +4518,108 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     goal_seq_,
     route_source_label_,
     true);
+
+  // nav_msgs/Path carries one colour for the whole polyline, so the two
+  // segments are published separately: green is the time rollout, orange the
+  // distance probe, red the first probe contact. The probe is recomputed from
+  // the published endpoint so the tail stays attached to the rollout that is
+  // actually drawn.
+  if(debug_publish_best_trajectory_ && best_traj.getPointsSize() > 0 &&
+    !result.optimal_sequence.empty())
+  {
+    const bool want_markers =
+      pub_best_trajectory_markers_->get_subscription_count() > 0;
+    const bool want_probe = pub_best_trajectory_probe_pose_ &&
+      pub_best_trajectory_probe_pose_->get_subscription_count() > 0;
+    if(want_markers || want_probe){
+      double first_block_m = -1.0;
+      const auto probe = buildMppiDistanceProbe(
+        best_traj.getPoint(best_traj.getPointsSize() - 1).pose,
+        result.optimal_sequence.back(), obstacle_snapshot, &first_block_m);
+      const double probe_z = best_traj.getPoint(best_traj.getPointsSize() - 1)
+        .pose.position.z;
+
+      if(want_probe){
+        geometry_msgs::msg::PoseArray probe_arr;
+        probe_arr.header.frame_id = global_frame_;
+        probe_arr.header.stamp = clock_->now();
+        probe_arr.poses.reserve(probe.size());
+        for(const auto & probe_point : probe){
+          geometry_msgs::msg::Pose pose;
+          pose.position.x = probe_point.x;
+          pose.position.y = probe_point.y;
+          pose.position.z = probe_z;
+          tf2::Quaternion q;
+          q.setRPY(0.0, 0.0, probe_point.yaw);
+          pose.orientation = tf2::toMsg(q);
+          probe_arr.poses.push_back(pose);
+        }
+        pub_best_trajectory_probe_pose_->publish(probe_arr);
+      }
+
+      if(want_markers){
+        const auto stamp = clock_->now();
+        visualization_msgs::msg::MarkerArray markers;
+
+        visualization_msgs::msg::Marker rollout_marker;
+        rollout_marker.header.frame_id = global_frame_;
+        rollout_marker.header.stamp = stamp;
+        rollout_marker.ns = "mppi_best";
+        rollout_marker.id = 0;
+        rollout_marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
+        rollout_marker.action = visualization_msgs::msg::Marker::ADD;
+        rollout_marker.scale.x = 0.03;
+        rollout_marker.color.r = 0.10f;
+        rollout_marker.color.g = 0.90f;
+        rollout_marker.color.b = 0.20f;
+        rollout_marker.color.a = 1.0f;
+        rollout_marker.pose.orientation.w = 1.0;
+        rollout_marker.points.reserve(best_traj.getPointsSize());
+        for(unsigned int i = 0; i < best_traj.getPointsSize(); ++i){
+          const auto & pose = best_traj.getPoint(i).pose;
+          geometry_msgs::msg::Point point;
+          point.x = pose.position.x;
+          point.y = pose.position.y;
+          point.z = pose.position.z;
+          rollout_marker.points.push_back(point);
+        }
+        markers.markers.push_back(rollout_marker);
+
+        visualization_msgs::msg::Marker probe_marker = rollout_marker;
+        probe_marker.id = 1;
+        probe_marker.color.r = 1.00f;
+        probe_marker.color.g = 0.55f;
+        probe_marker.color.b = 0.10f;
+        // Start where the rollout ended so the two drawn segments join up.
+        probe_marker.points.clear();
+        probe_marker.points.push_back(rollout_marker.points.back());
+        for(const auto & probe_point : probe){
+          geometry_msgs::msg::Point point;
+          point.x = probe_point.x;
+          point.y = probe_point.y;
+          point.z = probe_z;
+          probe_marker.points.push_back(point);
+        }
+        markers.markers.push_back(probe_marker);
+
+        if(first_block_m >= 0.0 && !probe_marker.points.empty()){
+          visualization_msgs::msg::Marker block_marker = rollout_marker;
+          block_marker.id = 2;
+          block_marker.type = visualization_msgs::msg::Marker::SPHERE;
+          block_marker.scale.x = 0.18;
+          block_marker.scale.y = 0.18;
+          block_marker.scale.z = 0.18;
+          block_marker.color.r = 1.00f;
+          block_marker.color.g = 0.10f;
+          block_marker.color.b = 0.10f;
+          block_marker.points.clear();
+          block_marker.pose.position = probe_marker.points.back();
+          markers.markers.push_back(block_marker);
+        }
+        pub_best_trajectory_markers_->publish(markers);
+      }
+    }
+  }
 
   if(debug_publish_best_trajectory_ && pub_best_trajectory_pose_->get_subscription_count() > 0){
     geometry_msgs::msg::PoseArray best_pose_arr;

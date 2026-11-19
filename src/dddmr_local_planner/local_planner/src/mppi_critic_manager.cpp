@@ -7,13 +7,35 @@
 namespace local_planner
 {
 
-bool isMppiTrajectoryCollisionFree(const MppiScoredTrajectory & trajectory)
+bool isMppiTrajectoryCollisionFree(
+  const MppiScoredTrajectory & trajectory,
+  const bool include_probe)
 {
-  return !trajectory.points.empty() &&
+  const bool time_channel_clear =
+    !trajectory.points.empty() &&
     trajectory.points.size() == trajectory.controls.size() &&
     std::all_of(
     trajectory.points.begin(),
     trajectory.points.end(),
+    [](const MppiTrajectoryPoint & point) {
+      return point.collision_evaluated && !point.in_collision;
+    });
+  if(!time_channel_clear){
+    return false;
+  }
+  if(!include_probe){
+    // Callers that validate the command actually sent must not re-use the
+    // hypothetical arc: it is a selection heuristic, and treating it as a
+    // certificate escalates every corridor to a global replan.
+    return true;
+  }
+  // The distance probe is the only evidence beyond the time rollout. A probe
+  // contact must veto the candidate here as well, because this predicate is the
+  // hard filter for side selection, the committed-bypass guard and the reverse
+  // fallback -- not just the soft obstacle cost.
+  return std::all_of(
+    trajectory.probe_points.begin(),
+    trajectory.probe_points.end(),
     [](const MppiTrajectoryPoint & point) {
       return point.collision_evaluated && !point.in_collision;
     });
@@ -468,6 +490,7 @@ MppiCriticResult MppiCriticManager::score(const MppiCriticData & data) const
 {
   MppiCriticResult result;
   result.scores.assign(data.trajectories.size(), MppiCandidateScore{true, 0.0});
+  result.term_costs.assign(data.trajectories.size(), MppiCriticTermCosts{});
 
   for(const auto & critic : config_.critics){
     if(result.fail_flag){
@@ -596,6 +619,12 @@ void MppiCriticManager::scoreConstraintCritic(
       cost * std::max(1e-3, data.model_dt),
       config_.constraint.cost_weight,
       config_.constraint.cost_power);
+    if(i < result->term_costs.size()){
+      result->term_costs[i].constraint += poweredCost(
+        cost * std::max(1e-3, data.model_dt),
+        config_.constraint.cost_weight,
+        config_.constraint.cost_power);
+    }
   }
 }
 
@@ -636,6 +665,16 @@ void MppiCriticManager::scoreObstaclesCritic(
       }
     }
 
+    for(const auto & probe : trajectory.probe_points){
+      // Distance-parameterized continuation: collision-only evidence, so a
+      // candidate that would reach the obstacle beyond the time rollout is
+      // still vetoed instead of scoring as free.
+      if(probe.in_collision){
+        trajectory_collides = true;
+        break;
+      }
+    }
+
     if(!trajectory_collides){
       all_trajectories_collide = false;
     }
@@ -646,6 +685,10 @@ void MppiCriticManager::scoreObstaclesCritic(
         (trajectory_collides ? config_.obstacles.collision_cost : raw_cost) +
       config_.obstacles.repulsion_weight * repulsive_cost / normalizer;
     result->scores[i].cost += poweredCost(total, 1.0, config_.obstacles.cost_power);
+    if(i < result->term_costs.size()){
+      result->term_costs[i].obstacles +=
+        poweredCost(total, 1.0, config_.obstacles.cost_power);
+    }
   }
 
   result->fail_flag = all_trajectories_collide;
@@ -675,6 +718,10 @@ void MppiCriticManager::scoreGoalCritic(
       cost,
       config_.goal.cost_weight,
       config_.goal.cost_power);
+    if(i < result->term_costs.size()){
+      result->term_costs[i].goal += poweredCost(
+        cost, config_.goal.cost_weight, config_.goal.cost_power);
+    }
   }
 }
 
@@ -708,6 +755,10 @@ void MppiCriticManager::scoreGoalAngleCritic(
       cost,
       config_.goal_angle.cost_weight,
       config_.goal_angle.cost_power);
+    if(i < result->term_costs.size()){
+      result->term_costs[i].goal_angle += poweredCost(
+        cost, config_.goal_angle.cost_weight, config_.goal_angle.cost_power);
+    }
   }
 }
 
@@ -726,6 +777,7 @@ void MppiCriticManager::scorePathAlignCritic(
   if(data.blocked_path_points >= 3 &&
      data.path_obstacle_occupancy_ratio > config_.path_align.max_path_occupancy_ratio)
   {
+    result->path_align_skipped_blocked = true;
     return;
   }
 
@@ -735,6 +787,7 @@ void MppiCriticManager::scorePathAlignCritic(
   }
 
   const std::size_t step = std::max<std::size_t>(1, config_.path_align.trajectory_point_step);
+  result->path_align_applied = true;
   for(std::size_t i = 0; i < data.trajectories.size(); ++i){
     const auto & trajectory = data.trajectories[i];
     double cost = 0.0;
@@ -755,6 +808,10 @@ void MppiCriticManager::scorePathAlignCritic(
       cost,
       config_.path_align.cost_weight,
       config_.path_align.cost_power);
+    if(i < result->term_costs.size()){
+      result->term_costs[i].path_align += poweredCost(
+        cost, config_.path_align.cost_weight, config_.path_align.cost_power);
+    }
   }
 }
 
@@ -808,6 +865,10 @@ void MppiCriticManager::scorePathFollowCritic(
     if(!data.path[robot_index].obstacle_free ||
       free_route_ahead < config_.path_follow.threshold_to_consider)
     {
+      // The route ahead of the vehicle is closed, so there is no progress
+      // target to extrapolate. Recorded so a creep can be told apart from a
+      // cost balance that deliberately chose to decelerate.
+      result->path_follow_skipped_blocked = true;
       return;
     }
 
@@ -844,7 +905,17 @@ void MppiCriticManager::scorePathFollowCritic(
       distance(last.x, last.y, target.x, target.y),
       config_.path_follow.cost_weight,
       config_.path_follow.cost_power);
+    if(i < result->term_costs.size()){
+      result->term_costs[i].path_follow += poweredCost(
+        distance(last.x, last.y, target.x, target.y),
+        config_.path_follow.cost_weight,
+        config_.path_follow.cost_power);
+    }
   }
+  result->path_follow_applied = true;
+  result->path_follow_target_index = target_index;
+  result->path_follow_target_distance =
+    distance(data.robot_x, data.robot_y, target.x, target.y);
 }
 
 void MppiCriticManager::scorePathAngleCritic(
@@ -882,6 +953,12 @@ void MppiCriticManager::scorePathAngleCritic(
       std::fabs(shortestAngularDistance(last.yaw, terminal_to_target)),
       config_.path_angle.cost_weight,
       config_.path_angle.cost_power);
+    if(i < result->term_costs.size()){
+      result->term_costs[i].path_angle += poweredCost(
+        std::fabs(shortestAngularDistance(last.yaw, terminal_to_target)),
+        config_.path_angle.cost_weight,
+        config_.path_angle.cost_power);
+    }
   }
 }
 
@@ -907,6 +984,12 @@ void MppiCriticManager::scorePreferForwardCritic(
       reverse_motion,
       config_.prefer_forward.cost_weight,
       config_.prefer_forward.cost_power);
+    if(i < result->term_costs.size()){
+      result->term_costs[i].prefer_forward += poweredCost(
+        reverse_motion,
+        config_.prefer_forward.cost_weight,
+        config_.prefer_forward.cost_power);
+    }
   }
 }
 

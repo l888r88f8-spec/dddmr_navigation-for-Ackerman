@@ -25,7 +25,7 @@
 #include <string>
 #include <vector>
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -213,4 +213,4 @@ bool LoadOfflinePcdPoints(
   return true;
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

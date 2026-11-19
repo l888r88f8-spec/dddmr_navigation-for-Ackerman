@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/terrain_types.h"
+#include "grid_global_planner/terrain_types.h"
 
 #include <algorithm>
 #include <cmath>
 #include <functional>
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -385,4 +385,4 @@ const char * ObstacleStateToString(ObstacleState state) noexcept
   return "unknown";
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

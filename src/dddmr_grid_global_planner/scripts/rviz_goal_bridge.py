@@ -16,11 +16,11 @@
 
 The bridge is visualization/planning-only and deliberately has no control path:
 
-* ``/dddmr_grid_global_planner/rviz_start`` is a private
+* ``/grid_global_planner/rviz_start`` is a private
   ``PoseWithCovarianceStamped`` topic. Selecting a start pose only stores it
   locally and draws a marker. It is never republished as ``/initialpose`` and
   never touches localization.
-* ``/dddmr_grid_global_planner/rviz_goal`` is a private ``PoseStamped`` topic.
+* ``/grid_global_planner/rviz_goal`` is a private ``PoseStamped`` topic.
   A goal click submits one ``dddmr_sys_core/action/GetPlan`` goal with
   ``activate_threading=true``. No cmd_vel, p2p, controller, or TF action is
   used.
@@ -39,7 +39,7 @@ The bridge is visualization/planning-only and deliberately has no control path:
   cancellation once, and withholds all new goals until terminal evidence or a
   server/bridge restart. State is never released before that evidence exists.
 * The bridge exclusively owns
-  ``/dddmr_grid_global_planner/rviz_path`` for display. It publishes the action
+  ``/grid_global_planner/rviz_path`` for display. It publishes the action
   result path only for a successful current-generation goal with no newer
   pending goal. The planner's own ``~/path`` is left untouched.
 * Every wait is a future callback plus a steady-clock watchdog timer.
@@ -149,7 +149,7 @@ class RvizGoalBridge(Node):
     """
 
     def __init__(self) -> None:
-        super().__init__('dddmr_grid_rviz_bridge')
+        super().__init__('grid_rviz_bridge')
 
         # Parameters are read once at startup. Invalid values fail closed
         # before any subscription can accept a click.
@@ -157,13 +157,13 @@ class RvizGoalBridge(Node):
             'action_name', '/get_plan')
         self._fixed_frame = self._string_parameter('fixed_frame', 'map')
         self._start_topic = self._string_parameter(
-            'start_topic', '/dddmr_grid_global_planner/rviz_start')
+            'start_topic', '/grid_global_planner/rviz_start')
         self._goal_topic = self._string_parameter(
-            'goal_topic', '/dddmr_grid_global_planner/rviz_goal')
+            'goal_topic', '/grid_global_planner/rviz_goal')
         self._marker_topic = self._string_parameter(
-            'marker_topic', '/dddmr_grid_global_planner/rviz_markers')
+            'marker_topic', '/grid_global_planner/rviz_markers')
         self._path_topic = self._string_parameter(
-            'path_topic', '/dddmr_grid_global_planner/rviz_path')
+            'path_topic', '/grid_global_planner/rviz_path')
 
         self._start_height_mode = self._height_mode_parameter(
             'start_height_mode')

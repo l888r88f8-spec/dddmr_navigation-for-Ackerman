@@ -642,6 +642,8 @@ MppiResult MppiController::optimizeBatch(
     result.structured_weight_mass = statistics.structured_weight_mass;
     result.prefilter_command = statistics.prefilter_command;
     result.phase_compatible_candidates = statistics.phase_compatible_candidates;
+    result.bypass_guard_applied = statistics.bypass_guard_applied;
+    result.bypass_guard_removed = statistics.bypass_guard_removed;
     result.selected_bypass_side = provisional_bypass_side;
     result.side_infeasible_cycles = provisional_infeasible_cycles;
     result.side_quality_advantage_cycles = provisional_quality_advantage_cycles;
@@ -1603,13 +1605,16 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
     if(avoidance_stage == MppiAvoidanceStage::Bypass &&
       statistics.phase_compatible_candidates > 0)
     {
+      statistics.bypass_guard_applied = true;
       for(std::size_t sample = 0; sample < valid_sequences.size(); ++sample){
         if(!selected[sample]){
           continue;
         }
         const double progress = outward_direction * lateral_progress[sample];
-        selected[sample] = std::isfinite(progress) &&
-          progress >= -kBypassClosingTolerance;
+        if(!(std::isfinite(progress) && progress >= -kBypassClosingTolerance)){
+          selected[sample] = false;
+          ++statistics.bypass_guard_removed;
+        }
       }
     }
   }

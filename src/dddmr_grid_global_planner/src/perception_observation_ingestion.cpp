@@ -16,7 +16,7 @@
 
 #include <utility>
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -144,11 +144,11 @@ PerceptionIngestionResult ConvertPerceptionSnapshotToSourceObservations(
       known_volumes.push_back(ToObservedVolume(volume));
     }
 
-    // The export's source stamp is the per-source acquisition provenance. The
-    // receipt stamp comes from the immutable export, not from a later refresh.
+    // Preserve per-source provenance even when a newer export cycle contains
+    // the same scan. Polling must not extend the source's lifetime.
     const std::int64_t receipt =
-      received_steady_ns > 0 ? received_steady_ns :
-      snapshot.received_steady_ns();
+      source.received_steady_ns() > 0 ? source.received_steady_ns() :
+      (received_steady_ns > 0 ? received_steady_ns : snapshot.received_steady_ns());
     SourceObservationSnapshot observation(
       source.source_id(), source.frame_id(), source.source_sequence(),
       terrain_revision, source.sensor_stamp_ns(), receipt,
@@ -169,4 +169,4 @@ PerceptionIngestionResult ConvertPerceptionSnapshotToSourceObservations(
   return result;
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

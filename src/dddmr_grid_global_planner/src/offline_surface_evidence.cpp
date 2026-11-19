@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/offline_surface_evidence.h"
+#include "grid_global_planner/offline_surface_evidence.h"
 
 #include <algorithm>
 #include <cmath>
@@ -20,9 +20,9 @@
 #include <utility>
 #include <vector>
 
-#include "dddmr_grid_global_planner/offline_static_map.h"
+#include "grid_global_planner/offline_static_map.h"
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -457,4 +457,4 @@ SurfaceAttempt EvaluateSurfaceAttempt(
   return attempt;
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

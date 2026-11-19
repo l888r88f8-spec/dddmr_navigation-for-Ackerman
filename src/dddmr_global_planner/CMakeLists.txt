@@ -61,6 +61,8 @@ include_directories(
 add_library(a_star_on_graph SHARED
   src/a_star_on_pc.cpp
   src/a_star_on_pre_graph.cpp
+  src/legacy_scene_adapter.cpp
+  src/scene_pipeline.cpp
 )
 target_link_libraries(a_star_on_graph
   ${PCL_LIBRARIES}
@@ -74,6 +76,7 @@ add_library(forward_hybrid_a_star SHARED
   src/forward_hybrid_a_star.cpp
 )
 target_link_libraries(forward_hybrid_a_star
+  a_star_on_graph
   ${PCL_LIBRARIES}
 )
 ament_target_dependencies(forward_hybrid_a_star
@@ -177,5 +180,33 @@ install(PROGRAMS
 ament_export_include_directories(include)
 ament_export_libraries(a_star_on_graph forward_hybrid_a_star global_planner dynamic_window_aware_global_planner)
 ament_export_dependencies(${dependencies})
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_legacy_scene_backends
+    test/test_legacy_scene_backends.cpp
+    SKIP_LINKING_MAIN_LIBRARIES
+  )
+  target_link_libraries(test_legacy_scene_backends
+    a_star_on_graph
+    ${PCL_LIBRARIES}
+  )
+  ament_target_dependencies(test_legacy_scene_backends
+    ${dependencies}
+  )
+
+  ament_add_gtest(test_scene_pipeline
+    test/test_scene_pipeline.cpp
+    SKIP_LINKING_MAIN_LIBRARIES
+  )
+  target_link_libraries(test_scene_pipeline
+    a_star_on_graph
+    forward_hybrid_a_star
+    ${PCL_LIBRARIES}
+  )
+  ament_target_dependencies(test_scene_pipeline
+    ${dependencies}
+  )
+endif()
 
 ament_package()

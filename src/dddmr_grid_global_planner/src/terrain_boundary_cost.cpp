@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/terrain_boundary_cost.h"
+#include "grid_global_planner/terrain_boundary_cost.h"
 
 #include <algorithm>
 #include <array>
@@ -25,9 +25,9 @@
 #include <utility>
 #include <vector>
 
-#include "dddmr_grid_global_planner/map_snapshot.h"
+#include "grid_global_planner/map_snapshot.h"
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -370,4 +370,4 @@ void TerrainSnapshot::BuildSupportBoundaryDistances()
   propagate(&insufficient_connection_distances_m_);
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

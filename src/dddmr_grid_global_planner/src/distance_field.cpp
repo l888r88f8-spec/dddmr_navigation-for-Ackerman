@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/distance_field.h"
+#include "grid_global_planner/distance_field.h"
 
 #include <algorithm>
 #include <cmath>
@@ -27,7 +27,7 @@
 #include <utility>
 #include <vector>
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -161,7 +161,8 @@ ObstacleDistanceRecord MakeRecord(
   const TerrainNode & node, const ObstacleAttributes & attributes,
   double nearest_distance, bool nearest_reached,
   double unknown_boundary_distance, bool unknown_boundary,
-  bool adjacent_unknown, double truncation_distance)
+  bool adjacent_unknown, double truncation_distance,
+  bool allow_allowed_static_clear_unknown_observed)
 {
   ObstacleDistanceRecord record;
   record.attributes = attributes;
@@ -189,6 +190,18 @@ ObstacleDistanceRecord MakeRecord(
   }
   const ObstacleState state = attributes.CombinedState();
   if (state == ObstacleState::kUnknown) {
+    // The merged state stays unknown, but an already-policy-allowed clear static
+    // ground node can still report the observed obstacle propagation seed. This
+    // is an observed-only soft-cost input: it does not claim free space, a
+    // bounded metric, or clearance. With no actual reached occupied seed the
+    // field stays NaN rather than being capped to R.
+    if (allow_allowed_static_clear_unknown_observed &&
+      attributes.static_state == ObstacleState::kClear &&
+      nearest_reached && std::isfinite(nearest_distance))
+    {
+      record.nearest_observed_distance_m = std::max(0.0, nearest_distance);
+      record.nearest_known = true;
+    }
     return record;
   }
   if (state == ObstacleState::kOccupied) {
@@ -468,7 +481,7 @@ ObstacleDistanceField::ObstacleDistanceField(
         node, merged_attributes[index], distances[index],
         std::isfinite(distances[index]), unknown_distances[index],
         unknown_boundary[index], adjacent_unknown[index],
-        options_.truncation_distance_m));
+        options_.truncation_distance_m, !options_.reject_unknown));
     record_id_index->emplace(node.id, key);
   }
   records_.clear();
@@ -815,7 +828,7 @@ ObstacleDistanceField::UpdateIncremental(
       *node, halo_attributes[id], occupied_distance[id],
       std::isfinite(occupied_distance[id]), unknown_distance[id],
       halo_unknown_boundary[id], adjacent_unknown,
-      options.truncation_distance_m);
+      options.truncation_distance_m, !options.reject_unknown);
   }
   return updated;
 }
@@ -1065,7 +1078,7 @@ double ReferenceSameSurfaceDistance(
   const ObstacleDistanceRecord record = MakeRecord(
     *target_node, attributes, distances[target_iterator->second],
     std::isfinite(distances[target_iterator->second]), kInfinity, false,
-    false, options.truncation_distance_m);
+    false, options.truncation_distance_m, false);
   if (known != nullptr) {
     *known = record.nearest_known;
   }
@@ -1075,4 +1088,4 @@ double ReferenceSameSurfaceDistance(
   return record.nearest_observed_distance_m;
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

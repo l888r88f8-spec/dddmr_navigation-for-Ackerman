@@ -28,11 +28,11 @@
 #include <utility>
 #include <vector>
 
-#include "dddmr_grid_global_planner/ackermann_kinematics.h"
-#include "dddmr_grid_global_planner/grid_search.h"
-#include "dddmr_grid_global_planner/multiresolution_map.h"
+#include "grid_global_planner/ackermann_kinematics.h"
+#include "grid_global_planner/grid_search.h"
+#include "grid_global_planner/multiresolution_map.h"
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -280,7 +280,7 @@ ArcOutcome SimulateArc(
     const BudgetTracker::Status budget_status = budget->Check();
     if (budget_status != BudgetTracker::Status::kOk) {
       outcome.status = ToSearchStatus(budget_status);
-      outcome.detail = "primitive expansion budget expired";
+      outcome.detail = "primitive sampling budget expired";
       return outcome;
     }
     const AckermannPose & sample = samples.base_poses[index];
@@ -730,11 +730,11 @@ StageOutcome RunFineSearch(
     std::max<std::size_t>(2, options.steer_samples);
 
   while (!open.empty()) {
-    const BudgetTracker::Status expansion_budget =
-      budget->ConsumeExpansion();
-    if (expansion_budget != BudgetTracker::Status::kOk) {
-      outcome.status = ToSearchStatus(expansion_budget);
-      outcome.detail = "hybrid expansion budget expired";
+    const BudgetTracker::Status loop_budget =
+      budget->Check();
+    if (loop_budget != BudgetTracker::Status::kOk) {
+      outcome.status = ToSearchStatus(loop_budget);
+      outcome.detail = "hybrid search budget expired";
       return outcome;
     }
     const QueueEntry entry = open.top();
@@ -927,8 +927,8 @@ bool CoarseSurfaceBlocked(
   return false;
 }
 
-// Runs coarse graph A* for guidance only. It consumes one shared expansion per
-// popped coarse surface and returns explicitly on cancellation/deadline.
+// Runs coarse graph A* for guidance only. It checks the shared deadline/sample
+// budget per popped coarse surface and returns explicitly on cancellation/deadline.
 CoarseOutcome RunCoarseAStar(
   const CoarseTerrainMap & coarse, const CoarseObstacleOverlay * overlay,
   const ObstacleDistanceField & distance_field, const Point3 & start,
@@ -1089,7 +1089,7 @@ CoarseOutcome RunCoarseAStar(
   open.emplace(heuristic(start_index), start_index);
   bool found = false;
   while (!open.empty()) {
-    const BudgetTracker::Status budget_status = budget->ConsumeExpansion();
+    const BudgetTracker::Status budget_status = budget->Check();
     if (budget_status != BudgetTracker::Status::kOk) {
       outcome.status = ToSearchStatus(budget_status);
       outcome.detail = "coarse search budget expired";
@@ -1278,7 +1278,7 @@ SearchResult AckermannHybridAStar::Search(
     result.detail = "start/goal point is outside the safe world bound";
     return Finalize(std::move(result), start_time);
   }
-  if (request.budget.max_expansions == 0 || request.budget.max_samples == 0) {
+  if (request.budget.max_samples == 0) {
     result.status = SearchStatus::kInvalidRequest;
     result.detail = "search budgets must be positive";
     return Finalize(std::move(result), start_time);
@@ -1517,4 +1517,4 @@ SearchResult AckermannHybridAStar::Search(
   return Finalize(std::move(result), start_time);
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

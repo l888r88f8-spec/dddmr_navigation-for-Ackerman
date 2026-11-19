@@ -208,6 +208,16 @@ if(BUILD_TESTING)
     ENV PYTHONDONTWRITEBYTECODE=1
   )
 
+  ament_add_pytest_test(test_grid_localization_launch_parameters
+    test/test_grid_localization_launch_parameters.py
+    ENV PYTHONDONTWRITEBYTECODE=1
+  )
+
+  ament_add_pytest_test(test_navigation_launch_parameters
+    test/test_navigation_launch_parameters.py
+    ENV PYTHONDONTWRITEBYTECODE=1
+  )
+
   ament_add_pytest_test(test_local_map_launch_parameters
     test/test_local_map_launch_parameters.py
     ENV PYTHONDONTWRITEBYTECODE=1

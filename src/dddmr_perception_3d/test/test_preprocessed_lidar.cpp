@@ -230,6 +230,10 @@ TEST_F(PreprocessedLidar, RawModeRetainsBodyFilteringAndGlobalObservation)
 TEST_F(PreprocessedLidar, GlobalStillMarksAndClearsGroundGraphFromSharedCloud)
 {
   Initialize(false);
+  // Direct-plugin fixture must explicitly opt in to frozen observation
+  // preparation; the default OFF path keeps the original behavior.
+  data_->scene_producer_enabled_.store(true);
+  data_->scene_evidence_enabled_.store(true);
   data_->pcl_ground_ = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
   for (int x = 0; x <= 20; ++x) {
     for (int y = 0; y <= 10; ++y) {
@@ -255,10 +259,69 @@ TEST_F(PreprocessedLidar, GlobalStillMarksAndClearsGroundGraphFromSharedCloud)
   // Index x=5,y=2 is (21,0.4,0), next to the projected obstacle.
   const unsigned int index = 5 * 11 + 2;
   EXPECT_LT(lidar_.get_dGraphValue(index), 0.52);
+  // The global plugin must expose the accepted dynamic cluster as its immutable
+  // per-cycle observation; otherwise the frozen perception snapshot has no
+  // obstacle source and every realtime observation is silently dropped.
+  ASSERT_FALSE(lidar_.getObservation()->empty());
   Send({}, node_->now());
   lidar_.selfClear();
   lidar_.selfMark();
   EXPECT_GT(lidar_.get_dGraphValue(index), 1.0);
+  EXPECT_TRUE(lidar_.getObservation()->empty());
+}
+
+TEST_F(PreprocessedLidar, ProducerOffSkipsFrozenObservationPreparation)
+{
+  Initialize(false);
+  data_->pcl_ground_ = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+  for (int x = 0; x <= 20; ++x) {
+    for (int y = 0; y <= 10; ++y) {
+      pcl::PointXYZI point;
+      point.x = 20.0f + x * 0.2f;
+      point.y = y * 0.2f;
+      point.z = 0.0f;
+      data_->pcl_ground_->push_back(point);
+    }
+  }
+  data_->pcl_map_ = data_->pcl_ground_;
+  data_->kdtree_ground_ = std::make_shared<pcl::KdTreeFLANN<pcl::PointXYZI>>();
+  data_->kdtree_ground_->setInputCloud(data_->pcl_ground_);
+  data_->kdtree_map_ = data_->kdtree_ground_;
+  data_->static_ground_size_ = data_->pcl_ground_->size();
+  data_->is_static_layer_ready_ = true;
+  lidar_.resetdGraph();
+
+  pcl::PointCloud<pcl::PointXYZ> cloud;
+  for (int i = 0; i < 8; ++i) {cloud.push_back({21.0f + i * 0.12f, 0.5f, 0.5f});}
+  Send(cloud, node_->now());
+  lidar_.selfClear();
+  lidar_.selfMark();
+  // Producer OFF: no finalize traversal/copy and no global observation cache
+  // replacement. The dGraph update itself still ran above.
+  EXPECT_TRUE(lidar_.getObservation()->empty());
+  EXPECT_GT(lidar_.get_dGraphValue(5 * 11 + 2), 0.0);
+
+  // Explicit opt-in restores the frozen observation path.
+  data_->scene_producer_enabled_.store(true);
+  data_->scene_evidence_enabled_.store(true);
+  Send(cloud, node_->now());
+  lidar_.selfClear();
+  lidar_.selfMark();
+  EXPECT_FALSE(lidar_.getObservation()->empty());
+}
+
+TEST_F(PreprocessedLidar, LocalDirectObservationIsIndependentOfProducerOff)
+{
+  Initialize(true);
+  pcl::PointCloud<pcl::PointXYZ> cloud;
+  cloud.push_back({25.5f, 0.5f, 0.5f});
+  Send(cloud, node_->now());
+  ASSERT_EQ(lidar_.getObservation()->size(), 1u);
+  EXPECT_FLOAT_EQ(lidar_.getObservation()->front().x, 25.5f);
+  data_->scene_producer_enabled_.store(true);
+  data_->scene_evidence_enabled_.store(true);
+  Send({}, node_->now());
+  EXPECT_TRUE(lidar_.getObservation()->empty());
 }
 
 TEST_F(PreprocessedLidar, CommonTopicAndSensorFrameReachLidar)

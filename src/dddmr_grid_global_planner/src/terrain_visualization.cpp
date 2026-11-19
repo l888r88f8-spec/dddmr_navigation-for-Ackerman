@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/terrain_visualization.h"
+#include "grid_global_planner/terrain_visualization.h"
 
 #include <algorithm>
 #include <array>
@@ -25,10 +25,11 @@
 #include "geometry_msgs/msg/point.hpp"
 #include "std_msgs/msg/color_rgba.hpp"
 
-#include "dddmr_grid_global_planner/continuous_ground_surface.h"
-#include "dddmr_grid_global_planner/terrain_boundary_cost.h"
+#include "grid_global_planner/continuous_ground_surface.h"
+#include "grid_global_planner/distance_field.h"
+#include "grid_global_planner/terrain_boundary_cost.h"
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -38,9 +39,33 @@ using Corners = std::array<geometry_msgs::msg::Point, 4>;
 
 // Colors describe terrain/occupancy evidence only, never wheel feasibility.
 // Hard occupied/prohibited/unknown states always win over the soft heat.
+std_msgs::msg::ColorRGBA ObstacleHeatColor(double normalized_risk)
+{
+  std_msgs::msg::ColorRGBA color;
+  color.a = 0.9F;
+  const double risk = std::clamp(normalized_risk, 0.0, 1.0);
+  if (risk <= 0.5) {
+    // Green -> yellow for the first half of the obstacle range.
+    const double fraction = risk / 0.5;
+    color.r = static_cast<float>(0.18 + 0.82 * fraction);
+    color.g = static_cast<float>(0.72 + 0.28 * fraction);
+    color.b = static_cast<float>(0.40 * (1.0 - fraction));
+  } else {
+    // Yellow -> orange as the obstacle gets closer, so the nearest supported
+    // clear cells are unmistakably warmer than the boundary-only ramp.
+    const double fraction = (risk - 0.5) / 0.5;
+    color.r = 1.0F;
+    color.g = static_cast<float>(1.0 - 0.55 * fraction);
+    color.b = 0.0F;
+  }
+  return color;
+}
+
 std_msgs::msg::ColorRGBA SurfaceColor(
   const MapSnapshot & snapshot, const TerrainNode & node, bool static_map_only,
-  double boundary_penalty_distance_m, double boundary_penalty_weight)
+  double boundary_penalty_distance_m, double boundary_penalty_weight,
+  bool obstacle_heat_enabled, double obstacle_penalty_distance_m,
+  double obstacle_penalty_weight)
 {
   std_msgs::msg::ColorRGBA color;
   color.a = 0.9F;
@@ -53,10 +78,28 @@ std_msgs::msg::ColorRGBA SurfaceColor(
     color.r = color.g = color.b = 0.55F;
     return color;
   }
+
+  const auto & field = snapshot.distance_field();
+  const bool obstacle_display =
+    obstacle_heat_enabled && field && field->ready();
   const ObstacleAttributes * static_record = snapshot.static_obstacles().Find(node.id);
-  const ObstacleState occupancy = static_map_only ?
-    (static_record == nullptr ? ObstacleState::kUnknown : static_record->static_state) :
-    snapshot.MergedObstacle(node.id).CombinedState();
+  ObstacleState occupancy = ObstacleState::kUnknown;
+  if (obstacle_display) {
+    // Use the same pinned merged field the graph reads, so a dynamic occupied
+    // record is red even when the terrain faces come from the offline static
+    // map. The field's actual traversal policy decides whether static-clear
+    // ground with unobserved dynamic evidence can enter the soft display.
+    occupancy = field->State(node.id);
+  } else {
+    occupancy = static_map_only ?
+      (static_record == nullptr ? ObstacleState::kUnknown :
+      static_record->static_state) :
+      snapshot.MergedObstacle(node.id).CombinedState();
+  }
+  const bool allowed_static_unknown = obstacle_display && static_map_only &&
+    occupancy == ObstacleState::kUnknown && static_record != nullptr &&
+    static_record->static_state == ObstacleState::kClear &&
+    field->IsTraversable(node.id);
   if (occupancy == ObstacleState::kOccupied) {
     color.r = 0.90F;
     color.g = 0.12F;
@@ -65,14 +108,16 @@ std_msgs::msg::ColorRGBA SurfaceColor(
     color.r = 1.0F;
     color.g = 0.55F;
     color.b = 0.05F;
-  } else if (!node.IsSupported() || occupancy != ObstacleState::kClear) {
+  } else if (!node.IsSupported() ||
+    (occupancy != ObstacleState::kClear && !allowed_static_unknown))
+  {
     color.r = color.g = color.b = 0.55F;
   } else {
-    // Per-cell risk heat from the same immutable evidence cache and guarded
-    // penalty function used by the offline evaluator. Green is zero risk;
-    // yellow/warm is the known measured-boundary gradient; violet/blue is
-    // explicit insufficient-connection evidence and is never rendered as
-    // yellow or safe green. A zero range/weight explicitly disables only the
+    // Outside the obstacle heat range, retain the offline evaluator's boundary
+    // palette: green is zero risk, yellow is measured-boundary heat, and
+    // violet/blue identifies insufficient-connection evidence. The obstacle
+    // gradient takes display priority only on policy-traversable ground.
+    // A zero range/weight explicitly disables only the
     // soft cost: known-boundary heat disappears, but an insufficient-evidence
     // seed keeps its warning label. This full/static/offline display is a
     // single-cell evidence hint, not a full-body feasibility or hardware claim.
@@ -97,6 +142,21 @@ std_msgs::msg::ColorRGBA SurfaceColor(
       color.r = color.g = color.b = 0.55F;
       return color;
     }
+
+    // The obstacle term is finite-only and zero outside the graph radius or
+    // when either graph value is zero. A non-finite distance never becomes
+    // full heat; it simply contributes nothing, exactly like the graph.
+    const double obstacle_risk = obstacle_display ?
+      NormalizedObstacleHeatRisk(
+      field->DistanceM(node.id), obstacle_penalty_distance_m,
+      obstacle_penalty_weight) : 0.0;
+    if (obstacle_risk > 0.0) {
+      // Inside the obstacle range show its distance gradient explicitly. A
+      // saturated boundary-warning hue must not hide this information. Hard
+      // states were handled above; outside the range retain the original colors.
+      return ObstacleHeatColor(obstacle_risk);
+    }
+
     const SupportBoundaryClassification classification =
       terrain->SupportBoundaryClassificationAt(node.id);
     const double measured_distance =
@@ -107,9 +167,9 @@ std_msgs::msg::ColorRGBA SurfaceColor(
       !heat_explicitly_disabled &&
       std::isfinite(insufficient_distance) &&
       insufficient_distance <= boundary_penalty_distance_m;
-    if (classification.insufficient_connection_evidence ||
-      uncertainty_in_range)
-    {
+    const bool boundary_uncertainty =
+      classification.insufficient_connection_evidence || uncertainty_in_range;
+    if (boundary_uncertainty) {
       // The conservative combined risk (max of the two same-shaped penalties)
       // drives intensity, but the hue identifies unknown connectivity evidence
       // rather than a measured geometric edge. With the soft term disabled, an
@@ -376,6 +436,80 @@ bool AppendMeasurementWireframe(
 
 }  // namespace
 
+double NormalizedObstacleHeatRisk(
+  double distance_m, double range_m, double weight)
+{
+  if (!std::isfinite(distance_m) || !std::isfinite(range_m) ||
+    !std::isfinite(weight) || range_m <= 0.0 || weight <= 0.0)
+  {
+    return 0.0;
+  }
+  if (distance_m >= range_m) {
+    return 0.0;
+  }
+  // Exactly the graph's linear (R-d)/R shape, normalized to 0..1. The weight
+  // enables the soft term but is not used to rescale the display fraction.
+  return std::clamp((range_m - distance_m) / range_m, 0.0, 1.0);
+}
+
+bool TerrainVisualizationRefresh::Queue(
+  std::shared_ptr<const MapSnapshot> snapshot)
+{
+  if (!snapshot) {
+    return false;
+  }
+  const std::uint64_t version = snapshot->obstacle_version();
+  if (has_rendered_ && snapshot == rendered_ && version == rendered_version_) {
+    return false;
+  }
+  if (has_rendered_ && version < rendered_version_) {
+    return false;
+  }
+  // Monotonic across TakePending(): while C is being painted there is no
+  // pending entry, but an older B must still be rejected so it cannot be drawn
+  // after C. Equal versions remain eligible when the immutable object differs.
+  if (has_newest_version_ && version < newest_version_) {
+    return false;
+  }
+  if (has_pending_ && snapshot == pending_ && version == pending_version_) {
+    return false;
+  }
+  if (has_pending_ && version < pending_version_) {
+    return false;
+  }
+  pending_ = std::move(snapshot);
+  pending_version_ = version;
+  newest_version_ = version;
+  has_pending_ = true;
+  has_newest_version_ = true;
+  return true;
+}
+
+std::shared_ptr<const MapSnapshot> TerrainVisualizationRefresh::TakePending()
+{
+  if (!has_pending_) {
+    return nullptr;
+  }
+  has_pending_ = false;
+  return std::move(pending_);
+}
+
+void TerrainVisualizationRefresh::MarkRendered(
+  const std::shared_ptr<const MapSnapshot> & snapshot)
+{
+  if (!snapshot) {
+    return;
+  }
+  const std::uint64_t version = snapshot->obstacle_version();
+  rendered_ = snapshot;
+  rendered_version_ = version;
+  has_rendered_ = true;
+  if (!has_newest_version_ || version > newest_version_) {
+    newest_version_ = version;
+    has_newest_version_ = true;
+  }
+}
+
 TerrainVisualizationResult BuildTerrainVisualization(
   const MapSnapshot & snapshot, const builtin_interfaces::msg::Time & stamp,
   const TerrainVisualizationOptions & options)
@@ -421,7 +555,9 @@ TerrainVisualizationResult BuildTerrainVisualization(
     auto color = SurfaceColor(
       snapshot, nodes[i], options.static_map_only,
       options.boundary_penalty_distance_m,
-      options.boundary_penalty_weight);
+      options.boundary_penalty_weight, options.obstacle_heat_enabled,
+      options.obstacle_penalty_distance_m,
+      options.obstacle_penalty_weight);
     // Estimated vs measured provenance. `expansion_used` is the existing
     // bounded same-floor recovery flag; a recovered cell keeps its cost or
     // unknown-gray face color and is marked only by cyan edge vertices. No
@@ -509,4 +645,4 @@ TerrainVisualizationResult BuildTerrainVisualization(
   return result;
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

@@ -36,6 +36,15 @@ struct MppiConfig
   double wz_std = 0.25;
   double vx_min = 0.05;
   double vx_max = 0.8;
+  // Distance-parameterized collision probe. The time-parameterized rollout
+  // above stops at |vx| * time_steps * model_dt, so at low speed it never
+  // reaches the obstacle it is creeping toward and the collision term cannot
+  // act. The probe continues the terminal command as a constant-curvature arc
+  // sampled by arc length, collision-only (no clearance query), and exits on
+  // the first contact. Zero disables it.
+  double evaluation_distance = 6.5;  // m
+  double evaluation_step = 0.15;     // m
+  std::size_t evaluation_max_points = 64;
   // Recovery is opt-in and only starts after forward infeasibility.
   bool reverse_recovery_enabled = false;
   double reverse_max_speed = 0.15;
@@ -174,6 +183,10 @@ struct MppiResult
   std::size_t feasible_neutral_candidates = 0;
   // Safe candidates on the selected side with positive path-relative progress.
   std::size_t phase_compatible_candidates = 0;
+  // Diagnostic only: whether the committed-bypass "do not close on the path"
+  // filter was armed this cycle, and how many same-side candidates it removed.
+  bool bypass_guard_applied = false;
+  std::size_t bypass_guard_removed = 0;
   MppiAvoidanceStage avoidance_stage = MppiAvoidanceStage::Neutral;
   bool reverse_recovery_active = false;
   bool reverse_motion_active = false;
@@ -242,6 +255,8 @@ private:
     double structured_weight_mass = 0.0;
     MppiControl prefilter_command;
     std::size_t phase_compatible_candidates = 0;
+    bool bypass_guard_applied = false;
+    std::size_t bypass_guard_removed = 0;
   };
 
   MppiConfig config_;

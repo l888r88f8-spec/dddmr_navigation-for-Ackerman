@@ -49,6 +49,10 @@ type graph_t is defined here
 /*For perception*/
 #include <perception_3d/perception_3d_ros.h>
 #include <global_planner/nanoflann_pcl.hpp>
+#include <global_planner/legacy_scene_adapter.h>
+
+#include <memory>
+#include <string>
 
 typedef struct {
   unsigned int self_index;
@@ -114,6 +118,7 @@ class AstarList{
     AstarList(pcl::PointCloud<pcl::PointXYZI>::Ptr& pc_original_z_up);
 
     void Initial();
+    void Initial(std::size_t node_count);
     void updateNode(Node_t& a_node);
     void closeNode(Node_t& a_node);
     float getGVal(Node_t& a_node);
@@ -153,8 +158,32 @@ class A_Star_on_Graph{
 
       void getPath( unsigned int start, unsigned int goal, std::vector<unsigned int>& path,
         GraphPlanDiagnostics * diagnostics = nullptr);
+
+      void getPath( unsigned int start, unsigned int goal, std::vector<unsigned int>& path,
+        GraphPlanDiagnostics * diagnostics, global_planner::AStarPlanTrace * trace);
+
+      /*
+      Pin one validated immutable scene read view for the next searches. On
+      failure the requested state is remembered as rejected, so getPath()
+      returns an empty path instead of silently falling back to live data. Call
+      clearSceneSnapshot() or the legacy updateGraph() to return to live reads.
+      */
+      bool setSceneSnapshot(
+        const std::shared_ptr<const perception_3d::SceneSnapshot> & snapshot,
+        const global_planner::LegacySearchParameters & parameters,
+        std::string * rejection_reason = nullptr);
+      void clearSceneSnapshot();
+      bool hasSceneSnapshot() const noexcept {return scene_active_;}
+      const std::string & sceneSnapshotRejectionReason() const noexcept
+      {
+        return scene_rejection_reason_;
+      }
       
       void setupTurningWeight(double m_weight){turning_weight_ = m_weight;}
+
+      // Read-only LOS probe over the pinned (or live) lethal index. Kept
+      // public for backend regression tests; production calls it internally.
+      bool isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::PointXYZI& pcl_expanding, double inscribed_radius);
 
     private:
       
@@ -167,16 +196,27 @@ class A_Star_on_Graph{
       std::shared_ptr<perception_3d::Perception3D_ROS> perception_ros_;
       
       /*Create the list*/
-      AstarList* ASLS_;
+      AstarList* ASLS_{nullptr};
 
       //@ turning weight of the node
-      double turning_weight_;
+      double turning_weight_{0.0};
       
       //@ neighborhodd expanding radius
-      double a_star_expanding_radius_;
+      double a_star_expanding_radius_{0.0};
+
+      void ResetSceneSnapshot();
+
+      // Immutable read view pinned by setSceneSnapshot(). The LOS index is
+      // built once per pinned cost view and reuses its owned lethal cloud.
+      std::shared_ptr<const perception_3d::LegacyStaticView> scene_static_view_;
+      std::shared_ptr<const perception_3d::LegacyCostView> scene_cost_view_;
+      std::shared_ptr<const nanoflann::KdTreeFLANN<pcl::PointXYZI>>
+      scene_lethal_kdtree_;
+      global_planner::LegacySearchParameters scene_parameters_;
+      bool scene_requested_{false};
+      bool scene_active_{false};
+      std::string scene_rejection_reason_;
 
       double getThetaFromParent2Expanding(pcl::PointXYZI m_pcl_current_parent, pcl::PointXYZI m_pcl_current, pcl::PointXYZI m_pcl_expanding);
       double getPitchFromParent2Expanding(pcl::PointXYZI m_pcl_current_parent, pcl::PointXYZI m_pcl_current, pcl::PointXYZI m_pcl_expanding);
-
-      bool isLineOfSightClear(pcl::PointXYZI& pcl_current, pcl::PointXYZI& pcl_expanding, double inscribed_radius);
 };

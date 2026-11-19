@@ -105,6 +105,11 @@ class MultiLayerSpinningLidar: public Sensor{
     virtual void resetdGraph();
     virtual double get_dGraphValue(const unsigned int index);
     virtual bool isCurrent();
+    virtual bool supportsSnapshotObservation() const;
+    virtual bool getSnapshotObservation(
+      SensorExportObservation * observation);
+    virtual std::uint64_t snapshotStateRevision() const;
+    virtual std::int64_t snapshotSensorStampNs() const;
 
   private:
     
@@ -130,6 +135,11 @@ class MultiLayerSpinningLidar: public Sensor{
 
     /*Thread for gbl marking pub*/
     void pubUpdateLoop();
+
+    /*Freeze the completed clear/mark cycle for the snapshot exporter.*/
+    void finalizeSnapshotObservation();
+    void startSnapshotCycle(std::int64_t sensor_stamp_ns);
+    void appendActiveMarkingPoints(pcl::PointCloud<pcl::PointXYZI> & cloud) const;
     
     /*For casting visualization*/
     void addCastingMarker(const pcl::PointXYZ& pt, size_t id, visualization_msgs::msg::MarkerArray& markerArray);
@@ -190,6 +200,29 @@ class MultiLayerSpinningLidar: public Sensor{
 
     /*For isCurrent feature. Used to protect sensor broken*/
     rclcpp::Time last_observation_time_;
+
+    /*Producer-owned snapshot export state. A cycle becomes visible only after
+    selfClear() captured explicit removals and selfMark() completed. Repeated
+    exporter polls reuse the same sequence/stamps until the next accepted scan.*/
+    pcl::PointCloud<pcl::PointXYZI>::Ptr pending_cleared_points_;
+    pcl::PointCloud<pcl::PointXYZI>::Ptr export_occupied_points_;
+    pcl::PointCloud<pcl::PointXYZI>::Ptr export_cleared_points_;
+    std::string export_frame_id_;
+    std::int64_t current_scan_stamp_ns_ = 0;
+    std::int64_t export_scan_stamp_ns_ = 0;
+    std::int64_t export_received_steady_ns_ = 0;
+    std::uint64_t current_scan_sequence_ = 0;
+    std::uint64_t export_source_sequence_ = 0;
+    bool export_clear_completed_ = false;
+    bool export_cycle_complete_ = false;
+
+    //@ Completed producer STATE, deliberately separate from the accepted-input
+    //@ current_scan_* stamp/sequence above. A cloud may be accepted before its
+    //@ clear/mark section runs; only finalize/reset advance these, so a cost
+    //@ cache can never bind old dGraph values to a new accepted revision.
+    std::uint64_t completed_state_revision_ = 0;
+    std::int64_t completed_state_stamp_ns_ = 0;
+    std::uint64_t completed_state_scan_sequence_ = 0;
 
     //@ list of pointcloud sticher for non-repetitive scan lidar
     std::list<pcl::PointCloud<pcl::PointXYZ>> pcl_stitcher_;

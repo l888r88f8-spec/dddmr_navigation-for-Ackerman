@@ -1,22 +1,95 @@
-# dddmr_grid_global_planner
+# grid_global_planner
+
+ROS 包名为 `grid_global_planner`，源码目录按用户要求保留为
+`src/dddmr_grid_global_planner`；包名与目录名可以不同。
+
+## 配置入口
+
+真实导航由 `p2p_move_base_grid_localization.launch.py` 加载独立的
+`p2p_move_base_grid_localization.yaml`，规划器节点名为 `grid_global_planner`。
+该 launch 使用 `grid_global_planner_perception_node`，在同一进程内只创建一个
+`perception_3d_global` 和一个 `grid_global_planner`；地面 `mapground` 建地形，
+`mapcloud` 默认（`offline.use_global_as_static_obstacles=false`）只保留为原始
+来源指纹/就绪校验输入，不注入静态障碍层，因此结果与测试栅格一致；显式置
+`true` 才恢复 GlobalMap 静态障碍证据。感知快照通过弱引用 provider 供规划器轮询。
+静态地图由 worker 采用后才标记 ready，避免动态覆盖层先于基线发布。
+导航配置已启用快照导出：雷达障碍加入和明确清除只更新障碍层，复用地形与搜索图。
+阻挡高度由公共 `cuboid` 顶部和底盘离地高度计算；重复扫描不会重复提交或刷新 TTL。
+当前版本已在主工作区编译安装，并通过隔离 ROS 域的模拟点云链路测试；实车效果仍需验证。
+独立演示使用本包 `config/grid_global_planner.yaml`，其中包含顶部公共
+`global_frame`、`robot_base_frame`、共享点云话题、`cuboid` 与规划器节点参数。配置按导航接口与运行预算、静态地图重建、
+障碍查询/搜索/验证、车辆模型、在线更新和诊断分组，中文行尾注释统一对齐。
+
+`config/grid_visualization.yaml` 保存地图发布器、固定 TF、RViz 目标桥及
+RViz 节点参数，仅由独立演示 launch 加载。地图文件路径只由 launch 的
+`map_path` 指定；规划器 YAML 不再配置 PCD 路径，规划器自身也不读取文件。
+
+`pcl_publisher` 读取 `map_path/GlobalMap.pcd` 和 `map_path/GroundMap.pcd`，
+以 reliable / transient_local / depth=1 发布 `mapcloud`、`mapground`。
+当前地面模式仅以 `mapground` 建地形；启用实时感知来源校验时会订阅
+`mapcloud` 并等待原始 `mapground`/`mapcloud` pair 到齐以生成来源指纹，
+但只有 `use_global_as_static_obstacles=true` 才把该点云注入静态障碍。
+完整点云模式仍等待 `mapcloud` 与地面提示 `mapground` 都到齐后构建。
+地图构建成功后固定该快照，重复发布不触发重建。
+零时间戳静态地图可用；无效格式、空点云、非有限点或错误坐标系会被拒绝，
+后续有效点云仍可重试。收到地图前节点等待，规划请求按无快照失败返回。
+导航入口显式设置 `ground_down_sample=0.0`，保留地面原始密度。
+
+两套配置均通过 `raw_route_backend` 选择后端，取值为 `graph_a_star` /
+`hybrid_a_star`，默认 `graph_a_star` 使用几何地面图 A*。两种后端共用
+`graph_a_star.max_samples` 采样预算。搜索不再有扩展次数上限；结束条件为找到
+路径、可达图耗尽、超时、取消或采样预算用尽。这不表示可以无限运行，也不保证
+一定找到路径。
+`graph_a_star` 另在启动时读取六个软偏好参数：`slope_penalty_weight`
+（坡度乘性权重，无量纲）、`roughness_penalty_weight`（粗糙度乘性权重，
+1/m）、`obstacle_penalty_distance_m`（障碍影响距离，m）、
+`obstacle_penalty_weight`（障碍加性权重，m）、
+`boundary_penalty_distance_m`（同层实测支撑边界影响距离，m，默认 0.8）和
+`boundary_penalty_weight`（边界软代价权重，无量纲，默认 3.0）。坡度取边两端节点平面
+法向的倾角（rad），粗糙度取平面 RMS 残差（m）；边代价先乘
+`1 + slope_penalty_weight * slope + roughness_penalty_weight * roughness`，
+再在障碍距离小于影响距离时加上
+`obstacle_penalty_weight * (distance - obstacle_distance) / distance`。
+
+边界项独立于 `wheel_support.*`：每条边增加
+`edge.length * max(endpoint_penalty)`，端点风险为
+`weight * max(0, 1 - d / range)^2`，`d` 取自该节点不可变的同层
+measured-support 边界缓存；两端取最大风险等价于取最小 clearance。无种子
+（`+inf`）贡献 0，insufficient/scan-gap 不当作跌落边界；该项只改变软偏好，
+不改变可通行硬门限。任一参数为 0 显式关闭，负值或非有限值启动失败。
+这些参数只调整软偏好，不改变可通行、碰撞或支撑判定；置 0 表示显式关闭，
+负值或非有限值会在启动时报错。参数仅启动时读取，不支持运行时
+`set_param` 生效；上述数值是配置演示值，不代表实车验证结论。
+`hybrid_a_star` 参数组提供运动基元、转向采样、航向分箱、目标容差和
+搜索走廊设置；车辆轴距、轮距和最大转向角在 `vehicle` 组。
+`vehicle.base_contact_height_m` 在 `graph_a_star` 中仍用于地面与基座高度转换。
+旧 `search.*` 参数组已移除，使用时会明确提示迁移；未列选项使用节点默认值。
+导航配置的车体包络统一读取顶部 `/**.ros__parameters.cuboid` 八个角点，
+计算三轴最小/最大边界；不再重复填写 `vehicle.body_min/body_max`。
+公共包络存在时优先采用公共值；未提供公共包络的旧配置继续兼容原生
+`vehicle.body_min_m_approximate` / `vehicle.body_max_m`。这不为 `graph_a_star`
+新增车体碰撞检查，轴距、轮距与基座高度等独立车辆参数保持各自含义。
+
+接入现有导航时，用新节点替换原 `/get_plan` 提供者，沿用真实定位 TF 和目标
+入口；固定 TF 与 RViz 目标桥用于独立演示。配置拆分保持原有参数键、类型和值。
 
 > **2026-11 小范围回退（当前默认）**：用户实测完整 GlobalMap 方案明显差于
-> 原地面点云方案，默认已恢复 `offline.global_cloud_mode=false`，只从
-> `GroundMap.pcd` 构建地面；`obstacle_pcd` 默认同 GroundMap，同一路径不重复
-> 加载。完整 GlobalMap 仅保留为显式可选障碍输入，不用于重建地面；多尺度/
-> 最低层确认等 global-only 参数保留但默认不启用。
+> 原地面点云方案，默认已恢复 `offline.global_cloud_mode=false`，并新增
+> `offline.use_global_as_static_obstacles=false`：只从发布的地面点云构建
+> 地形，GlobalMap 仅保留原始来源校验，不注入静态障碍；显式置 `true` 才
+> 恢复 GlobalMap 静态障碍证据。完整 GlobalMap 仅在
+> `global_cloud_mode=true` 时参与地形和障碍重建；多尺度/最低层确认等
+> global-only 参数保留但默认不启用。
 >
 > 当前启动：
 > ```bash
 > source /opt/ros/humble/setup.bash
 > source /home/robot/navigation_ws/install/setup.bash
-> ros2 launch dddmr_grid_global_planner path_planning_on_static_layer.launch.py \
+> ros2 launch grid_global_planner path_planning_on_static_layer.launch.py \
 >   use_sim:=false
 > ```
-> 所有 PCD 路径统一在 YAML 顶部配置：launch 将 `offline.global_pcd` 和
-> `offline.ground_pcd` 注入 `pcl_publisher.map_dir`/`ground_dir` 供显示；
-> 规划器直接读取 `offline.global_pcd`、`offline.ground_pcd`、
-> `offline.obstacle_pcd`，其中 `obstacle_pcd` 保持独立规划语义。
+> 使用 `map_path:=/home/robot/map/hesai_sim2` 选择地图目录。仅发布器读取文件，
+> 规划器接收地图话题，并沿用静态地形重建、搜索和验证逻辑。
 
 ## 0. 最终集成验收（2026-11-07）
 
@@ -24,15 +97,15 @@ TASK2–TASK4 已集成到当前 live 包，TASK2 的 atan2/精确支撑边界�
 有界鲁棒拟合和 TASK4 的分离证据分类均保留。最终验收使用全新的隔离构建：
 
 - 普通 Release：`log/multilayer_terrain_fix/final/build_regular` /
-  `install_regular`；`BUILD_TESTING=ON`、`DDDMR_GRID_BUILD_TESTS=ON`，
-  `DDDMR_GRID_BUILD_BENCHMARKS=ON`（只编译 benchmark，未运行完整 benchmark）。
+  `install_regular`；`BUILD_TESTING=ON`、`GRID_BUILD_TESTS=ON`，
+  `GRID_BUILD_BENCHMARKS=ON`（只编译 benchmark，未运行完整 benchmark）。
 - 实际 symlink Release：`log/multilayer_terrain_fix/final/build_symlink` /
   `install_symlink`；`AMENT_CMAKE_SYMLINK_INSTALL=ON`、`BUILD_TESTING=OFF`、
-  `DDDMR_GRID_BUILD_TESTS=OFF`。
+  `GRID_BUILD_TESTS=OFF`。
 - 最终普通构建完整注册 CTest：**27/27 passed**，含 19 个 gtest、5 个 pytest
   和 `uncrustify`/`cpplint`/`flake8` 三个 ROS linter。证据
   `log/multilayer_terrain_fix/final/ctest_full_after_patch.log`。
-- 普通和 symlink 安装均 exit 0；节点、库、头文件、唯一 launch 和唯一 YAML
+- 普通和 symlink 安装均 exit 0；节点、库、头文件、唯一 launch 和主参数 YAML
   均存在；symlink 库/节点/头文件/launch/YAML 为真实符号链接；公开
   `MeasuredSupportBoundaryDistanceM`、`InsufficientConnectionDistanceM`、
   `SupportBoundaryClassificationAt` 符号存在。证据
@@ -64,9 +137,8 @@ CPU 功能证据，不是性能/实车数据。
 
 Ground-only（空 obstacle）与同一 GroundMap 作为 obstacle 数组的探测结果：
 两者节点/几何相同，但 static obstacle records 分别为 occupied=40/
-clear=83274/unknown=25 与 occupied=54/clear=83260/unknown=25。YAML 中
-`offline.ground_pcd` 与 `offline.obstacle_pcd` 都指向 GroundMap 时，planner 沿用既有
-“相同路径不重复加载 obstacle”语义，探测记录 `obstacle_points=0`；这不构成
+clear=83274/unknown=25 与 occupied=54/clear=83260/unknown=25。旧文件输入模式中，相同 GroundMap 路径曾跳过重复 obstacle 加载。
+当前话题输入的地面模式同样不提供独立 obstacle 数组，`obstacle_points=0`；这不构成
 empty-obstacle authoritative-ground 情形的安全性假设，raised/depressed
 ground 证据由上述鲁棒证据路径单独保守处理。
 
@@ -76,16 +148,14 @@ ground 证据由上述鲁棒证据路径单独保守处理。
 cd /home/robot/navigation_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-colcon build --symlink-install --packages-select dddmr_grid_global_planner
+colcon build --symlink-install --packages-select grid_global_planner
 source install/setup.bash
-ros2 launch dddmr_grid_global_planner path_planning_on_static_layer.launch.py \
+ros2 launch grid_global_planner path_planning_on_static_layer.launch.py \
   use_sim:=false
 ```
 
-`map_dir`/`ground_dir` 仅用于显示，由 launch 从 `offline.global_pcd`/
-`offline.ground_pcd` 注入，YAML 不再保存重复显示路径；`ground_pcd`/
-`obstacle_pcd` 默认都指向 GroundMap；默认规划模式不读取 `global_pcd`，显示发布器仍读取它。不要额外
-创建 launch/YAML。ROS 图、RViz 实渲染、
+`map_dir`/`ground_dir` 由 launch 的 `map_path` 为发布器拼接；发布的点云同时用于
+规划与显示。规划器不再保存或加载地图文件路径。以上为既往 CPU/离线证据；
 实时感知和硬件运动仍未运行；不要把本节的 CPU/离线证据表述为实车验收。
 
 ### 0.1 最终参数与证据语义
@@ -96,6 +166,12 @@ ros2 launch dddmr_grid_global_planner path_planning_on_static_layer.launch.py \
   `layer_gap_threshold_m=0.20`、`min_boundary_coverage=0.25`；候选 cell 上限
   2,000,000。`max_normal_angle_rad=0.35` 只用于相邻拟合面的法向一致性，不再
   作为绝对倾角删除条件；绝对超坡仍按 `max_slope_rad` 标记为 prohibited。
+- 离线测量证据不设点数、patch 数、持久化引用数或单 patch 点数这四项人为容量
+  上限，配置也不再读取对应 `offline.max_measurement_*` /
+  `max_points_per_measurement_patch` 键。仅保留真实 `uint32` 索引表示范围、
+  `size_t` 溢出检查，以及其他几何/候选格预算。连续重建逐格消费并移动临时
+  索引，跳过的格子立即释放索引；完成的格子在最后一次使用后将索引移入证据。
+  连续分支不再创建旧逐格分支专用的查找桶，必要的持久测量证据保持完整。
 - 鲁棒回退只在普通平面拟合退化或 RMS 超限时启动。最终共识固定为相对原始
   layer N 的 `max(min_points, ceil(2N/3))`；确定性 trim/refit 最多 7 次，无随机
   采样、无阈值放宽。返回前要求成员集合与最终平面逐点残差一致；被排除点不参与
@@ -126,7 +202,7 @@ ros2 launch dddmr_grid_global_planner path_planning_on_static_layer.launch.py \
 
 ## 1. 中文摘要
 
-`dddmr_grid_global_planner` 是新加的独立三维地形栅格全局规划器，保留旧
+`grid_global_planner` 是新加的独立三维地形栅格全局规划器，保留旧
 `global_planner` 包和 `/get_plan` action。核心流程是：
 
 1. 地面点云冻结为不可变 `TerrainPointObservation`；
@@ -141,15 +217,16 @@ ros2 launch dddmr_grid_global_planner path_planning_on_static_layer.launch.py \
 
 感知侧（`perception_3d`）增加一个 **默认关闭** 的兼容导出：
 `PerceptionSnapshot` 在完整 clear/mark 周期之后冻结当前观测，供同一进程内
-的 grid 节点读取。旧 perception 节点不开启时接口、topic、默认行为不变。
+的 grid 节点读取。导出默认关闭；导航配置显式启用，沿用现有共享点云话题。
 
 ## 2. English summary
 
-`dddmr_grid_global_planner` is an independent ROS 2 grid global planner that
+`grid_global_planner` is an independent ROS 2 grid global planner that
 keeps the legacy `global_planner` package and the existing `/get_plan` action.
-It pins one immutable `MapSnapshot` per planning job, uses coarse guidance plus
-fine Ackermann Hybrid A*, checks four-wheel/body support with one evaluator, and
-revalidates against the latest snapshot. The perception package optionally
+It pins one immutable ready `MapSnapshot` A per planning job and uses only A for
+search, same-snapshot validation, diagnostics and delivery, even if a newer map B
+arrives. It uses coarse guidance plus fine Ackermann Hybrid A* and checks
+four-wheel/body support with one evaluator. The perception package optionally
 exports an immutable `PerceptionSnapshot` after the full clear/mark cycle; the
 export parameter defaults to OFF so old nodes are unchanged.
 
@@ -159,7 +236,7 @@ Current vehicle input measurements are listed in section 9.
 ## 3. 模块流程 / Module flow
 
 ```
-perception_3d (grid instance: dddmr_grid_perception, export_perception_snapshot=true)
+perception_3d (navigation instance: perception_3d_global, export_perception_snapshot=true)
   plugins selfClear -> selfMark -> updateLethalPointCloud   (full cycle)
         │
         └─ StackedPerception::exportSnapshot()             (after cycle, bounded lock)
@@ -183,7 +260,7 @@ TerrainGridBuilder ──► TerrainSnapshot (0.1 m, version-scoped IDs)
                     ├──► CorridorBuilder
                     ├──► GridGraphAStar (coarse candidate)
                     ├──► AckermannHybridAStar (fine; wheel support + body OBB)
-                    └──► PathValidator (latest snapshot replay)
+                    └──► PathValidator (same pinned-A replay)
                               │
                               ▼
                     /get_plan action result + private diagnostics
@@ -191,8 +268,9 @@ TerrainGridBuilder ──► TerrainSnapshot (0.1 m, version-scoped IDs)
 
 关键边界：
 
-- **观测只在完整周期后导出。** clear/mark 未完成、sensor 过期、cloud 为空或
-  非有限点时，导出为 unusable/unknown；**绝不把“没有点”解释成 free**。
+- **观测只在完整周期后导出。** clear/mark 未完成、sensor 过期、没有占用或明确
+  清除证据时，导出为 unusable/unknown；空占用配合插件实际产生的清除记录可用，
+  **绝不把“没有点”解释成 free**。
 - **快照深拷贝。** `PerceptionSnapshot` 只含 `std::vector`，不暴露 mutable
   `pcl::PointCloud` 指针。插件之后写自己的缓存不会改变已导出的对象。
 - **锁只包住冻结。** 感知锁内只做当前观测的有限深拷贝；不建地形、不扫全图、
@@ -205,30 +283,31 @@ TerrainGridBuilder ──► TerrainSnapshot (0.1 m, version-scoped IDs)
 
 | 文件 | 作用 |
 |---|---|
-| `include/dddmr_grid_global_planner/terrain_types.h` | ID、点/面、状态、障碍属性、证据 |
-| `include/dddmr_grid_global_planner/input_contract.h` | 不可变地面观测与校验策略 |
-| `include/dddmr_grid_global_planner/terrain_grid_builder.h` | 可配置精细分辨率的多表面地形构建 |
-| `include/dddmr_grid_global_planner/terrain_visualization.h` | 地形单元面片、边框及状态颜色 |
-| `include/dddmr_grid_global_planner/map_snapshot.h` | 固定快照、pinned field/coarse、`CreateWithPinnedField` |
-| `include/dddmr_grid_global_planner/multiresolution_map.h` | 0.4 m 保守摘要与粗细映射 |
-| `include/dddmr_grid_global_planner/corridor_builder.h` | 只读通道视图与有界扩边 |
-| `include/dddmr_grid_global_planner/distance_field.h` | 截断距离场、`UpdateIncremental` |
-| `include/dddmr_grid_global_planner/wheel_support.h` | 四轮/车体几何评估 |
-| `include/dddmr_grid_global_planner/ackermann_kinematics.h` | 唯一精确 Ackermann 积分器 |
-| `include/dddmr_grid_global_planner/grid_search.h` | Graph A* / Hybrid A* / 预算 |
-| `include/dddmr_grid_global_planner/path_validator.h` | 最新快照路径复核 |
-| `include/dddmr_grid_global_planner/source_observation.h` | 阶段 4/5 感知 source 契约（planner 侧） |
-| `include/dddmr_grid_global_planner/obstacle_tile.h` | 阶段 4/5 Tile/COW 障碍层 |
-| `include/dddmr_grid_global_planner/snapshot_store.h` | 阶段 4/5 保留版本与 latest 获取 |
-| `include/dddmr_grid_global_planner/map_update_worker.h` | 阶段 4/5 单写线程、TTL、发布 |
-| `include/dddmr_grid_global_planner/grid_global_planner.h` | ROS action、调度和 `~/metrics` 发布 |
-| `include/dddmr_grid_global_planner/metrics.h` | 小型阶段计时/查询计数/资源快照类型（steady-clock） |
-| `src/*.cpp` | 上述核心实现；唯一安装的可执行入口是 `grid_offline_planner_node.cpp`（原 live 两节点 main 已退役并从 build/install 移除） |
-| `config/dddmr_grid_global_planner.yaml` | 唯一 ROS 参数 YAML；五个命名节点 section |
+| `include/grid_global_planner/terrain_types.h` | ID、点/面、状态、障碍属性、证据 |
+| `include/grid_global_planner/input_contract.h` | 不可变地面观测与校验策略 |
+| `include/grid_global_planner/terrain_grid_builder.h` | 可配置精细分辨率的多表面地形构建 |
+| `include/grid_global_planner/terrain_visualization.h` | 地形单元面片、边框及状态颜色 |
+| `include/grid_global_planner/map_snapshot.h` | 固定快照、pinned field/coarse、`CreateWithPinnedField` |
+| `include/grid_global_planner/multiresolution_map.h` | 0.4 m 保守摘要与粗细映射 |
+| `include/grid_global_planner/corridor_builder.h` | 只读通道视图与有界扩边 |
+| `include/grid_global_planner/distance_field.h` | 截断距离场、`UpdateIncremental` |
+| `include/grid_global_planner/wheel_support.h` | 四轮/车体几何评估 |
+| `include/grid_global_planner/ackermann_kinematics.h` | 唯一精确 Ackermann 积分器 |
+| `include/grid_global_planner/grid_search.h` | Graph A* / Hybrid A* / 预算 |
+| `include/grid_global_planner/path_validator.h` | 最新快照路径复核 |
+| `include/grid_global_planner/source_observation.h` | 阶段 4/5 感知 source 契约（planner 侧） |
+| `include/grid_global_planner/obstacle_tile.h` | 阶段 4/5 Tile/COW 障碍层 |
+| `include/grid_global_planner/snapshot_store.h` | 阶段 4/5 保留版本与 latest 获取 |
+| `include/grid_global_planner/map_update_worker.h` | 阶段 4/5 单写线程、TTL、发布 |
+| `include/grid_global_planner/grid_global_planner.h` | ROS action、调度和 `~/metrics` 发布 |
+| `include/grid_global_planner/metrics.h` | 小型阶段计时/查询计数/资源快照类型（steady-clock） |
+| `src/*.cpp` | 上述核心实现；安装的可执行入口为 `grid_global_planner_node.cpp`（独立静态演示）和 `grid_global_planner_perception_node.cpp`（同进程全局感知导航）。 |
+| `config/grid_global_planner.yaml` | 主规划参数；仅规划器节点 |
+| `config/grid_visualization.yaml` | 离线演示参数；四个显示/交互节点 |
 | `launch/path_planning_on_static_layer.launch.py` | 唯一 launch；直接声明五个节点 |
 | `src/offline_static_map.cpp` | 真实邻域拟合、多层地形连接、静态障碍分类与离线快照 |
 | `src/offline_pcd_loader.cpp` | 通用 PCD 读取与异常处理 |
-| `src/grid_offline_planner_node.cpp` | 不创建感知栈的独立可执行入口 |
+| `src/grid_global_planner_node.cpp` | 不创建感知栈的独立可执行入口 |
 | `src/dddmr_perception_3d/include/perception_3d/perception_snapshot.h` | 不可变 `PerceptionSourceObservation` / `PerceptionSnapshot` |
 | `src/dddmr_perception_3d/src/perception_snapshot.cpp` | 快照校验/诊断实现 |
 | `src/dddmr_perception_3d/src/stacked_perception.cpp` | 完整周期后的深拷贝导出 |
@@ -344,7 +423,7 @@ cd /home/robot/navigation_ws
 
 ```bash
 colcon build --symlink-install \
-  --packages-up-to perception_3d dddmr_grid_global_planner p2p_move_base \
+  --packages-up-to perception_3d grid_global_planner p2p_move_base \
   --cmake-args -DBUILD_TESTING=ON
 ```
 
@@ -352,14 +431,14 @@ colcon build --symlink-install \
 
 ```bash
 colcon build --symlink-install \
-  --packages-select dddmr_grid_global_planner perception_3d \
+  --packages-select grid_global_planner perception_3d \
   --cmake-args -DBUILD_TESTING=ON
 ```
 
 运行测试（UNRUN）：
 
 ```bash
-colcon test --packages-select dddmr_grid_global_planner perception_3d \
+colcon test --packages-select grid_global_planner perception_3d \
   --event-handlers console_direct+
 colcon test-result --verbose
 ```
@@ -375,11 +454,11 @@ absolute source path is
 ```bash
 cd /home/robot/navigation_ws/src/dddmr_navigation-for-Ackerman
 cmake -S /home/robot/navigation_ws/src/dddmr_navigation-for-Ackerman/src/dddmr_grid_global_planner \
-  -B /tmp/dddmr_grid_build \
-  -DDDDMR_GRID_STANDALONE=ON \
-  -DDDDMR_GRID_BUILD_TESTS=ON
-cmake --build /tmp/dddmr_grid_build -j
-ctest --test-dir /tmp/dddmr_grid_build --output-on-failure
+  -B /tmp/grid_build \
+  -DGRID_STANDALONE=ON \
+  -DGRID_BUILD_TESTS=ON
+cmake --build /tmp/grid_build -j
+ctest --test-dir /tmp/grid_build --output-on-failure
 ```
 
 ### 代码格式 / Formatting and lint（ROS uncrustify）
@@ -396,7 +475,7 @@ ctest --test-dir /tmp/dddmr_grid_build --output-on-failure
   Google K&R 规则无法同时满足；没有其他 blanket suppression；
 - `flake8` — `ament_cmake_flake8`，检查包内 Python。
 
-独立核心构建（`DDDMR_GRID_STANDALONE=ON`）不要求 ament/lint 依赖。
+独立核心构建（`GRID_STANDALONE=ON`）不要求 ament/lint 依赖。
 `NOLINT(build/include_subdir)` 只用于 `src/` 私有头文件的同目录 include。
 两个内聚函数在闭括号处保留带具体理由的逐函数
 `NOLINT(readability/fn_size)`：
@@ -410,87 +489,87 @@ ctest --test-dir /tmp/dddmr_grid_build --output-on-failure
 保留内聚函数并逐函数豁免，而不是关闭 `readability/fn_size` 过滤器。没有
 其他 blanket suppression。
 
-### 实际存在的 `DDDMR_GRID_*` CMake 变量
+### 实际存在的 `GRID_*` CMake 变量
 
-只使用下面四个；不要发明 `DDDMR_GRID_BUILD_NODE` 之类的选项。测试和
+只使用下面四个；不要发明 `GRID_BUILD_NODE` 之类的选项。测试和
 benchmark 都还受标准 CMake/CTest 的 `BUILD_TESTING` 总开关约束。
 
 | 变量 | 默认 | 含义 |
 |---|---|---|
-| `DDDMR_GRID_STANDALONE` | `OFF` | `ON` 时不走 ament/ROS，只构建核心库与测试；不安装 launch/config。 |
-| `DDDMR_GRID_BUILD_TESTS` | `ON` | 在 `BUILD_TESTING=ON` 时是否构建核心测试。 |
-| `DDDMR_GRID_BUILD_BENCHMARKS` | `ON` | 在测试开启时是否构建 `benchmark_snapshot_search`。 |
-| `DDDMR_GRID_ENABLE_TSAN` | `OFF` | 加 `-fsanitize=thread`；平台不支持时必须记录失败，不能宣称已做竞态验证。 |
+| `GRID_STANDALONE` | `OFF` | `ON` 时不走 ament/ROS，只构建核心库与测试；不安装 launch/config。 |
+| `GRID_BUILD_TESTS` | `ON` | 在 `BUILD_TESTING=ON` 时是否构建核心测试。 |
+| `GRID_BUILD_BENCHMARKS` | `ON` | 在测试开启时是否构建 `benchmark_snapshot_search`。 |
+| `GRID_ENABLE_TSAN` | `OFF` | 加 `-fsanitize=thread`；平台不支持时必须记录失败，不能宣称已做竞态验证。 |
 
-> **`-D` 拼写注意：** CMake 的 `-D` 前缀 + 变量名 `DDDMR_...`，所以命令行里
-> 变量名前面是 **四个 D**：`-DDDDMR_GRID_STANDALONE`，不是
-> `-DDDMR_GRID_STANDALONE`。本文所有命令均按此写法。
+> **`-D` 拼写注意：** CMake 的 `-D` 前缀加变量名 `GRID_...`，命令行写法是
+> `-DGRID_STANDALONE`，不是 `-GRID_STANDALONE`。本文所有命令均按此写法。
 
 ### ThreadSanitizer（UNRUN）
 
 ```bash
 cd /home/robot/navigation_ws/src/dddmr_navigation-for-Ackerman
 cmake -S /home/robot/navigation_ws/src/dddmr_navigation-for-Ackerman/src/dddmr_grid_global_planner \
-  -B /tmp/dddmr_grid_tsan \
-  -DDDDMR_GRID_STANDALONE=ON \
-  -DDDDMR_GRID_BUILD_TESTS=ON \
-  -DDDDMR_GRID_ENABLE_TSAN=ON
-cmake --build /tmp/dddmr_grid_tsan -j
-ctest --test-dir /tmp/dddmr_grid_tsan --output-on-failure
+  -B /tmp/grid_tsan \
+  -DGRID_STANDALONE=ON \
+  -DGRID_BUILD_TESTS=ON \
+  -DGRID_ENABLE_TSAN=ON
+cmake --build /tmp/grid_tsan -j
+ctest --test-dir /tmp/grid_tsan --output-on-failure
 ```
 
 ## 6. 启动 / Launch (UNRUN)
 
-本包只有一个 launch 和一个 ROS 参数 YAML：
+本包提供一个离线演示 launch，以及分离的规划/显示参数文件：
 
 - `launch/path_planning_on_static_layer.launch.py`
-- `config/dddmr_grid_global_planner.yaml`（五个命名节点 section）
+- `config/grid_global_planner.yaml`（仅规划器节点）
+- `config/grid_visualization.yaml`（点云显示、固定 TF、RViz 目标桥和 RViz）
 
 ```bash
 cd /home/robot/navigation_ws
 source /opt/ros/humble/setup.bash
-colcon build --packages-select mcl_3dl perception_3d dddmr_grid_global_planner \
+colcon build --packages-select mcl_3dl perception_3d grid_global_planner \
   --parallel-workers 1
 source install/setup.bash
-ros2 launch dddmr_grid_global_planner path_planning_on_static_layer.launch.py \
+ros2 launch grid_global_planner path_planning_on_static_layer.launch.py \
   use_sim:=false
 ```
 
-launch 参数只有 `use_sim` 和 `rviz_config`。所有 PCD 路径在唯一 YAML
-`config/dddmr_grid_global_planner.yaml` 中设置：
+launch 参数仅为 `use_sim`、`rviz_config` 和 `map_path`。坐标系名称统一在
+主 YAML 顶部 `/**.ros__parameters.global_frame` / `robot_base_frame` 配置。
+`map_topic`、`ground_topic`、`preprocessed_cloud_topic` 也在同一公共段，
+规划器与地图发布器复用；节点开关、队列与私有输出话题留在节点 `ros` 段。
+launch 最少读取这两个值，供静态 TF、地图发布器、RViz 桥和 RViz 使用；
+规划器直接读取同一公共参数段。文件路径不放在 YAML 中：
 
-- 规划输入：`dddmr_grid_global_planner.ros__parameters.offline` 下的
-  `global_pcd`、`ground_pcd`、`obstacle_pcd`。
-- 显示输入：launch 从上述 `offline.global_pcd`、`offline.ground_pcd`
-  注入 `pcl_publisher` 的 `map_dir`、`ground_dir`；YAML 不另存显示路径。
+- 发布器读取 `map_path/GlobalMap.pcd` 与 `map_path/GroundMap.pcd`。
+- `global_cloud_mode=false` 时，规划器从公共 `ground_topic` 接收地面点云。
+- `global_cloud_mode=true` 时，还从公共 `map_topic` 接收完整点云，
+  等两份有效点云到齐后构建。
+- 所有地图点云必须已处于配置的全局坐标系；发布器的变换与降采样会影响建图输入。
+- 输入 QoS 为 reliable / transient_local / depth=1，支持发布器先启动。
 
-`global_cloud_mode=false` 时使用 `ground_pcd` 重建地面，`true` 时使用
-`global_pcd`；不同路径的 `obstacle_pcd` 仍可作为独立障碍输入。
-显示路径只是同一 YAML 顶部路径的副本，不覆盖规划输入，也不能通过 launch
-命令行单独改写。
-点云应已处于 `map` 坐标系；显示变换不会变换规划器直接读取的 PCD。
-
-默认启动五个节点：PCD 显示发布器、显示用静态 TF（`map2baselink`）、独立
-离线规划器 `dddmr_grid_offline_planner_node`、RViz 选点 bridge 和 RViz。
+默认启动五个节点：PCD 地图发布器、显示用静态 TF（`map2baselink`）、独立
+离线规划器 `grid_global_planner_node`、RViz 选点 bridge 和 RViz。
 不会创建 perception、雷达插件、点云预处理、定位或控制节点。独立规划器读取
-`offline.ground_pcd` / `offline.obstacle_pcd`，只提供一个 `/get_plan`
+静态地图话题，构建一次快照，只提供一个 `/get_plan`
 provider，并发布处理后的地形 `~/terrain`、粗摘要 `~/coarse` 和请求路径
 `~/path`。
 
 `use_sim_time` 在所有五个节点上都以
 `ParameterValue(..., value_type=bool)` 传递，避免 Humble 把字符串
-`"false"` 当成真值。YAML 中每个 section 使用实际 ROS 节点名：
+`"false"` 当成真值。两个 YAML 中的 section 均使用实际 ROS 节点名：
 
 | Section | 节点 |
 | --- | --- |
 | `pcl_publisher` | `mcl_3dl/pcl_publisher` |
-| `map2baselink` | `global_planner/static_transform_from_params.py` |
-| `dddmr_grid_global_planner` | `dddmr_grid_offline_planner_node` |
-| `dddmr_grid_rviz_bridge` | `rviz_goal_bridge.py` |
+| `map2baselink` | `tf2_ros/static_transform_publisher` |
+| `grid_global_planner` | `grid_global_planner_node` |
+| `grid_rviz_bridge` | `rviz_goal_bridge.py` |
 | `rviz2` | `rviz2` |
 
-不再加载外部 p2p/mcl YAML。共享坐标系、话题、bridge、PCD 发布器和车辆参数
-都直接保存在这一个 YAML 中。文件中的 `wheel_support.evaluation_model` 为
+这套离线演示不加载外部 p2p/mcl YAML。规划器从主 YAML 读取配置，
+四个辅助节点从演示 YAML 读取配置。主配置中的 `wheel_support.evaluation_model` 为
 `offline_kinematic_static_map`，用户入口固定为离线 PCD 模型；包内 C++/ROS
 header 默认仍保留 `full_wheel`，供其他内部调用路径使用。
 
@@ -500,10 +579,10 @@ RViz 工具与 bridge topic（均不触发定位）：
 
 | 用途 | RViz 工具 | Topic | 类型 / QoS |
 | --- | --- | --- | --- |
-| 选起点 | `rviz_default_plugins/SetInitialPose` | `/dddmr_grid_global_planner/rviz_start` | `PoseWithCovarianceStamped`, reliable volatile |
-| 选终点 | `rviz_default_plugins/SetGoal` | `/dddmr_grid_global_planner/rviz_goal` | `PoseStamped`, reliable volatile |
-| 起终点箭头 | MarkerArray | `/dddmr_grid_global_planner/rviz_markers` | `MarkerArray`, transient local reliable |
-| 规划路径显示 | Path | `/dddmr_grid_global_planner/rviz_path` | `Path`, transient local reliable |
+| 选起点 | `rviz_default_plugins/SetInitialPose` | `/grid_global_planner/rviz_start` | `PoseWithCovarianceStamped`, reliable volatile |
+| 选终点 | `rviz_default_plugins/SetGoal` | `/grid_global_planner/rviz_goal` | `PoseStamped`, reliable volatile |
+| 起终点箭头 | MarkerArray | `/grid_global_planner/rviz_markers` | `MarkerArray`, transient local reliable |
+| 规划路径显示 | Path | `/grid_global_planner/rviz_path` | `Path`, transient local reliable |
 | 规划请求 | — | `/get_plan` | `dddmr_sys_core/action/GetPlan`, `activate_threading=true` |
 
 先用 **2D Pose Estimate** 选起点和朝向，再用 **2D Goal Pose** 选终点和
@@ -532,10 +611,10 @@ active handle；新终点会清空 `rviz_path` 并异步取消旧 goal，只有�
 重试或自动恢复；若取消后仍拿不到终态，只能人工重启 action server 或重启
 bridge，之后由用户重新选点。恢复动作必须是显式的。
 
-RViz 布局 `rviz/dddmr_grid_global_planner.rviz` 使用 Fixed Frame `map`，
+RViz 布局 `rviz/grid_global_planner.rviz` 使用 Fixed Frame `map`，
 显示 `/mapground`、`/mapcloud`、`/navigation/preprocessed_cloud`、
-`/dddmr_grid_global_planner/terrain`、`~/coarse`、`~/corridor`、
-`/dddmr_grid_global_planner/rviz_path` 和起终点 markers。离线入口没有实时
+`/grid_global_planner/terrain`、`~/coarse`、`~/corridor`、
+`/grid_global_planner/rviz_path` 和起终点 markers。离线入口没有实时
 雷达，`PreprocessedCloud` 可关闭。
 
 `PlannerTerrain` 使用 `visualization_msgs/msg/MarkerArray` 显示真实格网单元。
@@ -553,15 +632,32 @@ RViz 布局 `rviz/dddmr_grid_global_planner.rviz` 使用 Fixed Frame `map`，
 | 橙色 | 地形被标记为禁止通行 |
 | 灰色 | 有可绘制平面，但地形或占据证据为未知 |
 
-离线模式的颜色依据静态占据；实时模式只有静态、动态两层均 clear 才显示绿色。
-硬状态（occupied/prohibited/unknown/unsupported）优先于边界热度。把
-`boundary_penalty_weight` 或 `boundary_penalty_distance_m` 设为 0 只关闭软热度，
-不会把 insufficient-connection 紫/蓝标签变成绿色，也不会放宽硬门限。
-规划器的三个 PCD 路径以 YAML 为准；launch 仅将顶部 `global_pcd`/
-`ground_pcd` 注入显示发布器，不改写规划输入。
-默认 `offline.ground_pcd` 和 `offline.obstacle_pcd` 同路径，planner 跳过独立障碍
-输入。只有在 YAML 中配置不同路径的独立障碍 PCD 时才额外加载；
-额外 obstacle 输入只做加法，不会替换地面几何。
+生产显示读取合并 static+dynamic 距离场，动态 occupied 显示红色；被模型拒绝的
+未知区域仍为灰色。离线模型已经允许通行的静态空闲地面，即使动态层尚未观测，
+也可按已观测障碍距离着色；这不把未知数据改为空闲，也不提供净空保证。
+禁止通行、被拒绝的未知与无支撑状态优先于软热度。把 `boundary_penalty_weight` 或
+`boundary_penalty_distance_m` 设为 0 只关闭该软热度，不会把
+insufficient-connection 紫/蓝标签变成绿色，也不会放宽硬门限。
+
+导航配置默认 `diagnostics.publish_terrain_debug=true`：这是基础地形栅格总开关
+（MASTER），启动/地图就绪时立即发布一次完整地形，使用原有静态占据/边界配色；
+即使不开启代价着色也能看到基础栅格。导航同时默认
+`diagnostics.publish_terrain_cost_debug=false`：不显示障碍距离代价着色，也不创建
+后台 2 Hz 重绘、不排队地图更新，因此没有持续渲染开销；地图、障碍、距离场及规划
+仍在后台更新。独立静态演示两个开关都默认 `true`。只有两个开关都开启时才创建独立
+后台重绘，并在实时地图更新后合并刷新障碍代价颜色。关闭 MASTER 则只发送一次清空
+消息，不创建定时器、不发布地形面片，代价着色开关此时无效。两个参数都在启动时
+读取，修改 YAML 后需重启导航；不是 RViz 图层的勾选开关。
+
+障碍邻近热度复用 `graph_a_star.obstacle_penalty_distance_m`（当前 0.75 m）和
+`graph_a_star.obstacle_penalty_weight`（当前 0.2）。显示值是相对归一化风险
+`clamp((R-d)/R, 0, 1)`，越靠近障碍越暖；它是**显示热度，不是累计代价**，
+不会按 weight 放大；颜色本身不参与搜索，实际搜索仍使用配置的障碍惩罚权重。
+障碍影响范围内优先显示障碍距离渐变，范围外保留原有边界颜色。RViz 与 Web 显示共用
+同一个 `~/terrain` MarkerArray。开启代价着色后，地图发布后地形显示最多以 2 Hz
+合并刷新；初始地图仍即时发布，空闲或版本未变化时不重绘。
+规划器输入来自地图发布器；文件目录只通过 launch `map_path` 配置。
+当前地面模式仅使用 `mapground` 构建地形，不加载独立障碍 PCD。
 因此 `MapCloud` 的显示开关不影响占据判定。当前静态模型中，一个点相对关联
 地面高出 0.08 m 且不超过 1.00 m 就会触发占据；这不是对噪点、动态残影或
 车辆可跨越能力的识别。应核对障碍输入的分割、配准和点云质量。
@@ -590,12 +686,12 @@ RViz 布局 `rviz/dddmr_grid_global_planner.rviz` 使用 Fixed Frame `map`，
   `wheel_support.boundary_penalty_weight`（weight）必须有限且非负，默认
   `0.50 m` / `1.0`。任一为 0 显式关闭该项。参数只在启动时读取，修改后必须
   重启 launch；只影响离线模型，不影响 `full_wheel` 模型。
-  对应唯一 YAML 中的 `wheel_support.boundary_penalty_distance_m` 和
+  对应主 YAML 中的 `wheel_support.boundary_penalty_distance_m` 和
   `wheel_support.boundary_penalty_weight`。
 - 规划取值：评估姿态时，先把车体测量 XY 矩形按 query heading 旋转，枚举与
   这个**有向整车 footprint** 保守相交（含恰好接触）的细格；对同一批格子执行
   hole/prohibited/occupied/chassis 硬门限并取 boundary penalty 的最大值。该
-  最大值加入离线评估 `cost`，随后由既有 `search.terrain_cost_weight` 计入搜索
+  最大值加入离线评估 `cost`，随后由既有 `hybrid_a_star.terrain_cost_weight` 计入搜索
   累计代价。矩形不可用时回退到 `wheel_support.offline_planar_collision_radius_m`
   配置的圆形包络；该半径应覆盖实际整车包络。格网量化取
   `terrain.fine_resolution_m`（当前配置 0.20 m），不是按固定采样间距跳过格子。
@@ -659,10 +755,10 @@ ros2 action send_goal /get_plan dddmr_sys_core/action/GetPlan \
    overlay。轴距 `0.55 m`，前后轮距 `0.52 m`，四轮接触偏移
    `(±0.275, ±0.26, -0.22)`，base 接触高度 `0.22 m`，中心/内侧转向角
    `0.3270520925102273 / 0.3839724354387525 rad`。这些不是本文新测的。
-2. **配置默认值**：`config/dddmr_grid_global_planner.yaml`。包括
+2. **配置默认值**：`config/grid_global_planner.yaml`。包括
    `terrain.fine_resolution_m`、`terrain.coarse_resolution_m`、
    `terrain.use_coarse_guidance`、`obstacles.truncation_distance_m`、
-   `obstacles.reject_unknown`、`search.*`、`validation.*`。
+   `obstacles.reject_unknown`、`graph_a_star.*`、`hybrid_a_star.*`、`validation.*`。
 3. **阶段 4/5 worker 参数**（节点实现/配置落地后按该文件为准）：
    `dynamic_source_ttl_s` / 兼容 `source_ttl_s`（dynamic 到期转 unknown；
    static 默认无 TTL）、`max_pending_batches`、`max_sources`、
@@ -674,32 +770,33 @@ ros2 action send_goal /get_plan dddmr_sys_core/action/GetPlan \
 4. **launch 参数**：唯一入口
    `path_planning_on_static_layer.launch.py` 默认启动 PCD 显示发布器、
    `map2baselink` 静态 TF、独立离线规划器、RViz bridge 和 RViz；没有实时
-   雷达/感知/定位/控制节点。显示和规划 PCD 路径统一由 YAML 顶部规划器
-   `offline` 分组配置，launch 将 `global_pcd`/`ground_pcd` 注入显示发布器。固定 TF
+   雷达/感知/定位/控制节点。地图目录由 launch `map_path` 指定，发布器发布
+   `mapcloud`/`mapground`，规划器消费这些静态话题。固定 TF
    默认 `tf_x=3.0, tf_y=0.1, tf_z=-0.5, roll/pitch/yaw=0`。可用参数只有
-   `use_sim`、`rviz_config`。
+   `use_sim`、`rviz_config` 和 `map_path`；坐标系复用主 YAML 顶部公共参数。
 5. **perception 导出参数**：`export_perception_snapshot` 默认 `false`；
    `perception_snapshot_static_plugin` 默认 `map`（按插件名把静态层与动态层
    分开）。旧节点不设置时保持旧行为。
 6. **不在本 checkout 的测量值**：不能从代码/配置推断。缺失时必须 fail closed，
    不能填猜测值。
 
-## 9. 车辆测量参数与剩余验收
+## 9. 公共车体包络与车辆参数
 
-用户已补充轮胎、刚性悬挂模型和包含轮胎的整车包络。测量原点是整车几何
-中心在地面的投影；当前 base_link 位于其上方 0.22 m，因此仅 Z 减去 0.22 m。
+导航与独立演示配置均在顶部 `/**.ros__parameters.cuboid` 定义八个角点。
+节点从角点计算包络，不在 `vehicle` 中重复填写包络边界或配置标志。
+包络坐标相对配置的机器人基座坐标系；基座离地高度和轮胎等参数保持独立含义。
 
 | 配置项 | 当前值（米） |
 | --- | --- |
-| `body_min_m_approximate` | `[-0.410, -0.322, -0.220]` |
-| `body_max_m` | `[0.410, 0.322, 0.090]` |
+| 公共包络计算的最小边界 | `[-0.38, -0.32, -0.32]` |
+| 公共包络计算的最大边界 | `[0.50, 0.32, 0.55]` |
 | `wheel_radius_m` | `0.1375` |
 | `tire_width_m` | `0.08912` |
 | `suspension_travel_m` | `0.0` |
 | `tire_compliance_m` | `0.0` |
 
-`body_min_m_approximate` 保留旧参数名，但 `body_min_is_approximate=false`；
-包络与车辆能力配置标记均为 true。可选 `contact_patch_length_m` 未单独测量，
+有效边界仍可通过原生 `vehicle.body_min_m_approximate` / `vehicle.body_max_m`
+参数查询，值由公共包络派生；配置文件不重复填写这些值。可选 `contact_patch_length_m` 未单独测量，
 完整支撑模型按已有规则使用轮胎直径作为保守采样长度。配置数值有效并不
 等于已通过实车验证。整体包络包含轮胎；离线平面碰撞与完整三维车体/
 底盘净空判定的含义应分开理解，不应擅自提高包络下界以获取可行路径。
@@ -740,7 +837,7 @@ ros2 action send_goal /get_plan dddmr_sys_core/action/GetPlan \
 
 ### 10.1 显式 ROS observation 输入 / Explicit ROS evidence input
 
-- `~/source_observation`（新消息 `dddmr_grid_global_planner/msg/SourceObservation.msg`）
+- `~/source_observation`（新消息 `grid_global_planner/msg/SourceObservation.msg`）
   携带 Header acquisition stamp/frame、source id、sequence、terrain revision
   （+known flag）、static/dynamic、complete/delta、occupied/cleared slab、
   known free volume、headroom。
@@ -752,7 +849,7 @@ ros2 action send_goal /get_plan dddmr_sys_core/action/GetPlan \
   volume/headroom。
 - 可复用 core 仍保留 `perception_3d::Perception3D_ROS` + provider/weak callback
   的 in-process 导出消费路径；但唯一安装的离线入口
-  `dddmr_grid_offline_planner_node` 不构造 perception 栈。原 live 两节点
+  `grid_global_planner_node` 不构造 perception 栈。原 live 两节点
   executable 已退役，不再 build/install，也不随唯一 launch 启动。
 
 ## 11. 坑 / Pitfalls
@@ -797,7 +894,7 @@ ros2 action send_goal /get_plan dddmr_sys_core/action/GetPlan \
 
 启动与接口：
 
-- [ ] 唯一 launch 只启动 `dddmr_grid_offline_planner_node` 一个 provider，
+- [ ] 唯一 launch 只启动 `grid_global_planner_node` 一个 provider，
       不会同时启动旧 `global_planner_node` 或在线两节点 executable。
 - [ ] action `activate_threading:=true` + 显式 start 返回 path。
 - [ ] action `activate_threading:=true` + 空/default start 走 TF；TF 缺失时明确失败。
@@ -806,11 +903,11 @@ ros2 action send_goal /get_plan dddmr_sys_core/action/GetPlan \
 - [ ] 唯一 launch 默认启动 PCD 发布器、静态 TF、离线 planner、RViz bridge
       和 RViz；`rviz_config:=...` 可覆盖布局，`use_sim` 以 typed bool 传给
       全部五个节点。
-- [ ] 当前模式实际读取的 YAML `offline.*_pcd` 路径存在；规划输入缺失时
+- [ ] launch `map_path` 内地图文件存在且发布器已发布所需静态点云；输入缺失时
       离线 planner 给出明确错误，而不是静默空地图。
-- [ ] 唯一 YAML 的 `dddmr_grid_rviz_bridge` 默认
+- [ ] 演示 YAML 的 `grid_rviz_bridge` 默认
       `start_fixed_z_m=goal_fixed_z_m=-0.5`，与显示静态 TF `tf_z` 一致。
-- [ ] `static_transform_from_params.py` 只发布 `map->base_link`；sensor
+- [ ] `tf2_ros/static_transform_publisher` 只发布 `map->base_link`；sensor
       extrinsics 仍由外部提供，未在本 launch 中伪造。
 - [ ] 2D Pose Estimate 只更新起点 marker，不发布 `/initialpose`；2D Goal
       Pose 只提交 `/get_plan`（`activate_threading=true`）。

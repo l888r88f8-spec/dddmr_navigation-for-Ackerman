@@ -326,8 +326,12 @@ void DWA_GlobalPlanner::makePlan(
     new_goal_ = goal_handle->get_goal()->goal;
   }
 
-  if (!perception_3d_ros_->getSharedDataPtr()->is_static_layer_ready_) {
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *clock_, 1000, "Waiting for static layer");
+  const auto ready_scene = perception_3d_ros_->getLatestSceneSnapshot();
+  if (!ready_scene || !ready_scene->complete() ||
+    !ready_scene->sourceMap().known || !ready_scene->legacyStatic())
+  {
+    RCLCPP_INFO_THROTTLE(
+      this->get_logger(), *clock_, 1000, "Waiting for immutable static scene");
     threading_timer_->cancel();
     auto result = std::make_shared<dddmr_sys_core::action::GetPlan::Result>();
     goal_handle->abort(result);

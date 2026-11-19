@@ -32,6 +32,7 @@
 #define PERCEPTION_3D_STACKED_PERCEPTION_H_
 
 #include <perception_3d/perception_snapshot.h>
+#include <perception_3d/scene_snapshot.h>
 #include <perception_3d/sensor.h>
 
 /*Debug*/
@@ -110,12 +111,15 @@ class StackedPerception{
     */
     void configureSnapshotExport(bool enabled, std::string static_source_name);
     bool snapshotExportEnabled() const noexcept;
-    // Freezes the current plugin observations. cycle_stamp_ns is the perception
-    // update-cycle stamp and is kept separate from each source's acquisition
-    // stamp: a source stamp is read from its frozen PCL header when present and
-    // is marked unknown (zero) otherwise. The configured map frame is used only
-    // for observations whose points were already transformed into it; a source
-    // header naming a different frame is dropped rather than relabelled.
+    // Freezes current plugin evidence. A producer that implements the additive
+    // Sensor snapshot hooks supplies occupied/cleared points plus its own
+    // acquisition stamp, sequence and receipt; repeated polls of the same
+    // completed cycle therefore reuse that provenance. Legacy plugins keep the
+    // PCL-header path and never synthesize clearing. cycle_stamp_ns is the
+    // perception update-cycle stamp and is kept separate from each source's
+    // acquisition stamp. The configured map frame is used only for observations
+    // whose points were already transformed into it; a source frame that
+    // disagrees is dropped rather than relabelled.
     std::shared_ptr<const PerceptionSnapshot> exportSnapshot(
       const std::string & frame_id,
       std::int64_t cycle_stamp_ns,
@@ -124,7 +128,53 @@ class StackedPerception{
       bool terrain_revision_known);
     std::shared_ptr<const PerceptionSnapshot> latestSnapshot() const noexcept;
 
+    /*
+    Unified immutable scene producer.
+
+    configureSceneProducer() selects evidence and/or legacy-cost preparation.
+    All-default (enabled=false) keeps old behavior. captureSceneSnapshot() takes
+    the existing producer locks after a complete clear/mark/reset section, then
+    freezes the requested optional views. It does not wait for a new scan. Static
+    views are built once per accepted source-map identity; the legacy cost view
+    is built on demand and cached by (static identity, completed source state).
+    Requesting only include_legacy_static reuses that static view without
+    evaluating any dynamic dGraph value or freezing lethal points. A capture
+    frame that disagrees with the accepted source-map frame returns an
+    incomplete scene and never replaces the last good latestSceneSnapshot().
+    observationRevision() is an opaque equality token over completed state, not
+    a monotonic sequence; source_sequence carries ordering.
+    */
+    void configureSceneProducer(const SceneProducerConfig & config);
+    SceneProducerConfig sceneProducerConfig() const;
+    std::shared_ptr<const SceneSnapshot> captureSceneSnapshot(
+      const SceneSnapshotRequest & request,
+      const std::string & frame_id,
+      std::int64_t cycle_stamp_ns,
+      std::int64_t received_steady_ns,
+      std::uint64_t terrain_revision,
+      bool terrain_revision_known);
+    std::shared_ptr<const SceneSnapshot> latestSceneSnapshot() const noexcept;
+
   private:
+    // Helpers below require access_ and ground_kdtree_cb_mutex_ to be held.
+    std::shared_ptr<const PerceptionSnapshot> freezeEvidenceLocked(
+      const std::string & frame_id,
+      std::int64_t cycle_stamp_ns,
+      std::int64_t received_steady_ns,
+      std::uint64_t terrain_revision,
+      bool terrain_revision_known);
+    SourceMapIdentity currentSourceMapIdentityLocked(
+      const std::string & fallback_frame) const;
+    std::shared_ptr<const LegacyStaticView> ensureLegacyStaticViewLocked(
+      const SourceMapIdentity & identity);
+    std::shared_ptr<const LegacyCostView> buildLegacyCostViewLocked(
+      const SourceMapIdentity & identity,
+      const std::shared_ptr<const LegacyStaticView> & static_view);
+    std::uint64_t combinedObservationRevisionLocked(bool * unversioned) const;
+    std::int64_t newestSensorStampLocked() const;
+    std::shared_ptr<const pcl::PointCloud<pcl::PointXYZI>>
+    freezeLethalLocked(const std::string & frame_id) const;
+
     std::vector<std::shared_ptr<Sensor>> plugins_;
 
     /*mutex*/
@@ -142,6 +192,31 @@ class StackedPerception{
     std::string snapshot_static_source_name_{"map"};
     std::uint64_t snapshot_sequence_{0};
     std::shared_ptr<const PerceptionSnapshot> latest_snapshot_;
+
+    //@ Unified scene producer state. Cache objects are immutable and are only
+    //@ replaced under access_/ground_kdtree_cb_mutex_; consumers load the latest
+    //@ envelope atomically.
+    SceneProducerConfig scene_config_;
+    std::uint64_t producer_loop_revision_{0};
+    std::shared_ptr<const LegacyStaticView> cached_static_view_;
+    SourceMapIdentity cached_static_identity_;
+    std::shared_ptr<const LegacyCostView> cached_cost_view_;
+    std::uint64_t cached_cost_static_revision_{0};
+    std::uint64_t cached_cost_content_hash_{0};
+    std::uint64_t cached_cost_observation_revision_{0};
+    std::string cached_cost_frame_id_;
+    std::shared_ptr<const SceneSnapshot> latest_scene_snapshot_;
+
+    //@ Reuse one complete frozen evidence object for repeated polls of the same
+    //@ completed producer state. This is the same object published to
+    //@ latest_snapshot_; a repeated capture must not re-read a mutable plugin
+    //@ export buffer or advance the source receipt. Appended after the existing
+    //@ members so earlier offsets stay unchanged.
+    std::shared_ptr<const PerceptionSnapshot> cached_evidence_snapshot_;
+    std::uint64_t cached_evidence_revision_{0};
+    std::string cached_evidence_frame_id_;
+    std::uint64_t cached_evidence_terrain_revision_{0};
+    bool cached_evidence_terrain_revision_known_{false};
 };
 
 }//end of name space

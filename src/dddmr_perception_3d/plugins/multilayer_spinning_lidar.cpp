@@ -32,6 +32,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
+#include <tuple>
 
 #include <pcl/filters/filter.h>
 #include <perception_3d/cloud_preprocessor.h>
@@ -66,6 +68,9 @@ void MultiLayerSpinningLidar::ptrInitial(){
   pc_current_window_.reset(new pcl::PointCloud<pcl::PointXYZI>);
   sensor_current_observation_.reset(new pcl::PointCloud<pcl::PointXYZI>);
   current_lethal_.reset(new pcl::PointCloud<pcl::PointXYZI>);
+  pending_cleared_points_.reset(new pcl::PointCloud<pcl::PointXYZI>);
+  export_occupied_points_.reset(new pcl::PointCloud<pcl::PointXYZI>);
+  export_cleared_points_.reset(new pcl::PointCloud<pcl::PointXYZI>);
 }
 
 void MultiLayerSpinningLidar::onInitialize()
@@ -328,6 +333,17 @@ void MultiLayerSpinningLidar::cbSensor(const sensor_msgs::msg::PointCloud2::Shar
   //@ update time
   last_observation_time_ = clock_->now();
 
+  //@ Raw clouds still carry their own acquisition header; a missing/invalid
+  //@ stamp starts no export cycle instead of substituting the receipt clock.
+  std::int64_t raw_stamp_ns = 0;
+  if(msg->header.stamp.nanosec < 1000000000u &&
+    (msg->header.stamp.sec > 0 || msg->header.stamp.nanosec > 0))
+  {
+    raw_stamp_ns =
+      rclcpp::Time(msg->header.stamp, clock_->get_clock_type()).nanoseconds();
+  }
+  startSnapshotCycle(raw_stamp_ns);
+
   if(pub_current_observation_->get_subscription_count()>0){
     sensor_msgs::msg::PointCloud2 ros_pc2_msg;
     pcl_msg_->header.frame_id = is_local_planner_ ? gbl_utils_->getGblFrame() : gbl_utils_->getRobotFrame();
@@ -394,6 +410,7 @@ void MultiLayerSpinningLidar::cbPreprocessed(const sensor_msgs::msg::PointCloud2
   }
   last_observation_time_ = stamp;
   have_preprocessed_observation_ = true;
+  startSnapshotCycle(stamp.nanoseconds());
   pending_mark_ = pending_clear_ = true;
   get_first_tf_ = true;
   if(pub_current_observation_->get_subscription_count() > 0){
@@ -489,6 +506,9 @@ void MultiLayerSpinningLidar::selfMark(){
 
   if(pcl_msg_->points.size()<=5){
     pending_mark_ = false;
+    //@ A fresh empty acquisition still completes the clear half of the cycle;
+    //@ explicit removals captured by selfClear() remain the only evidence.
+    finalizeSnapshotObservation();
     return;
   }
   //@ Transform into global frame
@@ -505,6 +525,7 @@ void MultiLayerSpinningLidar::selfMark(){
     pcl_msg_gbl_->is_dense = true;
   }
   if(pcl_msg_gbl_->points.size()<=5){
+    finalizeSnapshotObservation();
     return;
   }
   const auto done_mark_transformed = std::chrono::steady_clock::now();
@@ -660,6 +681,10 @@ void MultiLayerSpinningLidar::selfMark(){
     
   }
 
+  //@ Only now is the per-scan clear+mark cycle complete. Freeze the persistent
+  //@ active markings plus the explicit removals from this exact acquisition.
+  finalizeSnapshotObservation();
+
   {
     const auto finished_at = std::chrono::steady_clock::now();
     const double total_ms = std::chrono::duration<double, std::milli>(finished_at - done_mark_started_at).count();
@@ -724,6 +749,25 @@ void MultiLayerSpinningLidar::selfClear(){
       return;
     }
     pending_clear_ = false;
+  }
+
+  //@ This exact clear pass owns the explicit removal evidence. It stays frozen
+  //@ in the completed cycle so repeated exporter polls reuse it rather than
+  //@ turning a later empty cloud into a fresh clear. With the unified producer
+  //@ OFF this record capture is skipped entirely, preserving old behavior. The
+  //@ completion marker itself is needed even in legacy-cost-only mode so the
+  //@ cost cache advances only after a full clear/mark.
+  const bool producer_enabled = shared_data_ &&
+    shared_data_->scene_producer_enabled_.load(std::memory_order_acquire);
+  const bool snapshot_evidence_enabled = producer_enabled &&
+    shared_data_->scene_evidence_enabled_.load(std::memory_order_acquire);
+  if(producer_enabled){
+    if(snapshot_evidence_enabled){
+      pending_cleared_points_->clear();
+    }
+    export_clear_completed_ = true;
+  }else{
+    export_clear_completed_ = false;
   }
 
   pcl::KdTreeFLANN<pcl::PointXYZ>::Ptr kdtree_last_observation(new pcl::KdTreeFLANN<pcl::PointXYZ>());
@@ -920,9 +964,22 @@ void MultiLayerSpinningLidar::selfClear(){
   }
 
   for(auto* marking : markings_to_clear){
-    if(marking){
-      pct_marking_->removePCPtr(*marking);
+    if(!marking){
+      continue;
     }
+    //@ Capture the points that really existed before removePCPtr() resets the
+    //@ pointer. These are producer-owned explicit clear records, not free volume
+    //@ inferred from an empty cloud. Off means no snapshot preparation at all.
+    if(snapshot_evidence_enabled && marking->pc_){
+      for(const auto & point : marking->pc_->points){
+        if(std::isfinite(point.x) && std::isfinite(point.y) &&
+          std::isfinite(point.z))
+        {
+          pending_cleared_points_->push_back(point);
+        }
+      }
+    }
+    pct_marking_->removePCPtr(*marking);
   }
 
   //pct_marking_->updateCleared(current_observation_ptr);
@@ -1204,6 +1261,146 @@ void MultiLayerSpinningLidar::addCastingMarker(const pcl::PointXYZ& pt, size_t i
 }
 
 
+void MultiLayerSpinningLidar::startSnapshotCycle(std::int64_t sensor_stamp_ns){
+  if(!shared_data_ ||
+    !shared_data_->scene_producer_enabled_.load(std::memory_order_acquire))
+  {
+    return;
+  }
+  current_scan_stamp_ns_ = sensor_stamp_ns;
+  current_scan_sequence_ += 1;
+  export_clear_completed_ = false;
+  if(pending_cleared_points_){
+    pending_cleared_points_->clear();
+  }
+}
+
+void MultiLayerSpinningLidar::appendActiveMarkingPoints(
+  pcl::PointCloud<pcl::PointXYZI> & cloud) const
+{
+  if(!pct_marking_){
+    return;
+  }
+  for(auto it_x = pct_marking_->getBegin(); it_x != pct_marking_->getEnd(); ++it_x){
+    for(auto it_y = (*it_x).second.begin(); it_y != (*it_x).second.end(); ++it_y){
+      for(auto it_z = (*it_y).second.begin(); it_z != (*it_y).second.end(); ++it_z){
+        const auto & marking = (*it_z).second;
+        if(!marking.pc_ || marking.pc_->empty()){
+          continue;
+        }
+        cloud += *marking.pc_;
+      }
+    }
+  }
+}
+
+void MultiLayerSpinningLidar::finalizeSnapshotObservation(){
+  if(!shared_data_ ||
+    !shared_data_->scene_producer_enabled_.load(std::memory_order_acquire))
+  {
+    //@ Producer OFF: do not traverse active markings, copy clearing records or
+    //@ replace the legacy observation cache. Local direct observation is set by
+    //@ cbPreprocessed/cbSensor and is unaffected.
+    return;
+  }
+  if(!export_clear_completed_ || current_scan_sequence_ == 0 ||
+    current_scan_stamp_ns_ <= 0)
+  {
+    return;
+  }
+  //@ A second mark pass for the same accepted scan must not mint a fresh
+  //@ completion revision/receipt for already frozen evidence.
+  if(completed_state_scan_sequence_ == current_scan_sequence_)
+  {
+    export_clear_completed_ = false;
+    return;
+  }
+
+  //@ Legacy-cost-only mode (producer enabled, evidence disabled) still needs a
+  //@ completed-state metadata mutation so the cost cache cannot bind old dGraph
+  //@ values to an accepted-but-unprocessed input. Do not traverse markings or
+  //@ copy any points in that mode.
+  if(!shared_data_->scene_evidence_enabled_.load(std::memory_order_acquire))
+  {
+    completed_state_revision_ += 1;
+    completed_state_stamp_ns_ = current_scan_stamp_ns_;
+    completed_state_scan_sequence_ = current_scan_sequence_;
+    export_clear_completed_ = false;
+    return;
+  }
+  if(!pending_cleared_points_)
+  {
+    return;
+  }
+
+  auto occupied = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+  appendActiveMarkingPoints(*occupied);
+
+  //@ Persistent markings outside the current clearing window stay active; the
+  //@ complete replacement therefore carries all currently marked clusters, not
+  //@ just this cycle's additions. Non-finite points are not exportable.
+  auto finite_occupied = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+  std::set<std::tuple<float, float, float>> occupied_keys;
+  for(const auto & point : occupied->points){
+    if(!std::isfinite(point.x) || !std::isfinite(point.y) ||
+      !std::isfinite(point.z))
+    {
+      continue;
+    }
+    finite_occupied->push_back(point);
+    occupied_keys.emplace(point.x, point.y, point.z);
+  }
+
+  //@ A point re-observed as occupied in the same completed cycle wins over an
+  //@ older clear record at that exact coordinate.
+  auto cleared = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+  for(const auto & point : pending_cleared_points_->points){
+    if(!std::isfinite(point.x) || !std::isfinite(point.y) ||
+      !std::isfinite(point.z))
+    {
+      continue;
+    }
+    if(occupied_keys.find(std::make_tuple(point.x, point.y, point.z)) !=
+      occupied_keys.end())
+    {
+      continue;
+    }
+    cleared->push_back(point);
+  }
+
+  const std::string frame_id =
+    gbl_utils_ ? gbl_utils_->getGblFrame() : std::string();
+  const std::uint64_t stamp_us =
+    static_cast<std::uint64_t>(current_scan_stamp_ns_) / 1000ULL;
+  finite_occupied->header.frame_id = frame_id;
+  finite_occupied->header.stamp = stamp_us;
+  cleared->header.frame_id = frame_id;
+  cleared->header.stamp = stamp_us;
+
+  export_occupied_points_ = finite_occupied;
+  export_cleared_points_ = cleared;
+  export_frame_id_ = frame_id;
+  export_scan_stamp_ns_ = current_scan_stamp_ns_;
+  export_received_steady_ns_ = std::chrono::duration_cast<
+    std::chrono::nanoseconds>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+  export_source_sequence_ = current_scan_sequence_;
+  export_cycle_complete_ = true;
+  export_clear_completed_ = false;
+  //@ The full clear/mark section is now complete. Advance the metadata that
+  //@ keys the legacy cost cache only after this point, using the completed
+  //@ state's own revision/stamp rather than the accepted input revision.
+  completed_state_revision_ += 1;
+  completed_state_stamp_ns_ = current_scan_stamp_ns_;
+  completed_state_scan_sequence_ = current_scan_sequence_;
+
+  //@ Keep the legacy global observation cache meaningful without changing the
+  //@ local path: it now mirrors the active dynamic marking set at cycle end.
+  sensor_current_observation_ =
+    std::make_shared<pcl::PointCloud<pcl::PointXYZI>>(*finite_occupied);
+  pending_cleared_points_->clear();
+}
+
 void MultiLayerSpinningLidar::resetdGraph(){
   const auto reset_started_at = std::chrono::steady_clock::now();
   std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
@@ -1213,6 +1410,25 @@ void MultiLayerSpinningLidar::resetdGraph(){
   pct_marking_ = std::make_shared<Marking>(&dGraph_, 
         gbl_utils_->getInscribedRadius(), gbl_utils_->getInflationRadius(), shared_data_, resolution_, height_resolution_);
   pending_mark_ = pending_clear_ = have_preprocessed_observation_;
+  //@ The graph that justified the previous export no longer exists. Keep the
+  //@ producer sequence monotonic, but require a new complete cycle.
+  export_cycle_complete_ = false;
+  export_clear_completed_ = false;
+  if(pending_cleared_points_){
+    pending_cleared_points_->clear();
+  }
+  if(sensor_current_observation_){
+    sensor_current_observation_->clear();
+  }
+  //@ A reset is a completed-state mutation even when no new input arrives. It
+  //@ invalidates the cost cache revision but never advances the completed
+  //@ acquisition stamp, because no new scan was completed.
+  if(shared_data_ &&
+    shared_data_->scene_producer_enabled_.load(std::memory_order_acquire))
+  {
+    completed_state_revision_ += 1;
+    completed_state_scan_sequence_ = 0;
+  }
   RCLCPP_INFO(node_->get_logger().get_child(name_), "%s done dynamic graph regeneration (%.3f ms).", name_.c_str(),
     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - reset_started_at).count());
 }
@@ -1244,6 +1460,54 @@ bool MultiLayerSpinningLidar::isCurrent(){
 
 pcl::PointCloud<pcl::PointXYZI>::Ptr MultiLayerSpinningLidar::getObservation(){
   return sensor_current_observation_;
+}
+
+bool MultiLayerSpinningLidar::supportsSnapshotObservation() const{
+  return !is_local_planner_ && shared_data_ &&
+    shared_data_->scene_evidence_enabled_.load(std::memory_order_acquire);
+}
+
+std::uint64_t MultiLayerSpinningLidar::snapshotStateRevision() const{
+  //@ Under the producer lock: revision of the COMPLETED clear/mark/reset
+  //@ state. Accepting a new input cloud alone must not advance this, otherwise
+  //@ a capture would cache old dGraph values under the new accepted revision.
+  return completed_state_revision_;
+}
+
+std::int64_t MultiLayerSpinningLidar::snapshotSensorStampNs() const{
+  //@ Acquisition stamp of the completed state, never the accepted-but-
+  //@ unprocessed current_scan_stamp_ns_.
+  return completed_state_stamp_ns_;
+}
+
+bool MultiLayerSpinningLidar::getSnapshotObservation(
+  SensorExportObservation * observation)
+{
+  if(!observation || is_local_planner_ || !shared_data_ ||
+    !shared_data_->scene_evidence_enabled_.load(std::memory_order_acquire))
+  {
+    return false;
+  }
+  std::unique_lock<std::recursive_mutex> lock(shared_data_->ground_kdtree_cb_mutex_);
+  if(!export_cycle_complete_ || !export_occupied_points_ ||
+    !export_cleared_points_ || export_scan_stamp_ns_ <= 0 ||
+    export_source_sequence_ == 0 || export_frame_id_.empty())
+  {
+    return false;
+  }
+
+  //@ Deep-copy under the producer lock; the caller never aliases mutable PCL
+  //@ storage or gets a partially updated cycle.
+  observation->occupied =
+    std::make_shared<pcl::PointCloud<pcl::PointXYZI>>(*export_occupied_points_);
+  observation->cleared =
+    std::make_shared<pcl::PointCloud<pcl::PointXYZI>>(*export_cleared_points_);
+  observation->frame_id = export_frame_id_;
+  observation->sensor_stamp_ns = export_scan_stamp_ns_;
+  observation->received_steady_ns = export_received_steady_ns_;
+  observation->source_sequence = export_source_sequence_;
+  observation->complete = true;
+  return true;
 }
 
 pcl::PointCloud<pcl::PointXYZI>::Ptr MultiLayerSpinningLidar::getLethal(){

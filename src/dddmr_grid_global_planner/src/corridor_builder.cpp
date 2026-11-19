@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/corridor_builder.h"
+#include "grid_global_planner/corridor_builder.h"
 
 #include <algorithm>
 #include <cmath>
@@ -23,7 +23,7 @@
 #include <utility>
 #include <vector>
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 
 CorridorBuilder::CorridorBuilder(CorridorOptions options)
@@ -192,4 +192,4 @@ Corridor CorridorBuilder::BuildFromCells(
   return corridor;
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

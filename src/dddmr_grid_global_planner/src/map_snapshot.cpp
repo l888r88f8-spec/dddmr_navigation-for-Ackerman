@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "dddmr_grid_global_planner/map_snapshot.h"
+#include "grid_global_planner/map_snapshot.h"
 
 #include <algorithm>
 #include <cmath>
@@ -22,10 +22,10 @@
 #include <unordered_set>
 #include <utility>
 
-#include "dddmr_grid_global_planner/distance_field.h"
-#include "dddmr_grid_global_planner/multiresolution_map.h"
+#include "grid_global_planner/distance_field.h"
+#include "grid_global_planner/multiresolution_map.h"
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 namespace
 {
@@ -721,4 +721,4 @@ std::vector<TerrainNodeId> CorridorView::FineNodesInCell(
   return fine_terrain_->NodesInCell(cell);
 }
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner

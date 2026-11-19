@@ -219,6 +219,37 @@ Perception3D_ROS::getLatestPerceptionSnapshot() const
   return stacked_perception_->latestSnapshot();
 }
 
+void Perception3D_ROS::configureSceneProducer(const SceneProducerConfig & config)
+{
+  if(stacked_perception_){
+    stacked_perception_->configureSceneProducer(config);
+  }
+}
+
+std::shared_ptr<const SceneSnapshot> Perception3D_ROS::captureSceneSnapshot(
+  const SceneSnapshotRequest & request,
+  std::int64_t cycle_stamp_ns,
+  std::int64_t received_steady_ns,
+  std::uint64_t terrain_revision,
+  bool terrain_revision_known)
+{
+  if(!stacked_perception_){
+    return nullptr;
+  }
+  return stacked_perception_->captureSceneSnapshot(
+    request, global_frame_, cycle_stamp_ns, received_steady_ns,
+    terrain_revision, terrain_revision_known);
+}
+
+std::shared_ptr<const SceneSnapshot>
+Perception3D_ROS::getLatestSceneSnapshot() const
+{
+  if(!stacked_perception_){
+    return nullptr;
+  }
+  return stacked_perception_->latestSceneSnapshot();
+}
+
 
 void Perception3D_ROS::getGlobalPose(geometry_msgs::msg::TransformStamped& gbl_pose){
 

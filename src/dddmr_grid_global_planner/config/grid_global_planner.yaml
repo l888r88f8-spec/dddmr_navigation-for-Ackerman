@@ -1,0 +1,284 @@
+/**:
+  ros__parameters:
+    global_frame: map                                              # 公共 TF 世界坐标系；规划器、地图发布、桥接、静态 TF 与 RViz 共用。
+    robot_base_frame: base_link                                    # 公共机器人基座坐标系；静态 TF 子坐标系使用。
+    map_topic: mapcloud                                            # 公共完整地图点云话题；static_obstacle_cloud_topic 的公共别名。
+    ground_topic: mapground                                        # 公共地面点云话题；ground_cloud_topic 的公共别名。
+    preprocessed_cloud_topic: navigation/preprocessed_cloud        # 公共动态障碍点云话题；dynamic_obstacle_cloud_topic 的公共别名。
+    cuboid:
+      flb: [0.50, 0.32, -0.32]                                     # 前左底
+      frb: [0.50, -0.32, -0.32]                                    # 前右底
+      flt: [0.50, 0.32, 0.55]                                      # 前左顶
+      frt: [0.50, -0.32, 0.55]                                     # 前右顶
+      blb: [-0.38, 0.32, -0.32]                                    # 后左底
+      brb: [-0.38, -0.32, -0.32]                                   # 后右底
+      blt: [-0.38, 0.32, 0.55]                                     # 后左顶
+      brt: [-0.38, -0.32, 0.55]                                    # 后右顶
+
+grid_global_planner:
+  ros__parameters:
+    ros:
+      enable_ground_cloud: false                                   # live GroundMap 输入开关；离线入口强制关闭。
+      enable_raw_cloud_fallback: false                             # 原始静态/动态点云回退；默认关闭，避免与 SourceObservation 重复。
+      enable_static_obstacle_cloud: false                          # 静态障碍点云输入开关；离线入口关闭。
+      enable_dynamic_obstacle_cloud: false                         # 动态障碍点云输入开关；离线入口关闭。
+      enable_source_observation: false                             # 显式冻结 ROS 证据输入；当前离线入口关闭，话题保留供其他调用者。
+      source_observation_topic: "~/source_observation"             # 带来源信息的观测输入话题。
+      enable_perception_export: false                              # 接口兼容保留；离线可执行无感知 provider，关闭且不发布。
+      perception_publish_rate_hz: 10.0                             # 感知导出频率上限（Hz）；导出开关关闭时不发布。
+      max_source_queue: 4                                          # 源队列/源数/记录容量。
+      max_sources: 64                                              # ROS 输入源与源记录容量上限。
+      max_source_records: 200000                                   # ROS 输入源记录数量上限。
+      tf_timeout_sec: 0.2                                          # TF 超时/未来容差/传感器最大年龄（s）。
+      tf_future_tolerance_sec: 0.5                                 # TF 时间戳允许的未来偏差（s）。
+      max_sensor_age_sec: 2.0                                      # 观测/请求时间戳及最新 TF 的年龄上限（s）。
+      allow_latest_tf_fallback: true                               # 仅用于显式空起点/请求语义，且经验证 TF 年龄；不替代带时间戳观测。
+      source_expiry_period_sec: 1.0                                # 源过期检查周期（s）。
+      path_topic: "~/path"                                         # 输出话题；~ 为节点私有命名空间。
+      terrain_topic: "~/terrain"                                   # 重建地形可视化话题。
+      coarse_topic: "~/coarse"                                     # 粗层地形摘要可视化话题。
+      corridor_topic: "~/corridor"                                 # 规划走廊可视化话题。
+      cost_topic: "~/cost"                                         # 代价可视化话题。
+      diagnostics_topic: "~/diagnostics"                           # 请求结果及失败原因话题。
+      version_topic: "~/version"                                   # 地图版本信息话题。
+      fallback_topic: "~/fallback"                                 # 搜索回退信息话题。
+      wheel_debug_topic: "~/wheel_support"                         # 轮胎支撑调试话题。
+      metrics_topic: "~/metrics"                                   # 规划耗时、扩展数及地图更新统计话题。
+      planner_stage_topic: /debug/planner_route_request_stage      # 阶段调试话题（绝对路径）。
+
+    raw_route_backend: graph_a_star                             # 后端：graph_a_star / hybrid_a_star；默认保留图搜索。
+
+    graph_a_star:
+      max_samples: 2000000                                         # 单次搜索允许的采样数量上限。
+      slope_penalty_weight: 0.0                                    # 坡度乘性软权重（无量纲）；0 显式关闭，负值/非有限值启动失败。
+      roughness_penalty_weight: 10.0                               # 粗糙度乘性软权重（1/m）；只影响软偏好，不改变可通行判定。
+      obstacle_penalty_distance_m: 0.75                            # 障碍软惩罚影响距离（m）；0 显式关闭。
+      obstacle_penalty_weight: 0.2                                 # 障碍软惩罚权重（m）；距离内线性衰减。
+      boundary_penalty_distance_m: 0.8                             # 同层实测支撑边界软惩罚影响距离（m）；0 显式关闭，负值/非有限值启动失败。
+      boundary_penalty_weight: 3.0                                 # 同层实测边界软代价权重（无量纲）；按端点最大风险乘边长，仅软偏好不改可通行判定。
+
+    hybrid_a_star:
+      primitive_length_m: 0.8                                      # 基础运动基元长度（m），hybrid_a_star 使用。
+      steer_samples: 5                                             # 转向采样数，hybrid_a_star 使用。
+      allow_reverse: false                                         # 倒车开关，hybrid_a_star 使用。
+      max_wheel_sample_spacing_m: 0.05                             # 轮/偏航采样间距（m / rad）。
+      max_yaw_sample_step_rad: 0.1                                 # 相邻采样姿态的最大偏航间隔（rad），hybrid_a_star 使用。
+      goal_position_tolerance_m: 0.3                               # 目标位置/朝向容差（m / rad）与目标连接范围。
+      goal_heading_tolerance_rad: 3.14                             # 到达目标的朝向容差（rad），hybrid_a_star 使用。
+      goal_connection_max_length_m: 3.0                            # 直接连接目标的距离上限（m），hybrid_a_star 使用。
+      goal_connection_samples: 12                                  # 目标连接候选采样数，hybrid_a_star 使用。
+      max_coarse_routes: 2                                         # 粗层候选路线数上限。
+      reverse_penalty_weight: 0.5                                  # 代价权重（无量纲）：倒车、转向、地形。
+      steering_penalty_weight: 0.1                                 # 转向软代价权重，hybrid_a_star 使用。
+      terrain_cost_weight: 0.2                                     # 地形软代价权重，hybrid_a_star 使用。
+      heading_bin_rad: 0.19634954084936207                         # 航向分箱（rad）。
+      corridor_initial_margin_m: 0.2                               # 走廊扩展：初始/步进边距（m）、最大扩展次数与单元容量。
+      corridor_margin_step_m: 0.2                                  # 每次扩大搜索走廊的边距（m），hybrid_a_star 使用。
+      corridor_max_enlargements: 3                                 # 搜索走廊最多扩大次数，hybrid_a_star 使用。
+      corridor_max_corridor_cells: 2000000                         # 搜索走廊的细网格数量上限，hybrid_a_star 使用。
+
+    planning:
+      max_planning_time_sec: 10.0                                  # 单次规划时延上限（s）。
+      max_latest_validation_time_sec: 2.0                          # 固定快照 A 的路径验证时延上限（s）；不跟随后续地图更新。
+
+    # ==================== 静态地图重建 ====================
+    offline:
+      enabled: true                                                # 静态点云话题建图开关；当前独立规划入口要求 true。
+      global_cloud_mode: false                                     # false=mapground 重建地面；true=mapcloud 重建并使用地面提示。
+      use_global_as_static_obstacles: false                        # false=GlobalMap 仅保留来源校验，不注入静态障碍（与测试栅格一致）；true=恢复 GlobalMap 静态障碍。
+
+      # ---- 通用几何、坡度与台阶（m / rad / 比例）----
+      resolution_m: 0.2                                            # 细网格分辨率（m）；origin_* 为局部地图原点（m）。
+      origin_x_m: 0.0                                              # 局部网格原点 x（m）。
+      origin_y_m: 0.0                                              # 局部网格原点 y（m）。
+      max_step_height_m: 0.12                                      # 相邻可通行单元最大台阶（m）。
+      layer_gap_threshold_m: 0.2                                   # 原始点按 Z 间隔分层的阈值（m），与连通台阶上限分别设置。
+      max_slope_rad: 0.6                                           # 可通行坡度上限（rad）。
+      max_normal_angle_rad: 0.35                                   # 离线相邻面连通的法向夹角上限（rad）；连续重建也使用。
+      min_boundary_coverage: 0.25                                  # 原始边界支撑覆盖比例（0~1）；重建面之间按共享几何判断。
+
+      # ---- 连续区域地面重建 ----
+      continuous_ground:
+        enabled: true                                              # true：区域重建启用。
+        regional_radius_m: 0.6                                     # 区域半径（m）：单次区域拟合的搜索半径。
+        max_gap_fill_m: 1.0                                        # 缺口填充（m）：允许推断的最大中心-支撑距离；仍受区域半径约束。
+        max_plane_rms_m: 0.15                                      # 地图噪声（m）：区域平面 RMS 上限。
+        max_inlier_residual_m: 0.18                                # 地图噪声（m）：内点残差上限。
+        robust_noise_floor_m: 0.03                                 # 识别小台阶时，两侧平面的 RMS 容差（m）。
+        min_region_confidence: 0.35                                # 置信度（0~1）：区域接受的最低置信度。
+        min_angular_coverage: 0.35                                 # 角覆盖（0~1）：需要覆盖的方位比例。
+        corner_association_tolerance_m: 0.1                        # 角点关联容差（m）。
+        max_association_normal_rad: 0.5                            # 法线关联角上限（rad）。
+        min_region_points: 6                                       # 区域拟合所需的最少真实点数。
+        max_region_points: 768                                     # 容量：区域最多点数。
+        max_layers_per_cell: 2                                     # 容量：每格最多层数。
+        max_candidate_seeds: 256                                   # 容量：区域来源格数量上限。
+        max_support_refs_per_cell: 24                              # 容量：每格支撑引用上限。
+        max_inferred_cells: 2000000                                # 容量：推断格数上限。
+
+      # 离线测量证据不设点数/patch/引用/单 patch 点数容量上限；仅保留真实
+      # uint32 索引表示范围以及其他几何/候选格预算。
+      max_candidate_cells: 2000000                                 # 候选格总数上限。
+
+      ground_duplicate_tolerance_m: 0.08                           # 地面重复判定容差（m）；ground/obstacle 路径相同则跳过独立障碍输入。
+      obstacle_blocking_height_m: 1.0                              # 障碍高度带上限（m）；更高点按遮挡忽略，不推断 headroom。
+      obstacle_association_radius_m: 0.25                          # 障碍关联半径（m）。
+      obstacle_tile_size_m: 3.2                                    # 障碍分块尺寸（m）。
+
+      # 仅地面模式的有界平滑；continuous_ground=true 时由区域重建取代；global 分类不运行。
+      ground_surface:
+        enabled: true                                              # 旧版平滑开关；区域重建启用时不参与。
+        max_height_noise_m: 0.06                                   # 最大高度噪声（m）。
+        max_correction_m: 0.06                                     # 最大高度修正（m）。
+        max_normal_correction_rad: 0.15                            # 最大法线修正（rad）。
+        max_association_normal_rad: 0.5                            # 候选关联法线角（rad）。
+        max_support_residual_m: 0.06                               # 支撑残差上限（m）。
+        max_candidate_slope_rad: 0.6                               # 候选坡度上限（rad）。
+        max_neighbors: 8                                           # 每个节点最多邻域数。
+        max_points_per_node: 12                                    # 每个节点最多点数。
+
+      neighborhood_radius_m: 0.35                                  # 旧版逐格平面/法线邻域半径（m）；区域重建使用自己的 regional_radius_m。
+      max_sampling_gap_m: 0.3                                      # 原始测量表面最远中心-支撑距离（m）；不是可检测孔洞直径。区域跨缺口由 max_gap_fill_m 控制。
+      max_plane_rms_m: 0.05                                        # 旧逐格/全点云拟合 RMS 上限（m）；连续重建使用自己的 RMS 参数。
+      min_neighborhood_points: 4                                   # 旧版逐格拟合最少邻域点数；区域重建用 min_region_points。
+
+      # ---- 旧模式邻域扩展；连续重建启用时不走该重试流程 ----
+      evidence_expansion_step_m: 0.1                               # 首次扩展半径为 neighborhood_radius_m + 本步长，全点云路径可继续扩展。
+
+      # ---- 以下用于 global_cloud_mode=true；当前 GroundMap 模式不参与构图 ----
+      global_surface_expansion_max_radius_m: 0.55                  # global 自适应半径上限（m）；仍受点/引用/patch 容量约束。
+      global_surface_min_angular_coverage: 0.5                     # global 角覆盖（0~1）。
+      global_ground_seed_tolerance_m: 0.15                         # global 地面种子高度容差（m）。
+      global_hint_surface_tolerance_m: 0.08                        # global 地面提示与拟合面高度容差（m）。
+
+    # ==================== 障碍查询、搜索与路径验证 ====================
+    # 障碍查询策略；未知与禁止区域默认拒绝。
+    obstacles:
+      truncation_distance_m: 2.0                                   # 最近观测截断距离（m）；到达未知边界时不得当作保证净空。
+      reject_unknown: true                                         # 未知区域默认拒绝，不得当作可通行。
+      reject_prohibited: true                                      # 禁止区域默认拒绝。
+
+    # 路径验证、重试和分块；长度 m，角度 rad。
+    validation:
+      max_samples: 100000                                          # 采样/验证容量与间距（m / rad）。
+      max_wheel_sample_spacing_m: 0.05                             # 轮胎轨迹采样间距上限（m），hybrid_a_star 使用。
+      max_yaw_sample_step_rad: 0.1                                 # 相邻采样姿态的最大偏航间隔（rad），hybrid_a_star 使用。
+      changed_pose_tolerance_m: 0.03                               # 位姿/端点/偏航容差（m / rad）。
+      segment_endpoint_tolerance_m: 0.001                          # 验证线段端点的位置容差（m），hybrid_a_star 使用。
+      segment_yaw_tolerance_rad: 0.001                             # 验证线段端点的朝向容差（rad），hybrid_a_star 使用。
+      require_guaranteed_clearance: true                           # 保证净空/拒绝未知障碍开关。
+      reject_unknown_obstacles: true                               # 路径验证拒绝未知障碍。
+      corridor_tile_size_m: 3.2                                    # 走廊分块尺寸（m）、最大样本、车身扫掠间距（m）。
+      corridor_max_samples: 50000                                  # 走廊分块采样容量；生产固定快照验证不再依赖最新地图。
+      body_sweep_spacing_m: 0.1                                    # 车身扫掠碰撞检测的采样间距（m），hybrid_a_star 使用。
+
+    # ==================== 车辆几何与可选运动学/支撑模型 ====================
+    # 车辆实测几何与姿态验收限值；graph_a_star 仍使用 base_contact_height_m。
+    # 转向/轮胎/整车支撑等为 hybrid_a_star 或可选参数，不代表全部 vehicle 参数均生效。
+    vehicle:
+      wheelbase_m: 0.55                                            # 轴距（m）。
+      track_width_m: 0.52                                          # 前后轮距（m）；以下三项为整车/前/后轮距。
+      front_track_width_m: 0.52                                    # 前轮轮距（m），hybrid_a_star 使用。
+      rear_track_width_m: 0.52                                     # 后轮轮距（m），hybrid_a_star 使用。
+      base_contact_height_m: 0.22                                  # base_link 到地面的基准高度（m）；graph_a_star 也用它做高度转换。
+      max_steer_central_rad: 0.3270520925102273                    # 中心/内侧最大转向角（rad），hybrid_a_star 可选。
+      max_steer_inner_rad: 0.3839724354387525                      # 内侧前轮最大转向角（rad），hybrid_a_star 使用。
+      wheel_contacts_x_m: [0.275, 0.275, -0.275, -0.275]           # base_link 下的轮胎接触点偏移；顺序 FL,FR,RL,RR，使用同构一维数组。
+      wheel_contacts_y_m: [0.26, -0.26, 0.26, -0.26]               # FL/FR/RL/RR 接触点的横向坐标（m），hybrid_a_star 使用。
+      wheel_contacts_z_m: [-0.22, -0.22, -0.22, -0.22]             # FL/FR/RL/RR 接触点的垂直坐标（m），hybrid_a_star 使用。
+      wheel_radius_m: 0.1375                                       # 轮胎/悬架实测参数（m）；contact_patch_length_m=.nan 表示用两倍轮半径推导。
+      tire_width_m: 0.08912                                        # 轮胎宽度（m），hybrid_a_star 使用。
+      suspension_travel_m: 0.0                                     # 悬架行程（m），hybrid_a_star 使用。
+      tire_compliance_m: 0.0                                       # 轮胎允许形变量（m），hybrid_a_star 使用。
+      contact_patch_length_m: .nan                                 # .nan=由两倍轮半径推导接触长度；hybrid_a_star/完整支撑可选。
+      vehicle_capability_configured: true                          # 仅用于来源声明；实测值仍为权威。
+      min_contact_coverage: 0.6                                    # 接触/姿态验收限值（比例 / rad / m）；沿用现有配置。
+      max_pitch_rad: 0.4                                           # 车身俯仰角上限（rad），hybrid_a_star 使用。
+      max_roll_rad: 0.3                                            # 车身横滚角上限（rad），hybrid_a_star 使用。
+      max_step_m: 0.12                                             # 车辆允许的支撑高差（m），hybrid_a_star 使用。
+      max_warp_m: 0.05                                             # 四轮支撑翘曲上限（m），hybrid_a_star 使用。
+      max_pose_residual_m: 0.05                                    # 车身位姿拟合残差上限（m），hybrid_a_star 使用。
+      body_clearance_m: 0.12                                       # 车身净空要求（m），hybrid_a_star 使用。
+      max_branch_jump_m: 0.12                                      # 相邻评估姿态的支撑层跳变上限（m），hybrid_a_star 使用。
+
+    # 离线轮/整车地面支撑模型；graph_a_star 不执行完整四轮/车身支撑检查，
+    # 以下参数主要供 hybrid_a_star/离线模型可选使用；base_contact_height_m 仍用于 graph_a_star。
+    wheel_support:
+      evaluation_model: offline_kinematic_static_map               # 静态 PCD 离线路径直接选择离线模型；C++ 默认 full_wheel 供其他调用者。
+      offline_check_ground_support: false                          # false：不要求四轮及车身下方逐格有地面，姿态取中心切平面近似。 中心地面、坡度/高差及障碍/车身碰撞检查保留。
+      offline_planar_collision_radius_m: 0.522                     # 测量车身矩形不可用时的保守圆半径（m）；0.522≥hypot(0.410,0.322)。
+      offline_body_sample_spacing_m: 0.1                           # 离线车体包络采样间距（m）。
+      offline_contact_height_tolerance_m: 0.1                      # footprint 采样的地图一致性带（m），不是悬架行程。
+      footprint_samples_along: 5                                   # footprint 沿车长/车宽采样数与分支/位姿搜索上限。
+      footprint_samples_across: 3                                  # 车体横向采样数，hybrid_a_star 使用。
+      max_branch_combinations: 256                                 # 支撑分支组合数量上限，hybrid_a_star 使用。
+      max_pose_iterations: 10                                      # 支撑位姿拟合迭代次数上限，hybrid_a_star 使用。
+      branch_height_tolerance_m: 0.03                              # 分支高度容差（m）。
+      min_center_support: 1.0                                      # 中心支撑最小比例（0~1）。
+      max_contact_height_spread_m: 0.05                            # 四轮接触高度最大差（m）。
+      max_deck_search_nodes: 4096                                  # deck 搜索节点上限。
+      body_sample_spacing_m: 0.1                                   # 通用车身采样间距（m）。
+      obstacle_penalty_distance_m: 0.5                             # 障碍软惩罚距离（m）；以下权重无量纲。
+      obstacle_penalty_weight: 1.0                                 # 障碍软代价权重，hybrid_a_star 使用。
+      slope_penalty_weight: 1.0                                    # 坡度软代价权重，hybrid_a_star 使用。
+      residual_penalty_weight: 10.0                                # 地形残差软代价权重，hybrid_a_star 使用。
+      clearance_penalty_weight: 1.0                                # 净空软代价权重，hybrid_a_star 使用。
+      boundary_penalty_distance_m: 0.5                             # 离线专用地形边界软偏好及同名 RViz 热图（m / 权重）；置 0 可显式关闭。
+      boundary_penalty_weight: 1.0                                 # 边界软代价及对应 RViz 热图权重。
+
+    # ==================== 在线更新高级配置 ====================
+    # 在线(live)/粗层(coarse)地形参数；离线 GroundMap 使用 offline.* 的独立参数。
+    terrain:
+      fine_resolution_m: 0.2                                       # live 细层分辨率（m）；以下为 live/coarse 专用。
+      coarse_resolution_m: 0.4                                     # coarse 粗层分辨率（m）。
+      origin_x_m: 0.0                                              # 局部地形原点 x（m）。
+      origin_y_m: 0.0                                              # 局部地形原点 y（m）。
+      use_coarse_guidance: true                                    # coarse 引导开关。
+      layer_gap_threshold_m: 0.2                                   # 原始点按 Z 间隔分层的阈值（m）。
+      refine_split_min_gap_m: 0.03                                 # coarse→fine 细化：最小缺口（m）、最小 RMS 改善（m）、最大深度。
+      refine_min_rms_improvement_m: 0.005                          # 粗层继续细化所需的 RMS 最小改善（m）。
+      max_refine_depth: 8                                          # coarse→fine 最大细化深度。
+      max_plane_rms_m: 0.05                                        # live 拟合平面 RMS 上限（m）。
+      min_samples_per_surface: 3                                   # live 每个 surface 最少点数。
+      max_layers_per_cell: 16                                      # live 每格最大层数。
+      max_step_height_m: 0.12                                      # 通用：最大台阶（m）。
+      max_slope_rad: 0.6                                           # 通用：最大坡度（rad）。
+      max_normal_angle_rad: 0.35                                   # 通用：最大法线角（rad）。
+      min_boundary_coverage: 0.25                                  # 通用：边界覆盖比例（0~1）。
+      support_radius_factor: 0.75                                  # 通用：支撑半径系数（比例）。
+      mark_excessive_slope_prohibited: true                        # 通用：超坡度标记为禁止。
+      observation_max_points: 20000000                             # live/coarse 观测点容量上限。
+      coarse_surface_z_tolerance_m: 0.2                            # 粗面 z 容差（m）。
+      coarse_max_fine_nodes_per_surface: 200000                    # coarse 每个 surface 的 fine 节点上限。
+
+    # Worker 运行时、TTL 和保留容量；进程内部参数。
+    worker:
+      source_ttl_s: 2.0                                            # 源 TTL（s）；静态源正数才过期，<=0 仅在显式移除时删除。
+      static_source_ttl_s: -1.0                                    # 静态源 TTL（s）；负值表示不过期。
+      dynamic_source_ttl_s: 2.0                                    # 动态源 TTL（s）；到期转 unknown。
+      max_pending_batches: 4                                       # 批处理/快照/退休版本容量。
+      retained_snapshots: 4                                        # latest 之外保留的历史快照数。
+      max_retired_versions: 64                                     # 退休版本上限。
+      max_sources: 1024                                            # 源/记录容量上限。
+      max_records_total: 1000000                                   # 记录总数/单源记录上限。
+      max_records_per_source: 100000                               # 每个输入源的障碍记录数量上限。
+      publish_period_s: 0.05                                       # 发布周期（s）与频率上限（Hz），非零时用于生产节流。
+      max_publish_hz: 20.0                                         # 地图快照发布频率上限（Hz）。
+      association_min_clearance_m: 0.0                             # 非重叠高架板关联净空范围（m）；NaN 关闭关联，板保持 UNKNOWN。
+      association_max_clearance_m: .nan                            # 净空上限（m）；.nan 关闭关联，板保持 UNKNOWN。
+      reject_unknown_sources: true                                 # 拒绝未知源。
+
+    # ==================== 诊断与可视化输出 ====================
+    # 调试/可视化输出；只影响发布，不改变规划地图。
+    diagnostics:
+      detailed_query_timing: false                                 # 逐查询延迟直方图（热路径采样开销）；默认关闭。
+      publish_stage_debug: true                                    # 阶段调试发布。
+      publish_wheel_debug: false                                   # 逐样本/四轮调试发布；默认关闭以免拖慢规划线程。
+      publish_terrain_debug: true                                  # 基础栅格显示；启动即发布一次完整地形，false 仅清空。
+      publish_terrain_cost_debug: true                             # 障碍代价着色和后台 2 Hz 动态重绘；仅在基础显示开启时生效。
+      publish_coarse_debug: true                                   # 发布粗层地形调试图。
+      publish_corridor_debug: true                                 # 发布规划走廊调试图。
+      publish_cost_debug: true                                     # 发布代价调试图。
+      max_visualization_points: 0                             # 可视化点/测量线框/走廊单元上限。
+      max_measurement_visualization_patches: 0                 # 测量线框/走廊单元可视化上限。
+      max_corridor_visualization_cells: 0                      # 走廊可视化单元数量上限。

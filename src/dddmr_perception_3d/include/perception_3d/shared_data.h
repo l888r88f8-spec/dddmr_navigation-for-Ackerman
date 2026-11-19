@@ -33,6 +33,11 @@
 
 #include "rclcpp/rclcpp.hpp"
 
+/*For unified scene producer flags and static source identity*/
+#include <atomic>
+#include <cstdint>
+#include <string>
+
 /*For kd tree*/
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/search/kdtree.h>
@@ -92,6 +97,25 @@ class SharedData{
     //@ Written with aggregate_observation_/aggregate_observation_kdtree_ and
     //@ read under the same lock as those snapshots.
     bool aggregate_observation_stale_{true};
+
+    //@ Accepted static source identity. Written by StaticLayer only when the
+    //@ complete static event (map+ground) is applied, under
+    //@ ground_kdtree_cb_mutex_; read by the scene producer under the same lock.
+    //@ revision 0 means unknown. content_hash covers frame/content/count/order.
+    std::uint64_t source_map_revision_{0};
+    std::uint64_t source_map_content_hash_{0};
+    std::size_t source_map_ground_count_{0};
+    std::size_t source_map_map_count_{0};
+    std::string source_map_frame_id_;
+    bool source_map_identity_known_{false};
+
+    //@ Unified scene producer mode. Every flag defaults OFF so an old node does
+    //@ no new snapshot preparation, traversal or cache maintenance. Plugins
+    //@ read these atomically in their clear/mark path; the producer writes them
+    //@ during configuration only.
+    std::atomic<bool> scene_producer_enabled_{false};
+    std::atomic<bool> scene_evidence_enabled_{false};
+    std::atomic<bool> scene_legacy_cost_enabled_{false};
   private:
 
 

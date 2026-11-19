@@ -7,7 +7,9 @@
 #include <tf2_ros/transform_listener.h>
 #include <pcl_conversions/pcl_conversions.h>
 
+#include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace perception_3d
 {
@@ -108,7 +110,35 @@ private:
       return;
     }
     publisher_->publish(MakePreprocessedCloudMessage(cloud, pending_->header, global_frame_));
+    LogCloudCoverage(cloud, body_to_global.translation());
     pending_.reset();
+  }
+
+  // Evidence, not control: report how far this crop actually reaches around
+  // the vehicle. The configured window is an XY box, so the p95/max range is
+  // the only measurement of what the downstream planners can really see.
+  void LogCloudCoverage(
+    const pcl::PointCloud<pcl::PointXYZ> & cloud,
+    const Eigen::Vector3d & robot)
+  {
+    if (cloud.empty()) {return;}
+    std::vector<double> ranges;
+    ranges.reserve(cloud.size());
+    for (const auto & point : cloud) {
+      ranges.push_back(std::hypot(point.x - robot.x(), point.y - robot.y()));
+    }
+    const std::size_t mid = ranges.size() / 2;
+    const std::size_t high = std::min(ranges.size() - 1, ranges.size() * 95 / 100);
+    std::nth_element(ranges.begin(), ranges.begin() + mid, ranges.end());
+    const double p50 = ranges[mid];
+    std::nth_element(ranges.begin(), ranges.begin() + high, ranges.end());
+    const double p95 = ranges[high];
+    const double farthest = *std::max_element(ranges.begin(), ranges.end());
+    RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "Shared cloud coverage: points=%zu range_p50=%.2f m range_p95=%.2f m "
+      "range_max=%.2f m window=%.1f m",
+      cloud.size(), p50, p95, farthest, config_.window);
   }
 
   CloudPreprocessorConfig config_;

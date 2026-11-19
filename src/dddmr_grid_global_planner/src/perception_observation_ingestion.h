@@ -22,9 +22,9 @@
 #include <string>
 #include <vector>
 
-#include "dddmr_grid_global_planner/source_observation.h"
+#include "grid_global_planner/source_observation.h"
 
-namespace dddmr_grid_global_planner
+namespace grid_global_planner
 {
 
 // Hard bounds applied while freezing an immutable perception export into
@@ -57,6 +57,6 @@ PerceptionIngestionResult ConvertPerceptionSnapshotToSourceObservations(
   std::uint64_t terrain_revision, bool terrain_revision_known,
   const PerceptionIngestionLimits & limits);
 
-}  // namespace dddmr_grid_global_planner
+}  // namespace grid_global_planner
 
 #endif  // PERCEPTION_OBSERVATION_INGESTION_H_

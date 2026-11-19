@@ -175,6 +175,14 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_route_sent_to_local_;
       rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_local_pruned_path_;
       rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_best_trajectory_path_;
+      // Same data as /debug/best_trajectory, split into coloured segments:
+      // time rollout, distance probe, and the first probe contact.
+      rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
+        pub_best_trajectory_markers_;
+      // The distance-probe tail alone, as a PoseArray so the web UI can draw it
+      // as a second series with its own colour.
+      rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr
+        pub_best_trajectory_probe_pose_;
       rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_accepted_trajectory_pose_array_;
       rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_best_trajectory_pose_;
       rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_trajectory_pose_array_;
@@ -290,6 +298,14 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
         const std::vector<local_planner::MppiControl> & controls,
         const local_planner::MppiObstacleSnapshot & obstacle_snapshot,
         bool check_every_obstacle_point = false) const;
+      // Distance-parameterized continuation of one terminal control from the
+      // given pose. Collision-only and stopped at first contact.
+      // first_block_m receives the arc length of that contact, or -1.
+      std::vector<local_planner::MppiTrajectoryPoint> buildMppiDistanceProbe(
+        const geometry_msgs::msg::Pose & terminal_pose,
+        const local_planner::MppiControl & terminal,
+        const local_planner::MppiObstacleSnapshot & obstacle_snapshot,
+        double * first_block_m) const;
       local_planner::MppiCriticData buildMppiCriticData(
         const std::vector<local_planner::MppiCandidate> & candidates,
         const local_planner::MppiObstacleSnapshot & obstacle_snapshot) const;
