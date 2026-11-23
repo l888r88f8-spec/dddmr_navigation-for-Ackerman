@@ -125,6 +125,59 @@ MppiObstacleSnapshot makeMppiObstacleSnapshot(
   return makeMppiObstacleSnapshot(obstacles, true);
 }
 
+bool exportMppiObstacleBvh(
+  const MppiObstacleSnapshot & snapshot,
+  MppiObstacleBvhExport * output,
+  std::string * error)
+{
+  if(error != nullptr){
+    error->clear();
+  }
+  if(output == nullptr){
+    if(error != nullptr){
+      *error = "BVH export requires a non-null output";
+    }
+    return false;
+  }
+  *output = MppiObstacleBvhExport{};
+  if(!snapshot.obstacle_index){
+    if(error != nullptr){
+      *error = "snapshot has no obstacle spatial index";
+    }
+    return false;
+  }
+  const auto & index = *snapshot.obstacle_index;
+  output->nodes.reserve(index.nodes.size());
+  for(const auto & node : index.nodes){
+    if(node.begin > node.end ||
+       node.end > index.point_indices.size() ||
+       node.begin > std::numeric_limits<std::uint32_t>::max() ||
+       node.end > std::numeric_limits<std::uint32_t>::max())
+    {
+      *output = MppiObstacleBvhExport{};
+      if(error != nullptr){
+        *error = "BVH node range is not representable in the flat export";
+      }
+      return false;
+    }
+    MppiObstacleBvhNode flat;
+    for(std::size_t axis = 0; axis < 3; ++axis){
+      flat.minimum[axis] = node.minimum[axis];
+      flat.maximum[axis] = node.maximum[axis];
+    }
+    flat.begin = static_cast<std::uint32_t>(node.begin);
+    flat.end = static_cast<std::uint32_t>(node.end);
+    flat.left = node.left;
+    flat.right = node.right;
+    output->nodes.push_back(flat);
+  }
+  output->point_indices.reserve(index.point_indices.size());
+  for(const int point_index : index.point_indices){
+    output->point_indices.push_back(static_cast<std::int32_t>(point_index));
+  }
+  return true;
+}
+
 bool mppiObstacleSnapshotHasPointWithin(
   const MppiObstacleSnapshot & snapshot,
   const pcl::PointXYZI & centre,

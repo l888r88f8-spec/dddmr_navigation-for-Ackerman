@@ -128,7 +128,7 @@ class MultiLayerSpinningLidar: public Sensor{
     void cbMap(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
     
     /*In observation area testing*/
-    bool isinLidarObservation(pcl::PointXYZ& pc);
+    bool isinLidarObservation(pcl::PointXYZ& pc, const Eigen::Affine3d & body_from_global);
     
     /*Get pc on the line equation of two points*/
     void getCastingPointCloud(pcl::PointXYZ& cluster_center, pcl::PointCloud<pcl::PointXYZI>& pc_for_check);

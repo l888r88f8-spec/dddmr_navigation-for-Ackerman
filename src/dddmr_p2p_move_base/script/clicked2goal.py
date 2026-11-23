@@ -2,13 +2,13 @@
 
 import rclpy
 from rclpy.action import ActionClient
-from rclpy.node import Node
 from dddmr_sys_core.action import PToPMoveBase
 from geometry_msgs.msg import PoseStamped, PointStamped
-from rclpy.executors import MultiThreadedExecutor
-from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
-from rclpy.node import Node
-import time
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.parameter import Parameter
+
+
 class Nav2dGoalSub():
     
     def __init__(self, node, m_callback_group):
@@ -55,31 +55,29 @@ class Nav2dGoalSub():
         self.node_.get_logger().info('Goal accepted :)')
 
 def main(args=None):
-
     rclpy.init(args=args)
+    # The relay forwards goal stamps as received and does not read the ROS clock.
+    node = rclpy.create_node(
+        'clicked2p2p',
+        parameter_overrides=[Parameter('use_sim_time', value=False)],
+    )
+    goal_sub = Nav2dGoalSub(node, MutuallyExclusiveCallbackGroup())
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
 
-    action_server_group = MutuallyExclusiveCallbackGroup()
-    action_client_group = MutuallyExclusiveCallbackGroup()
-
-    node_ = rclpy.create_node('clicked2p2p')
-    
-
-    Nav2d_Goal_Sub = Nav2dGoalSub(node_, action_server_group)
-
-    executor = MultiThreadedExecutor()
-    executor.add_node(node_)
-    
-    
-
-    while rclpy.ok():
-        
-        if(Nav2d_Goal_Sub.nav2d_goal):
-            Nav2d_Goal_Sub.send_goal()
-            Nav2d_Goal_Sub.nav2d_goal = []
-
-        rclpy.spin_once(node_, timeout_sec=1.0)
-
-    
+    try:
+        while rclpy.ok():
+            # Keep the node registered and block until work is ready.
+            executor.spin_once()
+            if goal_sub.nav2d_goal:
+                goal_sub.send_goal()
+                goal_sub.nav2d_goal = []
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        executor.shutdown()
+        node.destroy_node()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

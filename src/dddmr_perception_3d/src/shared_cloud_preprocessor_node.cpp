@@ -48,7 +48,7 @@ public:
     // wait always expires and the whole scan is lost.
     retry_timer_ = create_wall_timer(
       std::chrono::milliseconds(20), [this]() {deliverPending();});
-    RCLCPP_INFO(get_logger(), "Shared cloud: %s -> %s, XY +/-%.1f m, voxel %.2f m",
+    RCLCPP_INFO(get_logger(), "Shared cloud: %s -> %s, body XY radius <=%.1f m, voxel %.2f m",
       input.c_str(), output.c_str(), config_.window, config_.voxel_size);
   }
 
@@ -114,18 +114,17 @@ private:
     pending_.reset();
   }
 
-  // Evidence, not control: report how far this crop actually reaches around
-  // the vehicle. The configured window is an XY box, so the p95/max range is
-  // the only measurement of what the downstream planners can really see.
+  // Report coverage in map XY. With roll or pitch, these ranges can differ
+  // from the body-XY distances used for cropping.
   void LogCloudCoverage(
     const pcl::PointCloud<pcl::PointXYZ> & cloud,
-    const Eigen::Vector3d & robot)
+    const Eigen::Vector3d & robot_global)
   {
     if (cloud.empty()) {return;}
     std::vector<double> ranges;
     ranges.reserve(cloud.size());
     for (const auto & point : cloud) {
-      ranges.push_back(std::hypot(point.x - robot.x(), point.y - robot.y()));
+      ranges.push_back(std::hypot(point.x - robot_global.x(), point.y - robot_global.y()));
     }
     const std::size_t mid = ranges.size() / 2;
     const std::size_t high = std::min(ranges.size() - 1, ranges.size() * 95 / 100);
@@ -137,7 +136,7 @@ private:
     RCLCPP_INFO_THROTTLE(
       get_logger(), *get_clock(), 5000,
       "Shared cloud coverage: points=%zu range_p50=%.2f m range_p95=%.2f m "
-      "range_max=%.2f m window=%.1f m",
+      "range_max=%.2f m body_radius=%.1f m",
       cloud.size(), p50, p95, farthest, config_.window);
   }
 

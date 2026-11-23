@@ -2,6 +2,7 @@
 #define PERCEPTION_3D_CLOUD_PREPROCESSOR_H_
 
 #include <Eigen/Geometry>
+#include <cmath>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <rclcpp/time.hpp>
@@ -9,6 +10,13 @@
 
 namespace perception_3d
 {
+
+// True for finite points inside the inclusive vehicle-body XY radius.
+inline bool IsWithinXYRadius(double x, double y, double radius)
+{
+  return std::isfinite(x) && std::isfinite(y) && std::isfinite(radius) &&
+         radius >= 0.0 && x * x + y * y <= radius * radius;
+}
 
 struct CloudPreprocessorConfig
 {
@@ -18,7 +26,8 @@ struct CloudPreprocessorConfig
   double voxel_size = 0.1;
 };
 
-// Crop and voxelize in body coordinates, then publish stable world coordinates.
+// Crop to a body-XY circle, filter height, and voxelize in body coordinates,
+// then publish stable world coordinates.
 pcl::PointCloud<pcl::PointXYZ> PreprocessCloud(
   const pcl::PointCloud<pcl::PointXYZ> & input,
   const Eigen::Affine3d & sensor_to_body,

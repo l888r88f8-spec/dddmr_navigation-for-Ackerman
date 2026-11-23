@@ -109,7 +109,7 @@ def generate_launch_description():
                 {
                     'map_dir': PathJoinSubstitution([map_path, 'GlobalMap.pcd']),
                     'ground_dir': PathJoinSubstitution([map_path, 'GroundMap.pcd']),
-                    'ground_down_sample': 0.0,
+                    'ground_down_sample': 0.2,
                     'use_sim_time': use_sim,
                 },
             ],

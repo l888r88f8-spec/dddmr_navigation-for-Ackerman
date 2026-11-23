@@ -18,7 +18,7 @@ pcl_publisher:
     ground_translate_z: 0.0                                        # 地面点云沿 Z 轴平移（m）。
 
     map_down_sample: 0.3                                           # 完整地图降采样（m）；0 表示不降采样。
-    ground_down_sample: 0.0                                        # 地面输入降采样体素尺寸（m）；0 保留原始密度。
+    ground_down_sample: 0.2                                        # 地面输入降采样体素尺寸（m）；0 保留原始密度。
 
 # 仅显示用的静态 TF 辅助节点；launch 将其重命名为 map2baselink。
 # 固定位姿由 launch 的 Node.arguments 提供（x=3.0,y=0.1,z=-0.5,rpy=0）。

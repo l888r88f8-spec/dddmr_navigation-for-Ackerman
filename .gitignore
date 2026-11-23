@@ -1,3 +1,4 @@
+# Local documentation, including implementation plans.
 docs/
 log/
 benchmarks/
@@ -33,3 +34,9 @@ htmlcov/
 # Local test directories (existing tracked files remain tracked)
 **/test/
 **/tests/
+
+# Local CUDA validation outputs.
+.phase1_build/
+.phase1_install/
+/src/dddmr_local_planner/local_planner/CUDA_MPPI.md
+/src/dddmr_local_planner/local_planner/src/mppi_cuda_benchmark.cpp

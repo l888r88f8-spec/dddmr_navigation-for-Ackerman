@@ -6,11 +6,28 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <random>
+#include <string>
 #include <vector>
 
 namespace local_planner
 {
+
+class MppiCudaBackend;
+
+enum class MppiComputeBackend : int
+{
+  Cpu = 0,
+  Cuda = 1
+};
+
+const char * toString(MppiComputeBackend backend);
+
+// Strict, case-sensitive parameter parser: only "cpu" and "cuda" are accepted.
+// Unknown values must be rejected by callers instead of silently selecting CPU.
+bool parseMppiComputeBackend(
+  const std::string & value, MppiComputeBackend & backend);
 
 struct MppiControl
 {
@@ -61,6 +78,11 @@ struct MppiConfig
   double max_steer = 0.3270520925102273;  // HunterSEParams virtual central angle (22 deg inner wheel)
   bool shift_control_sequence = true;
   bool regenerate_noises = false;
+  // Cpu keeps the historical in-process path. Cuda executes candidate
+  // generation and the selected weighted update on the GPU and fails closed
+  // with backend_error when no usable device exists; it never silently falls
+  // back to the CPU implementation.
+  MppiComputeBackend compute_backend = MppiComputeBackend::Cpu;
   std::uint32_t seed = 7;
 };
 
@@ -157,6 +179,8 @@ double mppiGoalApproachSpeedCap(
 struct MppiResult
 {
   bool has_valid_control = false;
+  // Non-empty only when an explicitly requested backend could not execute.
+  std::string backend_error;
   MppiControl command;
   double best_cost = std::numeric_limits<double>::infinity();
   std::size_t best_sample_index = 0;
@@ -207,6 +231,7 @@ public:
 
   MppiController();
   explicit MppiController(const MppiConfig & config);
+  ~MppiController();
 
   void setConfig(const MppiConfig & config);
   const MppiConfig & config() const;
@@ -260,11 +285,15 @@ private:
   };
 
   MppiConfig config_;
+  std::unique_ptr<MppiCudaBackend> cuda_backend_;
+  bool cuda_backend_ready_ = false;
+  std::string cuda_backend_unavailable_reason_;
   RecoveryFunction recovery_function_;
   std::vector<MppiControl> control_sequence_;
   std::array<MppiControl, 4> control_history_{};
   std::vector<std::vector<MppiControl>> noise_;
   std::mt19937 generator_;
+  std::uint64_t cuda_noise_generation_ = 0;
   bool use_debug_noise_for_test_ = false;
   MppiBypassSide latched_bypass_side_ = MppiBypassSide::Neutral;
   std::size_t latched_side_infeasible_cycles_ = 0;
@@ -350,7 +379,8 @@ private:
     std::size_t & side_infeasible_cycles,
     std::size_t & side_quality_advantage_cycles,
     MppiAvoidanceStage & avoidance_stage,
-    bool allow_side_transition);
+    bool allow_side_transition,
+    std::string & backend_error);
   void smoothControlSequence(const MppiControl & measured_speed);
   void updateControlHistory(const MppiControl & command);
   void shiftControlSequence();

@@ -4,6 +4,7 @@
 #include <pcl/filters/passthrough.h>
 #include <pcl/filters/voxel_grid.h>
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -33,13 +34,16 @@ pcl::PointCloud<pcl::PointXYZ> PreprocessCloud(
   body->is_dense = true;
   if (body->empty()) {return *body;}
   pcl::transformPointCloud(*body, *body, sensor_to_body);
+  body->erase(
+    std::remove_if(
+      body->begin(), body->end(),
+      [&config](const pcl::PointXYZ & point) {
+        return !IsWithinXYRadius(point.x, point.y, config.window);
+      }),
+    body->end());
+  if (body->empty()) {return *body;}
   pcl::PassThrough<pcl::PointXYZ> pass;
   pass.setInputCloud(body);
-  pass.setFilterFieldName("x");
-  pass.setFilterLimits(-config.window, config.window);
-  pass.filter(*body);
-  pass.setFilterFieldName("y");
-  pass.filter(*body);
   pass.setFilterFieldName("z");
   pass.setFilterLimits(config.min_height, config.max_height);
   pass.filter(*body);

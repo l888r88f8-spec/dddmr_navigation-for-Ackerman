@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 
+#include "dddmr_local_map/snapshot_export.hpp"
 #include "dddmr_local_map/types.hpp"
 #include "dddmr_local_map/voxel_map.hpp"
 
@@ -167,6 +168,18 @@ class TerrainModel {
   std::size_t patchCellCount(int patch_id) const;
   int patchAtColumn(double x, double y, double near_z) const;
   const Validation& buildStatus() const;
+
+  // Returns a self-contained, flat, CUDA-neutral copy of everything needed to
+  // reproduce terrain queries for this immutable snapshot: raw voxel cells in
+  // circular-buffer order, the build-time candidates and patch planes, the
+  // candidate/obstacle column CSR, observed bits, config/geometry and the
+  // snapshot stamp/version. Geometry stays double; nothing is resampled.
+  //
+  // The result owns all of its storage. Publishing a newer map snapshot or
+  // destroying this model cannot mutate an already returned export, and no
+  // writable reference to internal state is exposed. An invalid or null model
+  // yields valid == false with empty arrays and a non-empty error.
+  TerrainSnapshotExport exportSnapshot() const;
 
  private:
   struct Impl;

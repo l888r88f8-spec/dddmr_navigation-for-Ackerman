@@ -113,7 +113,7 @@ grid_global_planner:
         max_region_points: 768                                     # 容量：区域最多点数。
         max_layers_per_cell: 2                                     # 容量：每格最多层数。
         max_candidate_seeds: 256                                   # 容量：区域来源格数量上限。
-        max_support_refs_per_cell: 24                              # 容量：每格支撑引用上限。
+        max_support_refs_per_cell: 24                             # 容量：每格支撑引用上限，覆盖 hesai_indoor 的原始地面点密度。
         max_inferred_cells: 2000000                                # 容量：推断格数上限。
 
       # 离线测量证据不设点数/patch/引用/单 patch 点数容量上限；仅保留真实

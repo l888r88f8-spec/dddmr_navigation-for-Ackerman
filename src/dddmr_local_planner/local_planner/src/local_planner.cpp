@@ -38,6 +38,7 @@
 #include <limits>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <utility>
 #include <string>
 #include <utility>
@@ -45,6 +46,18 @@
 namespace local_planner {
 namespace
 {
+// Thrown from an MPPI score callback when an explicitly selected CUDA
+// critic/rollout path cannot execute. computeMppi* catches it around
+// optimizeBatch and takes the existing fail-closed stop/reset path. It must
+// never be swallowed into an empty candidate batch, because that would let the
+// controller recover onto stale CPU-scored/control state.
+class MppiCudaScoringError : public std::runtime_error
+{
+public:
+  explicit MppiCudaScoringError(const std::string & what)
+  : std::runtime_error(what) {}
+};
+
 std::string normalizeControllerBackend(const std::string & backend)
 {
   if(backend == "regulated_pure_pursuit" || backend == "rpp"){
@@ -246,7 +259,7 @@ void Local_Planner::initial(
   {
     RCLCPP_ERROR(
       this->get_logger().get_child(name_),
-      "invalid %s '%s'; exact accepted values are 'legacy_points' and 'local_map'",
+      "invalid %s '%s'; exact accepted values are 'legacy_points', 'local_map' and 'tilted_plane_2d'",
       mppiEnvironmentBackendParameterName(),
       mppi_environment_backend_name_.c_str());
     mppi_local_map_init_error_ =
@@ -460,6 +473,7 @@ void Local_Planner::initial(
   declare_parameter("mppi.max_steer", rclcpp::ParameterValue(0.3270520925102273));
   declare_parameter("mppi.seed", rclcpp::ParameterValue(7));
   declare_parameter("mppi.regenerate_noises", rclcpp::ParameterValue(false));
+  declare_parameter("mppi.compute_backend", rclcpp::ParameterValue("cpu"));
   declare_parameter("mppi.use_perception_blocked_preemption", rclcpp::ParameterValue(false));
   declare_parameter("mppi.avoidance_geometry_enabled", rclcpp::ParameterValue(true));
   declare_parameter("mppi.preferred_side_min_offset", rclcpp::ParameterValue(0.15));
@@ -551,6 +565,17 @@ void Local_Planner::initial(
     std::max<int64_t>(0, this->get_parameter("mppi.seed").as_int()));
   mppi_config.regenerate_noises =
     this->get_parameter("mppi.regenerate_noises").as_bool();
+  const std::string compute_backend_value =
+    this->get_parameter("mppi.compute_backend").as_string();
+  if(!parseMppiComputeBackend(compute_backend_value, mppi_config.compute_backend)){
+    RCLCPP_ERROR(
+      this->get_logger().get_child(name_),
+      "mppi.compute_backend='%s' is invalid; expected exactly 'cpu' or 'cuda'",
+      compute_backend_value.c_str());
+    throw std::invalid_argument(
+      "mppi.compute_backend must be exactly 'cpu' or 'cuda', got '" +
+      compute_backend_value + "'");
+  }
   mppi_use_perception_blocked_preemption_ =
     this->get_parameter("mppi.use_perception_blocked_preemption").as_bool();
   mppi_bypass_geometry_enabled_ =
@@ -782,6 +807,30 @@ void Local_Planner::initial(
     }
   }
   
+  // The tilted-plane 2-D environment is strictly opt-in and needs only the
+  // configured body envelope. A broken envelope must fail the mode at startup:
+  // scoring with a degenerate 2-D body would silently certify every candidate.
+  if(isMppiTiltedPlaneBackendSelected()){
+    std::string envelope_error;
+    if(!validateMppiPlanarBodyEnvelope(robot_cuboid_vertices_, &envelope_error)){
+      mppi_tilted_plane_init_error_ =
+        "invalid tilted_plane_2d body envelope: " + envelope_error;
+    }
+    if(!mppi_tilted_plane_init_error_.empty()){
+      RCLCPP_ERROR(
+        this->get_logger().get_child(name_),
+        "MPPI tilted-plane backend unavailable, commands will be stopped: %s",
+        mppi_tilted_plane_init_error_.c_str());
+    }
+    else{
+      RCLCPP_INFO(
+        this->get_logger().get_child(name_),
+        "MPPI tilted-plane 2D backend enabled: obstacle band z=[%.2f, %.2f] m in the frozen base_link plane, compute_backend=%s",
+        kMppiPlanarMinObstacleZ, kMppiPlanarMaxObstacleZ,
+        toString(mppi_controller_.config().compute_backend));
+    }
+  }
+
   const auto debug_path_qos =
     rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable();
   pub_robot_cuboid_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("robot_cuboid", 1);  
@@ -889,6 +938,108 @@ bool Local_Planner::isMppiLocalMapBackendSelected() const
   return controller_backend_ == "mppi" &&
          mppi_environment_backend_ == MppiEnvironmentBackend::kLocalMap &&
          mppi_local_map_init_error_.empty();
+}
+
+bool Local_Planner::isMppiTiltedPlaneBackendSelected() const
+{
+  return controller_backend_ == "mppi" &&
+         mppi_environment_backend_ == MppiEnvironmentBackend::kTiltedPlane2D;
+}
+
+bool Local_Planner::composeMppiTiltedPlaneScene(
+  const ControllerContext & context,
+  MppiPlanarScene * scene,
+  std::string * reason) const
+{
+  if(reason != nullptr){
+    reason->clear();
+  }
+  if(scene == nullptr){
+    if(reason != nullptr){
+      *reason = "tilted-plane scene output is null";
+    }
+    return false;
+  }
+  *scene = MppiPlanarScene{};
+  if(!context.aggregate_observation){
+    // prepareControllerContext already mapped a missing/stale perception
+    // snapshot onto its own state; reaching here means the bundle is unusable.
+    if(reason != nullptr){
+      *reason = "tilted-plane backend has no obstacle snapshot";
+    }
+    return false;
+  }
+
+  // trans_gbl2b_ is the map<-base_link transform that prepared this control
+  // cycle. Freezing it here (and only here) is what makes every candidate, the
+  // final check and the published poses share one plane.
+  const auto & translation = trans_gbl2b_.transform.translation;
+  const auto & rotation = trans_gbl2b_.transform.rotation;
+  Eigen::Isometry3d planner_to_base = Eigen::Isometry3d::Identity();
+  planner_to_base.translation() =
+    Eigen::Vector3d(translation.x, translation.y, translation.z);
+  const Eigen::Quaterniond orientation(
+    rotation.w, rotation.x, rotation.y, rotation.z);
+  if(!orientation.coeffs().allFinite() || orientation.norm() < 1e-9){
+    if(reason != nullptr){
+      *reason = "tilted-plane base orientation is invalid";
+    }
+    return false;
+  }
+  planner_to_base.linear() = orientation.normalized().toRotationMatrix();
+
+  const auto frame = makeMppiPlanarFrame(planner_to_base);
+  if(!frame.valid){
+    if(reason != nullptr){
+      *reason = "tilted-plane frozen transform is not a finite rigid transform";
+    }
+    return false;
+  }
+  if(!validateMppiPlanarBodyEnvelope(robot_cuboid_vertices_, reason)){
+    return false;
+  }
+
+  if(!buildMppiTiltedPlaneScene(
+      *context.aggregate_observation,
+      prune_plan_.poses,
+      robot_cuboid_vertices_,
+      frame,
+      MppiPlanarObstacleGridConfig{},
+      scene,
+      reason))
+  {
+    return false;
+  }
+  if(mppi_controller_.config().compute_backend == MppiComputeBackend::Cuda){
+    const auto started = std::chrono::steady_clock::now();
+    buildMppiPlanarDistanceField(
+      scene->grid, mppi_critic_manager_.config().obstacles.inflation_radius);
+    scene->distance_field_build_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
+  }
+  if(scene->grid.point_count > 0){
+    const double collision_margin =
+      mppi_critic_manager_.config().obstacles.collision_margin_distance;
+    auto & counts = scene->path_query_counts;
+    for(auto & point : scene->path){
+      const auto query = queryMppiPlanarObstacleGrid(
+        scene->grid, scene->body, point.x, point.y, point.yaw, collision_margin);
+      counts.collision_cell_checks += query.collision_cell_checks;
+      counts.collision_point_checks += query.collision_point_checks;
+      counts.clearance_cell_checks += query.clearance_cell_checks;
+      counts.clearance_point_checks += query.clearance_point_checks;
+      point.obstacle_free = query.evaluated && !query.in_collision &&
+        (!std::isfinite(query.clearance) || query.clearance >= collision_margin);
+      if(!point.obstacle_free){
+        ++scene->blocked_path_points;
+      }
+    }
+  }
+  // A fresh identity per successfully composed cycle. The CUDA planar upload
+  // cache keys on this, so an attitude-only change still refreshes the device
+  // grid while repeated scoring/retries within one cycle reuse it.
+  scene->identity = ++mppi_tilted_plane_scene_sequence_;
+  return true;
 }
 
 nav_msgs::msg::Path Local_Planner::buildPathFromPlan(
@@ -1208,40 +1359,10 @@ double Local_Planner::getMaxAckermannCurvature() const
   return std::tan(rpp_max_steer_) / std::max(rpp_wheelbase_, 1e-6);
 }
 
-pcl::PointCloud<pcl::PointXYZ> Local_Planner::transformRobotCuboid(
-  const geometry_msgs::msg::PoseStamped & pose) const
+pcl::PointCloud<pcl::PointXYZ> Local_Planner::transformCuboidVertices(
+  const geometry_msgs::msg::PoseStamped & pose,
+  const std::vector<pcl::PointXYZ> & vertices) const
 {
-  // The local-map backend scores the configured rigid-body AABB
-  // (geometry.body_min/body_max), not the legacy visualization cuboid. Render
-  // the same 8 corners in the same order so a pose shows the exact envelope
-  // that terrain/model collision used. Legacy mode keeps its vertices
-  // untouched.
-  std::vector<pcl::PointXYZ> vertices;
-  if(isMppiLocalMapBackendSelected()){
-    const auto & min = mppi_local_map_config_.geometry.body_min;
-    const auto & max = mppi_local_map_config_.geometry.body_max;
-    const auto corner = [](double x, double y, double z){
-      pcl::PointXYZ point;
-      point.x = x;
-      point.y = y;
-      point.z = z;
-      return point;
-    };
-    // blb, brb, blt, flb, brt, frt, flt, frb (front=+x, left=+y, top=+z).
-    vertices = {
-      corner(min.x(), max.y(), min.z()),
-      corner(min.x(), min.y(), min.z()),
-      corner(min.x(), max.y(), max.z()),
-      corner(max.x(), max.y(), min.z()),
-      corner(min.x(), min.y(), max.z()),
-      corner(max.x(), min.y(), max.z()),
-      corner(max.x(), max.y(), max.z()),
-      corner(max.x(), min.y(), min.z())};
-  }
-  else{
-    vertices = robot_cuboid_vertices_;
-  }
-
   pcl::PointCloud<pcl::PointXYZ> cuboid;
   cuboid.reserve(vertices.size());
 
@@ -1262,6 +1383,39 @@ pcl::PointCloud<pcl::PointXYZ> Local_Planner::transformRobotCuboid(
   }
 
   return cuboid;
+}
+
+pcl::PointCloud<pcl::PointXYZ> Local_Planner::transformRobotCuboid(
+  const geometry_msgs::msg::PoseStamped & pose) const
+{
+  // The local-map backend scores the configured rigid-body AABB
+  // (geometry.body_min/body_max), not the legacy visualization cuboid. Render
+  // the same 8 corners in the same order so a pose shows the exact envelope
+  // that terrain/model collision used. Legacy and tilted-plane modes keep
+  // their configured cuboid.* vertices untouched.
+  if(isMppiLocalMapBackendSelected()){
+    const auto & min = mppi_local_map_config_.geometry.body_min;
+    const auto & max = mppi_local_map_config_.geometry.body_max;
+    const auto corner = [](double x, double y, double z){
+      pcl::PointXYZ point;
+      point.x = x;
+      point.y = y;
+      point.z = z;
+      return point;
+    };
+    // blb, brb, blt, flb, brt, frt, flt, frb (front=+x, left=+y, top=+z).
+    const std::vector<pcl::PointXYZ> vertices = {
+      corner(min.x(), max.y(), min.z()),
+      corner(min.x(), min.y(), min.z()),
+      corner(min.x(), max.y(), max.z()),
+      corner(max.x(), max.y(), min.z()),
+      corner(min.x(), min.y(), max.z()),
+      corner(max.x(), min.y(), max.z()),
+      corner(max.x(), max.y(), max.z()),
+      corner(max.x(), min.y(), min.z())};
+    return transformCuboidVertices(pose, vertices);
+  }
+  return transformCuboidVertices(pose, robot_cuboid_vertices_);
 }
 
 base_trajectory::cuboid_min_max_t Local_Planner::computeCuboidMinMax(
@@ -1334,7 +1488,8 @@ base_trajectory::Trajectory Local_Planner::buildPredictedTrajectory(
 }
 
 base_trajectory::Trajectory Local_Planner::buildPredictedTrajectoryFromMppiControls(
-  const std::vector<MppiControl> & controls) const
+  const std::vector<MppiControl> & controls,
+  const MppiPlanarScene * planar_scene) const
 {
   const double time_step = std::max(0.02, mppi_controller_.config().model_dt);
   const unsigned int steps = static_cast<unsigned int>(std::max<std::size_t>(1, controls.size()));
@@ -1349,10 +1504,13 @@ base_trajectory::Trajectory Local_Planner::buildPredictedTrajectoryFromMppiContr
     steps);
   trajectory.cost_ = 0.0;
 
-  double x = trans_gbl2b_.transform.translation.x;
-  double y = trans_gbl2b_.transform.translation.y;
-  double z = trans_gbl2b_.transform.translation.z;
-  double yaw = getRobotYaw();
+  // In tilted-plane mode the rollout starts at the plane origin and every
+  // published pose is that plane point plus the frozen full attitude.
+  const bool planar = planar_scene != nullptr && planar_scene->frame.valid;
+  double x = planar ? 0.0 : trans_gbl2b_.transform.translation.x;
+  double y = planar ? 0.0 : trans_gbl2b_.transform.translation.y;
+  double z = planar ? 0.0 : trans_gbl2b_.transform.translation.z;
+  double yaw = planar ? 0.0 : getRobotYaw();
 
   for(const auto & control : controls){
     x += control.vx * std::cos(yaw + control.wz * time_step * 0.5) * time_step;
@@ -1362,13 +1520,28 @@ base_trajectory::Trajectory Local_Planner::buildPredictedTrajectoryFromMppiContr
     geometry_msgs::msg::PoseStamped pose;
     pose.header.frame_id = global_frame_;
     pose.header.stamp = clock_->now();
-    pose.pose.position.x = x;
-    pose.pose.position.y = y;
-    pose.pose.position.z = z;
-    tf2::Quaternion q;
-    q.setRPY(0.0, 0.0, yaw);
-    q.normalize();
-    pose.pose.orientation = tf2::toMsg(q);
+    if(planar){
+      const Eigen::Vector3d position =
+        mppiPlanarPointToPlanner(planar_scene->frame, x, y, 0.0);
+      const Eigen::Quaterniond orientation =
+        mppiPlanarYawToPlanner(planar_scene->frame, yaw);
+      pose.pose.position.x = position.x();
+      pose.pose.position.y = position.y();
+      pose.pose.position.z = position.z();
+      pose.pose.orientation.x = orientation.x();
+      pose.pose.orientation.y = orientation.y();
+      pose.pose.orientation.z = orientation.z();
+      pose.pose.orientation.w = orientation.w();
+    }
+    else{
+      pose.pose.position.x = x;
+      pose.pose.position.y = y;
+      pose.pose.position.z = z;
+      tf2::Quaternion q;
+      q.setRPY(0.0, 0.0, yaw);
+      q.normalize();
+      pose.pose.orientation = tf2::toMsg(q);
+    }
 
     auto cuboid = transformRobotCuboid(pose);
     trajectory.addPoint(pose, cuboid, computeCuboidMinMax(cuboid));
@@ -1380,18 +1553,22 @@ base_trajectory::Trajectory Local_Planner::buildPredictedTrajectoryFromMppiContr
 MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
   const std::vector<MppiControl> & controls,
   const MppiObstacleSnapshot & obstacle_snapshot,
-  const bool check_every_obstacle_point) const
+  const bool collision_only,
+  const MppiPlanarScene * planar_scene) const
 {
   MppiScoredTrajectory trajectory;
   trajectory.controls = controls;
   trajectory.points.reserve(controls.size());
 
   const double time_step = std::max(0.02, mppi_controller_.config().model_dt);
-  double x = trans_gbl2b_.transform.translation.x;
-  double y = trans_gbl2b_.transform.translation.y;
-  double z = trans_gbl2b_.transform.translation.z;
-  double yaw = getRobotYaw();
-  const std::size_t obstacle_point_step = check_every_obstacle_point ? 1 :
+  // Tilted-plane mode rolls out from the plane origin; legacy mode keeps the
+  // map-frame base pose it always used.
+  const bool planar = planar_scene != nullptr && planar_scene->frame.valid;
+  double x = planar ? 0.0 : trans_gbl2b_.transform.translation.x;
+  double y = planar ? 0.0 : trans_gbl2b_.transform.translation.y;
+  double z = planar ? 0.0 : trans_gbl2b_.transform.translation.z;
+  double yaw = planar ? 0.0 : getRobotYaw();
+  const std::size_t obstacle_point_step =
     std::max<std::size_t>(1, mppi_critic_manager_.config().obstacles.trajectory_point_step);
   std::size_t point_index = 0;
   bool time_channel_collided = false;
@@ -1402,6 +1579,39 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
     x += control.vx * std::cos(yaw + control.wz * time_step * 0.5) * time_step;
     y += control.vx * std::sin(yaw + control.wz * time_step * 0.5) * time_step;
     yaw = angles::normalize_angle(yaw + control.wz * time_step);
+
+    const bool evaluate_clearance = !collision_only &&
+      (point_index % obstacle_point_step == 0 || point_index + 1 == controls.size());
+
+    if(planar){
+      // One grid query serves the whole point: collision is always evaluated;
+      // a non-positive radius disables the clearance refinement on the points
+      // skipped by trajectory_point_step.
+      const auto query = queryMppiPlanarObstacleGrid(
+        planar_scene->grid, planar_scene->body, x, y, yaw,
+        evaluate_clearance ?
+        mppi_critic_manager_.config().obstacles.inflation_radius : -1.0);
+      if(query.in_collision){
+        time_channel_collided = true;
+      }
+      // The query separates the collision and clearance scans, so each
+      // diagnostic channel reports only the work its own pass performed.
+      trajectory.points.push_back(
+        MppiTrajectoryPoint{
+          x,
+          y,
+          yaw,
+          query.in_collision,
+          evaluate_clearance ? query.clearance :
+          std::numeric_limits<double>::infinity(),
+          query.evaluated,
+          query.collision_cell_checks,
+          query.collision_point_checks,
+          query.clearance_cell_checks,
+          query.clearance_point_checks});
+      ++point_index;
+      continue;
+    }
 
     geometry_msgs::msg::PoseStamped pose;
     pose.header.frame_id = global_frame_;
@@ -1422,8 +1632,6 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
     }
     double obstacle_clearance = std::numeric_limits<double>::infinity();
     MppiObstacleClearanceResult clearance_result;
-    const bool evaluate_clearance =
-      point_index % obstacle_point_step == 0 || point_index + 1 == controls.size();
     if(evaluate_clearance){
       if(collision.in_collision){
         obstacle_clearance = 0.0;
@@ -1462,7 +1670,7 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
   // an arc so a creeping candidate still reaches the obstacle its time
   // rollout never approached. Shared with the debug publisher, which appends
   // the same tail to /debug/best_trajectory.
-  if(!controls.empty() && !time_channel_collided){
+  if(!collision_only && !controls.empty() && !time_channel_collided){
     geometry_msgs::msg::Pose terminal_pose;
     terminal_pose.position.x = x;
     terminal_pose.position.y = y;
@@ -1472,7 +1680,7 @@ MppiScoredTrajectory Local_Planner::buildMppiScoredTrajectory(
     terminal_pose.orientation = tf2::toMsg(terminal_q);
     trajectory.probe_points = buildMppiDistanceProbe(
       terminal_pose, controls.back(), obstacle_snapshot,
-      &trajectory.probe_first_block_m);
+      &trajectory.probe_first_block_m, planar_scene);
   }
 
   return trajectory;
@@ -1482,16 +1690,19 @@ std::vector<MppiTrajectoryPoint> Local_Planner::buildMppiDistanceProbe(
   const geometry_msgs::msg::Pose & terminal_pose,
   const MppiControl & terminal,
   const MppiObstacleSnapshot & obstacle_snapshot,
-  double * first_block_m) const
+  double * first_block_m,
+  const MppiPlanarScene * planar_scene) const
 {
   std::vector<MppiTrajectoryPoint> probe;
   if(first_block_m != nullptr){
     *first_block_m = -1.0;
   }
+  const bool planar = planar_scene != nullptr && planar_scene->frame.valid;
   const auto & probe_config = mppi_controller_.config();
   if(probe_config.evaluation_distance <= 1e-3 ||
     probe_config.evaluation_step <= 1e-3 ||
-    !obstacle_snapshot.cloud || obstacle_snapshot.cloud->points.empty())
+    (planar ? planar_scene->grid.point_count == 0 :
+    (!obstacle_snapshot.cloud || obstacle_snapshot.cloud->points.empty())))
   {
     return probe;
   }
@@ -1530,31 +1741,44 @@ std::vector<MppiTrajectoryPoint> Local_Planner::buildMppiDistanceProbe(
     }
     yaw = angles::normalize_angle(yaw + dtheta);
 
-    geometry_msgs::msg::PoseStamped probe_pose;
-    probe_pose.header.frame_id = global_frame_;
-    probe_pose.header.stamp = clock_->now();
-    probe_pose.pose.position.x = x;
-    probe_pose.pose.position.y = y;
-    probe_pose.pose.position.z = z;
-    tf2::Quaternion probe_q;
-    probe_q.setRPY(0.0, 0.0, yaw);
-    probe_q.normalize();
-    probe_pose.pose.orientation = tf2::toMsg(probe_q);
-
-    const auto collision = evaluateMppiObstacleCollisionForCuboid(
-      transformRobotCuboid(probe_pose), obstacle_snapshot, &obstacle_ids);
-    probe.push_back(MppiTrajectoryPoint{
-      x,
-      y,
-      yaw,
-      collision.in_collision,
-      std::numeric_limits<double>::infinity(),
-      collision.evaluated,
-      collision.node_checks,
-      collision.point_checks,
-      0,
-      0});
-    if(collision.in_collision){
+    MppiTrajectoryPoint probe_point;
+    probe_point.x = x;
+    probe_point.y = y;
+    probe_point.yaw = yaw;
+    probe_point.obstacle_clearance = std::numeric_limits<double>::infinity();
+    if(planar){
+      // Collision-only: the probe never feeds the repulsion term, so the
+      // clearance refinement is deliberately disabled.
+      const auto query = queryMppiPlanarObstacleGrid(
+        planar_scene->grid, planar_scene->body, x, y, yaw, -1.0);
+      probe_point.in_collision = query.in_collision;
+      probe_point.collision_evaluated = query.evaluated;
+      probe_point.collision_node_checks = query.collision_cell_checks;
+      probe_point.collision_point_checks = query.collision_point_checks;
+    }
+    else{
+      // Only the legacy 3-D path needs a frames-carrying PoseStamped; the
+      // planar branch must never wrap plane coordinates in a global_frame_
+      // header, not even transiently.
+      geometry_msgs::msg::PoseStamped probe_pose;
+      probe_pose.header.frame_id = global_frame_;
+      probe_pose.header.stamp = clock_->now();
+      probe_pose.pose.position.x = x;
+      probe_pose.pose.position.y = y;
+      probe_pose.pose.position.z = z;
+      tf2::Quaternion probe_q;
+      probe_q.setRPY(0.0, 0.0, yaw);
+      probe_q.normalize();
+      probe_pose.pose.orientation = tf2::toMsg(probe_q);
+      const auto collision = evaluateMppiObstacleCollisionForCuboid(
+        transformRobotCuboid(probe_pose), obstacle_snapshot, &obstacle_ids);
+      probe_point.in_collision = collision.in_collision;
+      probe_point.collision_evaluated = collision.evaluated;
+      probe_point.collision_node_checks = collision.node_checks;
+      probe_point.collision_point_checks = collision.point_checks;
+    }
+    probe.push_back(probe_point);
+    if(probe_point.in_collision){
       if(first_block_m != nullptr){
         *first_block_m = arc;
       }
@@ -1566,45 +1790,193 @@ std::vector<MppiTrajectoryPoint> Local_Planner::buildMppiDistanceProbe(
 
 MppiCriticData Local_Planner::buildMppiCriticData(
   const std::vector<MppiCandidate> & candidates,
-  const MppiObstacleSnapshot & obstacle_snapshot) const
+  const MppiObstacleSnapshot & obstacle_snapshot,
+  const MppiPlanarScene * planar_scene,
+  MppiCudaTrajectoryBatchView * device_batch) const
 {
   MppiCriticData data;
+  const bool planar = planar_scene != nullptr && planar_scene->frame.valid;
+  const bool cuda =
+    mppi_controller_.config().compute_backend == MppiComputeBackend::Cuda;
   data.trajectories.reserve(candidates.size());
-  for(const auto & candidate : candidates){
-    auto trajectory = buildMppiScoredTrajectory(candidate.controls, obstacle_snapshot);
-    for(const auto & point : trajectory.points){
-      data.obstacle_collision_node_checks += point.collision_node_checks;
-      data.obstacle_collision_point_checks += point.collision_point_checks;
-      data.obstacle_clearance_node_checks += point.clearance_node_checks;
-      data.obstacle_clearance_point_checks += point.clearance_point_checks;
+  if(cuda){
+    if(!mppi_cuda_obstacles_){
+      mppi_cuda_obstacles_ = makeMppiCudaObstacles();
     }
-    data.trajectories.push_back(std::move(trajectory));
+    std::string reason;
+    if(!mppi_cuda_obstacles_ || !mppi_cuda_obstacles_->available(&reason)){
+      throw MppiCudaScoringError(
+        "CUDA obstacle backend unavailable: " +
+        (reason.empty() ? std::string("unknown reason") : reason));
+    }
+
+    MppiCudaObstacleConfig obstacle_config;
+    const auto & controller_config = mppi_controller_.config();
+    const auto & critic_config = mppi_critic_manager_.config().obstacles;
+    obstacle_config.model_dt = controller_config.model_dt;
+    obstacle_config.trajectory_point_step = critic_config.trajectory_point_step;
+    obstacle_config.inflation_radius = critic_config.inflation_radius;
+    obstacle_config.evaluation_distance = controller_config.evaluation_distance;
+    obstacle_config.evaluation_step = controller_config.evaluation_step;
+    obstacle_config.evaluation_max_points = controller_config.evaluation_max_points;
+    obstacle_config.check_every_obstacle_point = false;
+
+    if(planar){
+      // Upload the 2-D grid once per composed scene. The monotonic scene
+      // identity changes with every control cycle, so a new obstacle cloud or
+      // frozen attitude always forces a fresh upload, while repeated scoring
+      // and retries within the same cycle reuse the device copy. An
+      // unassigned identity (0) is never cached.
+      const bool scene_cached =
+        planar_scene->identity != 0 &&
+        mppi_cuda_planar_scene_identity_ == planar_scene->identity;
+      if(!scene_cached){
+        std::string upload_error;
+        if(!mppi_cuda_obstacles_->uploadPlanar(
+            planar_scene->grid, upload_error))
+        {
+          throw MppiCudaScoringError(
+            "CUDA planar obstacle scene upload failed: " +
+            (upload_error.empty() ? std::string("unknown error") :
+             upload_error));
+        }
+        mppi_cuda_planar_scene_identity_ = planar_scene->identity;
+      }
+      std::vector<MppiScoredTrajectory> trajectories;
+      std::string rollout_error;
+      if(!mppi_cuda_obstacles_->rolloutPlanarBatch(
+          planar_scene->body, candidates, obstacle_config, trajectories,
+          rollout_error, device_batch))
+      {
+        throw MppiCudaScoringError(
+          "CUDA planar obstacle rollout failed: " +
+          (rollout_error.empty() ? std::string("unknown error") :
+           rollout_error));
+      }
+      if(trajectories.size() != candidates.size()){
+        throw MppiCudaScoringError(
+          "CUDA planar obstacle rollout returned " +
+          std::to_string(trajectories.size()) + " trajectories for " +
+          std::to_string(candidates.size()) + " candidates");
+      }
+      for(auto & trajectory : trajectories){
+        for(const auto & point : trajectory.points){
+          data.obstacle_collision_node_checks += point.collision_node_checks;
+          data.obstacle_collision_point_checks += point.collision_point_checks;
+          data.obstacle_clearance_node_checks += point.clearance_node_checks;
+          data.obstacle_clearance_point_checks += point.clearance_point_checks;
+        }
+        data.trajectories.push_back(std::move(trajectory));
+      }
+    }
+    else{
+      // One scene upload per obstacle owner. The cache holds the shared
+      // owners, so a recycled heap address can never be mistaken for the same
+      // scene.
+      if(mppi_cuda_obstacle_scene_cloud_.get() !=
+           obstacle_snapshot.cloud.get() ||
+         mppi_cuda_obstacle_scene_index_.get() !=
+           obstacle_snapshot.obstacle_index.get())
+      {
+        std::string upload_error;
+        if(!mppi_cuda_obstacles_->upload(obstacle_snapshot, upload_error)){
+          throw MppiCudaScoringError(
+            "CUDA obstacle scene upload failed: " +
+            (upload_error.empty() ? std::string("unknown error") : upload_error));
+        }
+        // Keep the owners alive for as long as the device scene is cached.
+        mppi_cuda_obstacle_scene_cloud_ = obstacle_snapshot.cloud;
+        mppi_cuda_obstacle_scene_index_ = obstacle_snapshot.obstacle_index;
+      }
+
+      MppiCudaObstaclePose initial_pose;
+      initial_pose.x = trans_gbl2b_.transform.translation.x;
+      initial_pose.y = trans_gbl2b_.transform.translation.y;
+      initial_pose.z = trans_gbl2b_.transform.translation.z;
+      initial_pose.yaw = getRobotYaw();
+
+      pcl::PointCloud<pcl::PointXYZ> local_cuboid;
+      local_cuboid.reserve(robot_cuboid_vertices_.size());
+      for(const auto & vertex : robot_cuboid_vertices_){
+        local_cuboid.push_back(vertex);
+      }
+      std::vector<MppiScoredTrajectory> trajectories;
+      std::string rollout_error;
+      if(!mppi_cuda_obstacles_->rolloutBatch(
+          initial_pose, local_cuboid, candidates, obstacle_config,
+          trajectories, rollout_error))
+      {
+        throw MppiCudaScoringError(
+          "CUDA obstacle rollout failed: " +
+          (rollout_error.empty() ? std::string("unknown error") : rollout_error));
+      }
+      if(trajectories.size() != candidates.size()){
+        throw MppiCudaScoringError(
+          "CUDA obstacle rollout returned " + std::to_string(trajectories.size()) +
+          " trajectories for " + std::to_string(candidates.size()) + " candidates");
+      }
+      for(auto & trajectory : trajectories){
+        for(const auto & point : trajectory.points){
+          data.obstacle_collision_node_checks += point.collision_node_checks;
+          data.obstacle_collision_point_checks += point.collision_point_checks;
+          data.obstacle_clearance_node_checks += point.clearance_node_checks;
+          data.obstacle_clearance_point_checks += point.clearance_point_checks;
+        }
+        data.trajectories.push_back(std::move(trajectory));
+      }
+    }
+  }
+  else{
+    for(const auto & candidate : candidates){
+      auto trajectory = buildMppiScoredTrajectory(
+        candidate.controls, obstacle_snapshot, false, planar_scene);
+      for(const auto & point : trajectory.points){
+        data.obstacle_collision_node_checks += point.collision_node_checks;
+        data.obstacle_collision_point_checks += point.collision_point_checks;
+        data.obstacle_clearance_node_checks += point.clearance_node_checks;
+        data.obstacle_clearance_point_checks += point.clearance_point_checks;
+      }
+      data.trajectories.push_back(std::move(trajectory));
+    }
   }
 
-  data.path.reserve(prune_plan_.poses.size());
   data.local_path_length = 0.0;
-  for(std::size_t i = 0; i < prune_plan_.poses.size(); ++i){
-    const auto & pose = prune_plan_.poses[i];
-    tf2::Quaternion q;
-    tf2::fromMsg(pose.pose.orientation, q);
-    double roll = 0.0;
-    double pitch = 0.0;
-    double yaw = 0.0;
-    tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
-    MppiPathPoint path_point;
-    path_point.x = pose.pose.position.x;
-    path_point.y = pose.pose.position.y;
-    path_point.yaw = yaw;
-    path_point.z = pose.pose.position.z;
-    data.path.push_back(path_point);
-    if(i > 0){
-      const auto & previous = prune_plan_.poses[i - 1];
-      data.local_path_length += getDistanceBTWPoseStamp(previous, pose);
+  if(planar){
+    // The reference was already projected into the frozen plane, exactly once,
+    // when the cycle scene was built. Arc length, occupancy, lateral offsets
+    // and heading all use that single projection.
+    data.path = planar_scene->path;
+    data.local_path_length = planar_scene->path_length;
+    data.blocked_path_points = planar_scene->blocked_path_points;
+  }
+  else{
+    data.path.reserve(prune_plan_.poses.size());
+    for(std::size_t i = 0; i < prune_plan_.poses.size(); ++i){
+      const auto & pose = prune_plan_.poses[i];
+      tf2::Quaternion q;
+      tf2::fromMsg(pose.pose.orientation, q);
+      double roll = 0.0;
+      double pitch = 0.0;
+      double yaw = 0.0;
+      tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+      MppiPathPoint path_point;
+      path_point.x = pose.pose.position.x;
+      path_point.y = pose.pose.position.y;
+      path_point.yaw = yaw;
+      path_point.z = pose.pose.position.z;
+      data.path.push_back(path_point);
+      if(i > 0){
+        const auto & previous = prune_plan_.poses[i - 1];
+        data.local_path_length += getDistanceBTWPoseStamp(previous, pose);
+      }
     }
   }
 
-  if(obstacle_snapshot.cloud && !obstacle_snapshot.cloud->points.empty() &&
-     !data.path.empty())
+  const double collision_margin =
+    mppi_critic_manager_.config().obstacles.collision_margin_distance;
+  const bool has_path_obstacles = !planar && obstacle_snapshot.cloud &&
+    !obstacle_snapshot.cloud->points.empty();
+  if(has_path_obstacles && !data.path.empty())
   {
     std::vector<int> ids;
     std::vector<float> squared_distances;
@@ -1626,8 +1998,6 @@ MppiCriticData Local_Planner::buildMppiCriticData(
       path_center.x = point.x;
       path_center.y = point.y;
       path_center.z = path_pose.pose.position.z;
-      const double collision_margin =
-        mppi_critic_manager_.config().obstacles.collision_margin_distance;
       MppiObstacleClearanceResult path_clearance_result;
       double path_clearance = 0.0;
       if(!path_collision.in_collision){
@@ -1651,13 +2021,15 @@ MppiCriticData Local_Planner::buildMppiCriticData(
         ++data.blocked_path_points;
       }
     }
+  }
+  if(!data.path.empty()){
     data.path_obstacle_occupancy_ratio =
       static_cast<double>(data.blocked_path_points) / static_cast<double>(data.path.size());
   }
 
-  data.robot_x = trans_gbl2b_.transform.translation.x;
-  data.robot_y = trans_gbl2b_.transform.translation.y;
-  data.robot_yaw = getRobotYaw();
+  data.robot_x = planar ? 0.0 : trans_gbl2b_.transform.translation.x;
+  data.robot_y = planar ? 0.0 : trans_gbl2b_.transform.translation.y;
+  data.robot_yaw = planar ? 0.0 : getRobotYaw();
   const auto robot_path_projection = projectPointOntoMppiPath(
     data.path, data.robot_x, data.robot_y);
   data.robot_path_offset = robot_path_projection.signed_offset;
@@ -1671,11 +2043,21 @@ MppiCriticData Local_Planner::buildMppiCriticData(
   return data;
 }
 
+void Local_Planner::invalidateMppiDirectedRetreat()
+{
+  mppi_directed_retreat_.invalidate();
+  // invalidate() latches braking, so the retreat stays active and the
+  // inactive branch in computeMppiDirectedRetreat() cannot clear the anchor.
+  // Clear it here so the next planar search re-anchors to the current plane.
+  mppi_retreat_anchor_valid_ = false;
+}
+
 MppiResult Local_Planner::computeMppiDirectedRetreat(
   const MppiControl & measured, const std::vector<MppiPathPoint> & path,
   const double runtime_speed_limit,
   const MppiDirectedRetreat::PoseValidator & validator,
-  const std::uint64_t environment_id)
+  const std::uint64_t environment_id,
+  const MppiPlanarScene * planar_scene)
 {
   if(mppi_retreat_route_version_ != route_version_ ||
      mppi_retreat_goal_seq_ != goal_seq_)
@@ -1685,7 +2067,91 @@ MppiResult Local_Planner::computeMppiDirectedRetreat(
     }
     mppi_retreat_route_version_ = route_version_;
     mppi_retreat_goal_seq_ = goal_seq_;
+    mppi_retreat_anchor_valid_ = false;
   }
+
+  if(planar_scene != nullptr && planar_scene->frame.valid){
+    // The search state must survive cycle-to-cycle attitude changes, so it is
+    // kept in a map-anchored frame frozen when the searches starts. Only the
+    // per-cycle query pose is converted into the current B_k plane.
+    const Eigen::Isometry3d & planner_to_base =
+      planar_scene->frame.planner_to_base;
+    if(!mppi_retreat_anchor_valid_){
+      if(mppi_directed_retreat_.active()){
+        // A retained route from an older anchor cannot be reinterpreted.
+        mppi_directed_retreat_.invalidate();
+      }
+      mppi_retreat_anchor_to_planner_ = planner_to_base;
+      mppi_retreat_anchor_valid_ = true;
+    }
+    const MppiPlanarAnchorTransfer anchor_transfer =
+      makeMppiPlanarAnchorTransfer(
+      mppi_retreat_anchor_to_planner_, planar_scene->frame);
+    if(!anchor_transfer.valid){
+      // The anchor was frozen from an already validated plane, so this is a
+      // defensive failure only: drop the retained route rather than search in
+      // a frame that cannot be related to the current plane.
+      mppi_directed_retreat_.invalidate();
+      mppi_retreat_anchor_valid_ = false;
+      RCLCPP_ERROR_THROTTLE(
+        this->get_logger().get_child(name_), *clock_, 2000,
+        "MPPI directed retreat: anchor transfer is invalid; dropping the retained route");
+      return MppiResult{};
+    }
+
+    // The search state lives in the anchor frame: the robot pose is
+    // anchor_from_base, and every path point is transferred with the same
+    // anchor_from_base transform.
+    MppiRetreatPose pose;
+    pose.x = anchor_transfer.anchor_from_base.translation().x();
+    pose.y = anchor_transfer.anchor_from_base.translation().y();
+    pose.z = anchor_transfer.anchor_from_base.translation().z();
+    {
+      const Eigen::Quaterniond anchor_orientation(
+        anchor_transfer.anchor_from_base.linear());
+      tf2::Quaternion orientation(
+        anchor_orientation.x(), anchor_orientation.y(),
+        anchor_orientation.z(), anchor_orientation.w());
+      tf2::Matrix3x3(orientation).getRPY(pose.roll, pose.pitch, pose.yaw);
+    }
+
+    const std::vector<MppiPathPoint> anchored_path =
+      anchor_transfer.planePathToAnchor(path);
+
+    const MppiDirectedRetreat::PoseValidator plane_validator =
+      [&](MppiRetreatPose & anchored_pose) {
+        // anchorPoseToPlane produces B_k coordinates, so the proposal is
+        // tested as a 2-D oriented rectangle exactly like a forward candidate.
+        const Eigen::Vector3d plane_pose = anchor_transfer.anchorPoseToPlane(
+          anchored_pose.x, anchored_pose.y, anchored_pose.yaw);
+        const auto query = queryMppiPlanarObstacleGrid(
+          planar_scene->grid, planar_scene->body,
+          plane_pose.x(), plane_pose.y(), plane_pose.z(), -1.0);
+        return query.evaluated && !query.in_collision;
+      };
+
+    auto result = mppi_directed_retreat_.compute(
+      pose, measured, anchored_path, mppi_controller_.config(),
+      runtime_speed_limit, plane_validator, environment_id);
+    result.reverse_recovery_active = mppi_directed_retreat_.active();
+    if(!result.reverse_recovery_active){
+      // No retained route or search owns the next cycle: re-anchor then.
+      mppi_retreat_anchor_valid_ = false;
+    }
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "MPPI directed retreat: backend=%s, frame=map_anchored, reason=%s, active=%d, reverse=%d, direction=%d, route_points=%zu, validation_calls=%zu, cycle_ms=%.2f, search_restarts=%zu, expansions=%zu, routes_selected=%zu, cmd_vx=%.3f, cmd_wz=%.3f; tilted_plane_2d checks the retained route in the current plane",
+      mppi_environment_backend_name_.c_str(), mppi_directed_retreat_.reason().c_str(),
+      result.reverse_recovery_active ? 1 : 0, result.reverse_motion_active ? 1 : 0,
+      mppi_directed_retreat_.direction(), mppi_directed_retreat_.route().size(),
+      mppi_directed_retreat_.lastValidationCalls(), mppi_directed_retreat_.lastCycleMs(),
+      mppi_directed_retreat_.searchRestartCount(),
+      mppi_directed_retreat_.lastSearchExpansions(),
+      mppi_directed_retreat_.routesSelectedCount(),
+      result.command.vx, result.command.wz);
+    return result;
+  }
+
   tf2::Quaternion orientation;
   tf2::fromMsg(trans_gbl2b_.transform.rotation, orientation);
   MppiRetreatPose pose;
@@ -1969,27 +2435,141 @@ Local_Planner::MppiLocalMapCriticBundle Local_Planner::buildMppiLocalMapCriticDa
   bundle.candidate_status.reserve(candidates.size());
   bundle.candidate_detail.reserve(candidates.size());
 
-  for(const auto & candidate : candidates){
-    const auto rollout = buildMppiLocalMapRollout(cycle, candidate.controls);
-    const auto validation = validateMppiLocalMapRollout(
-      cycle.context, rollout, candidate.controls.size());
-    const bool valid = validation.ok;
-    bundle.candidate_valid.push_back(valid);
-    bundle.candidate_status.push_back(rollout.status);
-    bundle.candidate_detail.push_back(
-      validation.ok ? std::string() : validation.detail);
-
-    if(valid){
-      bundle.data.obstacle_collision_point_checks +=
-        rollout.trajectory.points.size();
-      bundle.data.obstacle_clearance_point_checks +=
-        rollout.trajectory.points.size();
-      bundle.data.trajectories.push_back(rollout.trajectory);
+  if(mppi_controller_.config().compute_backend == MppiComputeBackend::Cuda){
+    if(!mppi_cuda_terrain_){
+      mppi_cuda_terrain_ = makeMppiCudaTerrain();
     }
-    else{
-      MppiScoredTrajectory invalid;
-      invalid.controls = candidate.controls;
-      bundle.data.trajectories.push_back(std::move(invalid));
+    if(!mppi_cuda_local_map_rollout_){
+      mppi_cuda_local_map_rollout_ = makeMppiCudaLocalMapRollout();
+    }
+    std::string terrain_reason;
+    if(!mppi_cuda_terrain_ || !mppi_cuda_terrain_->available()){
+      throw MppiCudaScoringError(
+        "CUDA terrain backend unavailable; local-map rollout has no CPU fallback");
+    }
+    std::string rollout_reason;
+    if(!mppi_cuda_local_map_rollout_ ||
+       !mppi_cuda_local_map_rollout_->available(&rollout_reason))
+    {
+      throw MppiCudaScoringError(
+        "CUDA local-map rollout backend unavailable: " +
+        (rollout_reason.empty() ? std::string("unknown reason") : rollout_reason));
+    }
+    if(cycle.context.snapshot == nullptr || cycle.context.terrain == nullptr){
+      throw MppiCudaScoringError(
+        "pinned local-map cycle has no snapshot/terrain owner");
+    }
+
+    // Upload exactly once per (snapshot owner, terrain owner, generation,
+    // version). A new generation with an unchanged map version still forces a
+    // fresh upload instead of silently reusing an older pinned scene.
+    const std::uint64_t cycle_version = cycle.context.mapVersion();
+    const bool same_scene =
+      mppi_cuda_local_map_scene_snapshot_.get() ==
+        cycle.context.snapshot.get() &&
+      mppi_cuda_local_map_scene_terrain_.get() ==
+        cycle.context.terrain.get() &&
+      mppi_cuda_local_map_scene_generation_ == cycle.generation &&
+      mppi_cuda_local_map_scene_version_ == cycle_version;
+    if(!same_scene){
+      const auto snapshot_export = cycle.context.terrain->exportSnapshot();
+      if(!snapshot_export.valid){
+        throw MppiCudaScoringError(
+          "terrain snapshot export failed: " +
+          (snapshot_export.error.empty() ? std::string("invalid snapshot") :
+           snapshot_export.error));
+      }
+      std::string upload_error;
+      if(!mppi_cuda_terrain_->upload(snapshot_export, &upload_error)){
+        throw MppiCudaScoringError(
+          "CUDA terrain snapshot upload failed: " +
+          (upload_error.empty() ? std::string("unknown error") : upload_error));
+      }
+      if(mppi_cuda_terrain_->snapshotVersion() !=
+         snapshot_export.snapshot_version)
+      {
+        throw MppiCudaScoringError(
+          "CUDA terrain upload version mismatch");
+      }
+      mppi_cuda_local_map_scene_snapshot_ = cycle.context.snapshot;
+      mppi_cuda_local_map_scene_terrain_ = cycle.context.terrain;
+      mppi_cuda_local_map_scene_generation_ = cycle.generation;
+      mppi_cuda_local_map_scene_version_ = cycle_version;
+    }
+
+    std::vector<MppiLocalMapRolloutInput> inputs;
+    inputs.reserve(candidates.size());
+    for(const auto & candidate : candidates){
+      MppiLocalMapRolloutInput input;
+      input.controls = candidate.controls;
+      input.dt = mppi_controller_.config().model_dt;
+      input.initial_pose_planner = cycle.initial_pose_planner;
+      inputs.push_back(std::move(input));
+    }
+    std::vector<MppiLocalMapRolloutResult> rollouts;
+    std::string batch_error;
+    if(!mppi_cuda_local_map_rollout_->rolloutBatch(
+        cycle.context, *mppi_cuda_terrain_, inputs, rollouts, batch_error))
+    {
+      throw MppiCudaScoringError(
+        "CUDA local-map batch rollout failed: " +
+        (batch_error.empty() ? std::string("unknown error") : batch_error));
+    }
+    if(rollouts.size() != candidates.size()){
+      throw MppiCudaScoringError(
+        "CUDA local-map batch rollout returned " +
+        std::to_string(rollouts.size()) + " results for " +
+        std::to_string(candidates.size()) + " candidates");
+    }
+    for(std::size_t i = 0; i < candidates.size(); ++i){
+      const auto validation = validateMppiLocalMapRollout(
+        cycle.context, rollouts[i], candidates[i].controls.size());
+      const bool valid = validation.ok;
+      bundle.candidate_valid.push_back(valid);
+      bundle.candidate_status.push_back(rollouts[i].status);
+      bundle.candidate_detail.push_back(
+        validation.ok ? std::string() : validation.detail);
+
+      if(valid){
+        bundle.data.obstacle_collision_point_checks +=
+          rollouts[i].trajectory.points.size();
+        bundle.data.obstacle_clearance_point_checks +=
+          rollouts[i].trajectory.points.size();
+        bundle.data.trajectories.push_back(
+          std::move(rollouts[i].trajectory));
+      }
+      else{
+        // A rejected rollout's prefix must not feed the critic or the
+        // classifier/furthest logic. Match the CPU path's empty trajectory.
+        MppiScoredTrajectory invalid;
+        invalid.controls = candidates[i].controls;
+        bundle.data.trajectories.push_back(std::move(invalid));
+      }
+    }
+  }
+  else{
+    for(const auto & candidate : candidates){
+      const auto rollout = buildMppiLocalMapRollout(cycle, candidate.controls);
+      const auto validation = validateMppiLocalMapRollout(
+        cycle.context, rollout, candidate.controls.size());
+      const bool valid = validation.ok;
+      bundle.candidate_valid.push_back(valid);
+      bundle.candidate_status.push_back(rollout.status);
+      bundle.candidate_detail.push_back(
+        validation.ok ? std::string() : validation.detail);
+
+      if(valid){
+        bundle.data.obstacle_collision_point_checks +=
+          rollout.trajectory.points.size();
+        bundle.data.obstacle_clearance_point_checks +=
+          rollout.trajectory.points.size();
+        bundle.data.trajectories.push_back(rollout.trajectory);
+      }
+      else{
+        MppiScoredTrajectory invalid;
+        invalid.controls = candidate.controls;
+        bundle.data.trajectories.push_back(std::move(invalid));
+      }
     }
   }
 
@@ -2131,6 +2711,38 @@ MppiLateralOccupancyProfile Local_Planner::measureMppiLateralOccupancyForObstacl
     path, probe_blocked, mppi_lateral_profile_config_);
 }
 
+MppiLateralOccupancyProfile Local_Planner::measureMppiLateralOccupancyForTiltedPlane(
+  const std::vector<MppiPathPoint> & path,
+  const MppiPlanarScene & planar_scene) const
+{
+  MppiLateralOccupancyProfile profile;
+  if(!mppi_bypass_geometry_enabled_ || path.empty() ||
+    !planar_scene.frame.valid || planar_scene.grid.point_count == 0)
+  {
+    return profile;
+  }
+  const double probe_radius = std::max(
+    0.05, mppi_critic_manager_.config().obstacles.collision_margin_distance);
+  // The probe predicate is the whole oriented body rectangle's clearance from
+  // the projected obstacle points, not the legacy 3-D point-radius test around
+  // the path point. A blocked probe therefore means the footprint (not one
+  // centre point) is within the collision margin, which is the stricter and
+  // geometrically correct criterion here. The grid span itself is bounded by
+  // the upstream perception window, so free space outside that window is not
+  // claimed as observed.
+  const auto probe_blocked = [&](const MppiPathPoint & probe) {
+      // A positive inflation radius turns the query into collision plus a
+      // clearance scan; a finite clearance means at least one grid point lies
+      // within the footprint expansion.
+      const auto query = queryMppiPlanarObstacleGrid(
+        planar_scene.grid, planar_scene.body, probe.x, probe.y, probe.yaw,
+        probe_radius);
+      return !query.evaluated || std::isfinite(query.clearance);
+    };
+  return measureMppiLateralOccupancyProfile(
+    path, probe_blocked, mppi_lateral_profile_config_);
+}
+
 MppiBypassSide Local_Planner::preferredMppiBypassSide(
   const MppiLateralOccupancyProfile & profile) const
 {
@@ -2167,14 +2779,19 @@ void Local_Planner::maybeLogMppiBlockedDiagnostics(
   const double optimal_collision_x,
   const double optimal_collision_y,
   const double optimal_collision_yaw,
-  const std::size_t blocked_path_points)
+  const std::size_t blocked_path_points,
+  const MppiPlanarScene * planar_scene)
 {
   if(!mppi_debug_blocked_diagnostics_){
     mppi_blocked_diagnostics_state_.clear();
     return;
   }
+  const bool planar = planar_scene != nullptr && planar_scene->frame.valid;
+  const bool no_obstacles = planar ?
+    planar_scene->grid.point_count == 0 :
+    (!obstacle_snapshot.cloud || obstacle_snapshot.cloud->points.empty());
   if(blocked_path_points < 3 || mppi_diagnostic_path_.size() < 2 ||
-    !obstacle_snapshot.cloud || obstacle_snapshot.cloud->points.empty())
+    no_obstacles)
   {
     mppi_blocked_diagnostics_state_.clear();
     return;
@@ -2243,9 +2860,20 @@ void Local_Planner::maybeLogMppiBlockedDiagnostics(
     probe_orientation.setRPY(0.0, 0.0, anchor.yaw);
     probe_pose.pose.orientation = tf2::toMsg(probe_orientation);
     const auto probe_band = [&](const double lateral) {
+        const double probe_x = probe_pose.pose.position.x + normal_x * lateral;
+        const double probe_y = probe_pose.pose.position.y + normal_y * lateral;
+        if(planar){
+          const auto query = queryMppiPlanarObstacleGrid(
+            planar_scene->grid, planar_scene->body, probe_x, probe_y,
+            anchor.yaw, -1.0);
+          if(!query.evaluated){
+            return '?';
+          }
+          return query.in_collision ? 'B' : 'F';
+        }
         geometry_msgs::msg::PoseStamped pose = probe_pose;
-        pose.pose.position.x += normal_x * lateral;
-        pose.pose.position.y += normal_y * lateral;
+        pose.pose.position.x = probe_x;
+        pose.pose.position.y = probe_y;
         const auto collision = evaluateMppiObstacleCollisionForCuboid(
           transformRobotCuboid(pose), obstacle_snapshot, &obstacle_ids);
         if(!collision.evaluated){
@@ -2281,36 +2909,50 @@ void Local_Planner::maybeLogMppiBlockedDiagnostics(
     double band_z_max = -std::numeric_limits<double>::infinity();
     const double cos_yaw = std::cos(anchor.yaw);
     const double sin_yaw = std::sin(anchor.yaw);
-    for(const auto & point : obstacle_snapshot.cloud->points){
-      if(!std::isfinite(point.x) || !std::isfinite(point.y) ||
-        !std::isfinite(point.z))
-      {
-        continue;
-      }
-      const double dx = point.x - anchor.x;
-      const double dy = point.y - anchor.y;
-      const double squared = dx * dx + dy * dy;
-      if(squared > 4.0){
-        // Only a 2 m neighbourhood is reported; farther points are noise for
-        // a corridor-width decision.
-        continue;
-      }
-      const double lateral = normal_x * dx + normal_y * dy;
-      const double along = cos_yaw * dx + sin_yaw * dy;
-      ++band_points;
-      band_lateral_min = std::min(band_lateral_min, lateral);
-      band_lateral_max = std::max(band_lateral_max, lateral);
-      band_z_min = std::min(band_z_min, static_cast<double>(point.z));
-      band_z_max = std::max(band_z_max, static_cast<double>(point.z));
-      NearestPoint candidate;
-      candidate.squared = squared;
-      candidate.lateral = lateral;
-      candidate.along = along;
-      candidate.z = point.z;
-      for(auto & slot : nearest_points){
-        if(candidate.squared < slot.squared){
-          std::swap(slot, candidate);
+    const auto consider_obstacle_point = [&](const double point_x,
+        const double point_y, const double point_z) {
+        const double dx = point_x - anchor.x;
+        const double dy = point_y - anchor.y;
+        const double squared = dx * dx + dy * dy;
+        if(squared > 4.0){
+          // Only a 2 m neighbourhood is reported; farther points are noise for
+          // a corridor-width decision.
+          return;
         }
+        const double lateral = normal_x * dx + normal_y * dy;
+        const double along = cos_yaw * dx + sin_yaw * dy;
+        ++band_points;
+        band_lateral_min = std::min(band_lateral_min, lateral);
+        band_lateral_max = std::max(band_lateral_max, lateral);
+        band_z_min = std::min(band_z_min, point_z);
+        band_z_max = std::max(band_z_max, point_z);
+        NearestPoint candidate;
+        candidate.squared = squared;
+        candidate.lateral = lateral;
+        candidate.along = along;
+        candidate.z = point_z;
+        for(auto & slot : nearest_points){
+          if(candidate.squared < slot.squared){
+            std::swap(slot, candidate);
+          }
+        }
+      };
+    if(planar){
+      // Grid points are already flattened into the plane, so their reported
+      // height is the plane's z == 0.
+      const auto & grid_points = planar_scene->grid.points_xy;
+      for(std::size_t index = 0; index + 1 < grid_points.size(); index += 2){
+        consider_obstacle_point(grid_points[index], grid_points[index + 1], 0.0);
+      }
+    }
+    else{
+      for(const auto & point : obstacle_snapshot.cloud->points){
+        if(!std::isfinite(point.x) || !std::isfinite(point.y) ||
+          !std::isfinite(point.z))
+        {
+          continue;
+        }
+        consider_obstacle_point(point.x, point.y, point.z);
       }
     }
     corridor << " [i=" << anchor_index <<
@@ -2343,16 +2985,28 @@ void Local_Planner::maybeLogMppiBlockedDiagnostics(
   if(has_optimal_collision_pose){
     double nearest_squared = std::numeric_limits<double>::infinity();
     double nearest_z = 0.0;
-    for(const auto & point : obstacle_snapshot.cloud->points){
-      if(!std::isfinite(point.x) || !std::isfinite(point.y)){
-        continue;
+    const auto consider_optimal_point = [&](const double point_x,
+        const double point_y, const double point_z) {
+        const double dx = point_x - optimal_collision_x;
+        const double dy = point_y - optimal_collision_y;
+        const double squared = dx * dx + dy * dy;
+        if(squared < nearest_squared){
+          nearest_squared = squared;
+          nearest_z = point_z;
+        }
+      };
+    if(planar){
+      const auto & grid_points = planar_scene->grid.points_xy;
+      for(std::size_t index = 0; index + 1 < grid_points.size(); index += 2){
+        consider_optimal_point(grid_points[index], grid_points[index + 1], 0.0);
       }
-      const double dx = point.x - optimal_collision_x;
-      const double dy = point.y - optimal_collision_y;
-      const double squared = dx * dx + dy * dy;
-      if(squared < nearest_squared){
-        nearest_squared = squared;
-        nearest_z = point.z;
+    }
+    else{
+      for(const auto & point : obstacle_snapshot.cloud->points){
+        if(!std::isfinite(point.x) || !std::isfinite(point.y)){
+          continue;
+        }
+        consider_optimal_point(point.x, point.y, point.z);
       }
     }
     optimal_collision << "(x=" << optimal_collision_x <<
@@ -2367,8 +3021,11 @@ void Local_Planner::maybeLogMppiBlockedDiagnostics(
     optimal_collision << "none";
   }
 
+  // In planar mode path_offset and opt_collision coordinates are expressed in
+  // the frozen plane (x/y of the flattened base_link plane), not in the map;
+  // the frame label keeps the trace from being read as map coordinates.
   RCLCPP_INFO(this->get_logger().get_child(name_),
-    "MPPI blocked diagnostics: stage=%s, selected=%s, side_failures=%zu, quality_adv=%zu, feasible=L%zu/R%zu/N%zu, profile=(valid=%d,offset=%.3f), path_offset=%.3f(valid=%d), cmd=(%.3f,%.3f), best_sample=(%.3f,%.3f), optimal_valid=%d, valid_control=%d, blocked=%zu, opt_collision=%s, corridor=%s",
+    "MPPI blocked diagnostics: stage=%s, selected=%s, side_failures=%zu, quality_adv=%zu, feasible=L%zu/R%zu/N%zu, profile=(valid=%d,offset=%.3f), path_offset=%.3f(valid=%d), cmd=(%.3f,%.3f), best_sample=(%.3f,%.3f), optimal_valid=%d, frame=%s, valid_control=%d, blocked=%zu, opt_collision=%s, corridor=%s",
     toString(result.avoidance_stage),
     toString(result.selected_bypass_side),
     result.side_infeasible_cycles,
@@ -2385,6 +3042,7 @@ void Local_Planner::maybeLogMppiBlockedDiagnostics(
     best_sample_command.vx,
     best_sample_command.wz,
     optimal_sequence_collision_free ? 1 : 0,
+    planar ? "plane" : "map",
     result.has_valid_control ? 1 : 0,
     blocked_path_points,
     optimal_collision.str().c_str(),
@@ -2524,7 +3182,34 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiLocalMapControlCommand(
         }
       }
 
-      auto critic_result = mppi_critic_manager_.score(bundle.data);
+      MppiCriticResult critic_result;
+      if(mppi_controller_.config().compute_backend ==
+         MppiComputeBackend::Cuda)
+      {
+        if(!mppi_cuda_critics_){
+          mppi_cuda_critics_ = makeMppiCudaCritics();
+        }
+        std::string critic_reason;
+        if(!mppi_cuda_critics_ || !mppi_cuda_critics_->available(&critic_reason)){
+          throw MppiCudaScoringError(
+            "CUDA critics unavailable: " +
+            (critic_reason.empty() ? std::string("unknown reason") :
+             critic_reason));
+        }
+        std::string critic_error;
+        if(!mppi_cuda_critics_->score(
+            mppi_critic_manager_.config(), bundle.data, critic_result,
+            critic_error))
+        {
+          throw MppiCudaScoringError(
+            "CUDA critics failed: " +
+            (critic_error.empty() ? std::string("unknown error") :
+             critic_error));
+        }
+      }
+      else{
+        critic_result = mppi_critic_manager_.score(bundle.data);
+      }
       if(critic_result.fail_flag ||
          critic_result.scores.size() != candidates.size())
       {
@@ -2577,6 +3262,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiLocalMapControlCommand(
   for(; optimization_attempts < max_optimization_attempts;
       ++optimization_attempts)
   {
+    try{
     result = mppi_controller_.optimizeBatch(
       measured_speed,
       score_function,
@@ -2624,6 +3310,25 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiLocalMapControlCommand(
         return computeMppiDirectedRetreat(
           measured_speed, metadata.data.path, context.current_allowed_max_linear_speed,
           validator, cycle.context.mapVersion());      });
+    }
+    catch(const MppiCudaScoringError & error){
+      RCLCPP_ERROR(
+        this->get_logger().get_child(name_),
+        "MPPI local-map CUDA scoring failed; stopping without CPU fallback: %s",
+        error.what());
+      return stop(
+        dddmr_sys_core::ALL_TRAJECTORIES_FAIL,
+        std::string("CUDA scoring failed: ") + error.what());
+    }
+    if(!result.backend_error.empty()){
+      RCLCPP_ERROR(
+        this->get_logger().get_child(name_),
+        "MPPI local-map CUDA backend failed; stopping without CPU fallback: %s",
+        result.backend_error.c_str());
+      return stop(
+        dddmr_sys_core::ALL_TRAJECTORIES_FAIL,
+        std::string("CUDA backend failed: ") + result.backend_error);
+    }
     if(!result.has_valid_control){
       break;
     }
@@ -2641,7 +3346,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiLocalMapControlCommand(
         // A final backend rejection also makes the retained directed route
         // unexecutable; invalidate it into braking instead of only resetting
         // the unrelated MPPI warm start.
-        mppi_directed_retreat_.invalidate();
+        invalidateMppiDirectedRetreat();
       }
       mppi_controller_.resetControlSequenceForRetry(
         measured_speed, entry_avoidance_state);
@@ -3932,6 +4637,23 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
   {
     return computeMppiLocalMapControlCommand(controller_name, cmd_vel);
   }
+  if(mppi_environment_backend_ == MppiEnvironmentBackend::kTiltedPlane2D &&
+     !mppi_tilted_plane_init_error_.empty())
+  {
+    RCLCPP_ERROR_THROTTLE(
+      this->get_logger().get_child(name_), *clock_, 2000,
+      "MPPI tilted-plane backend is not initialized, stopping: %s",
+      mppi_tilted_plane_init_error_.c_str());
+    if(cmd_vel != nullptr){
+      cmd_vel->linear.x = 0.0;
+      cmd_vel->linear.y = 0.0;
+      cmd_vel->linear.z = 0.0;
+      cmd_vel->angular.x = 0.0;
+      cmd_vel->angular.y = 0.0;
+      cmd_vel->angular.z = 0.0;
+    }
+    return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
+  }
 
   ControllerContext context;
   const auto context_state = prepareControllerContext(&context);
@@ -3986,19 +4708,69 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
   measured_speed.vx = robot_state_.twist.twist.linear.x;
   measured_speed.wz = robot_state_.twist.twist.angular.z;
 
+  // One immutable plane cycle: frozen map<-base_link, height-filtered and
+  // flattened obstacle grid, planar reference and planar body envelope. Every
+  // candidate, retry, final check and published pose below shares it. Built
+  // only after the early-stop checks, so a cycle that will stop does not pay
+  // for the grid.
+  MppiPlanarScene planar_scene;
+  const MppiPlanarScene * planar = nullptr;
+  // Scene composition (frozen transform, height filtering, grid build and
+  // planar reference) is host work outside scoring_ms; -1 in legacy mode.
+  double mppi_plane_build_ms = -1.0;
+  if(mppi_environment_backend_ == MppiEnvironmentBackend::kTiltedPlane2D){
+    const auto stop_plane_cycle = [&](const std::string & reason) {
+        if(mppi_directed_retreat_.active()){
+          invalidateMppiDirectedRetreat();
+        }
+        resetMppiLocalMapSequenceOnFailure(measured_speed);
+        if(cmd_vel != nullptr){
+          cmd_vel->linear.x = 0.0;
+          cmd_vel->linear.y = 0.0;
+          cmd_vel->linear.z = 0.0;
+          cmd_vel->angular.x = 0.0;
+          cmd_vel->angular.y = 0.0;
+          cmd_vel->angular.z = 0.0;
+        }
+        RCLCPP_ERROR_THROTTLE(
+          this->get_logger().get_child(name_), *clock_, 2000,
+          "MPPI tilted-plane cycle rejected, stopping: %s",
+          reason.c_str());
+        return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
+      };
+    std::string plane_reason;
+    const auto plane_build_start = std::chrono::steady_clock::now();
+    if(!composeMppiTiltedPlaneScene(context, &planar_scene, &plane_reason)){
+      return stop_plane_cycle(plane_reason);
+    }
+    mppi_plane_build_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - plane_build_start).count();
+    planar = &planar_scene;
+  }
+
   const auto mppi_scoring_start = std::chrono::steady_clock::now();
-  const auto obstacle_snapshot = makeMppiObstacleSnapshot(
-    context.aggregate_observation, false);
-  const std::size_t mppi_obstacle_points =
-    obstacle_snapshot.cloud ? obstacle_snapshot.cloud->points.size() : 0u;
+  // Tilted-plane mode never builds a PCL snapshot: the frozen 2-D grid is the
+  // only obstacle representation. Every planar branch below is snapshot-free,
+  // so the legacy object stays empty instead of aliasing an unrelated cloud.
+  MppiObstacleSnapshot obstacle_snapshot;
+  if(planar == nullptr){
+    obstacle_snapshot = makeMppiObstacleSnapshot(context.aggregate_observation, false);
+  }
+  // Tilted-plane mode has no snapshot; report the height-filtered count that
+  // actually entered the grid, plus the grid's own point_count.
+  const std::size_t mppi_obstacle_points = planar != nullptr ?
+    planar_scene.filtered_obstacle_points :
+    (obstacle_snapshot.cloud ? obstacle_snapshot.cloud->points.size() : 0u);
+  const std::size_t mppi_planar_grid_points =
+    planar != nullptr ? planar_scene.grid.point_count : 0u;
   std::size_t mppi_scored_trajectories = 0;
   std::size_t mppi_scored_points = 0;
   std::size_t mppi_finite_clearance_points = 0;
   std::size_t mppi_collision_trajectories = 0;
-  std::size_t mppi_collision_node_checks = 0;
-  std::size_t mppi_collision_candidate_checks = 0;
-  std::size_t mppi_clearance_node_checks = 0;
-  std::size_t mppi_clearance_candidate_checks = 0;
+  std::size_t mppi_collision_node_checks = planar_scene.path_query_counts.collision_cell_checks;
+  std::size_t mppi_collision_candidate_checks = planar_scene.path_query_counts.collision_point_checks;
+  std::size_t mppi_clearance_node_checks = planar_scene.path_query_counts.clearance_cell_checks;
+  std::size_t mppi_clearance_candidate_checks = planar_scene.path_query_counts.clearance_point_checks;
   std::size_t mppi_valid_scores = 0;
   bool mppi_critic_fail_flag = false;
   double mppi_min_clearance = std::numeric_limits<double>::infinity();
@@ -4007,6 +4779,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
   double mppi_robot_path_offset = 0.0;
   bool mppi_robot_path_offset_valid = false;
   MppiLateralOccupancyProfile mppi_lateral_profile;
+  bool planar_lateral_profile_ready = false;
   MppiBypassSide mppi_preferred_bypass_side = MppiBypassSide::Neutral;
   double mppi_left_detour = 0.0;
   double mppi_right_detour = 0.0;
@@ -4042,10 +4815,44 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     [&](const std::vector<MppiCandidate> & candidates) -> std::vector<MppiCandidateScore> {
       mppi_term_costs.clear();
       mppi_last_scores.clear();
+      MppiCudaTrajectoryBatchView device_batch;
       auto critic_data = buildMppiCriticData(
         candidates,
-        obstacle_snapshot);
-      auto critic_result = mppi_critic_manager_.score(critic_data);
+        obstacle_snapshot,
+        planar,
+        &device_batch);
+      MppiCriticResult critic_result;
+      if(mppi_controller_.config().compute_backend ==
+         MppiComputeBackend::Cuda)
+      {
+        if(!mppi_cuda_critics_){
+          mppi_cuda_critics_ = makeMppiCudaCritics();
+        }
+        std::string critic_reason;
+        if(!mppi_cuda_critics_ || !mppi_cuda_critics_->available(&critic_reason)){
+          throw MppiCudaScoringError(
+            "CUDA critics unavailable: " +
+            (critic_reason.empty() ? std::string("unknown reason") :
+             critic_reason));
+        }
+        std::string critic_error;
+        const auto & critic_config = mppi_critic_manager_.config();
+        const bool scored = planar != nullptr ?
+          mppi_cuda_critics_->scoreDevice(
+          critic_config, critic_data, device_batch, critic_result, critic_error) :
+          mppi_cuda_critics_->score(
+          critic_config, critic_data, critic_result, critic_error);
+        if(!scored)
+        {
+          throw MppiCudaScoringError(
+            "CUDA critics failed: " +
+            (critic_error.empty() ? std::string("unknown error") :
+             critic_error));
+        }
+      }
+      else{
+        critic_result = mppi_critic_manager_.score(critic_data);
+      }
       mppi_scored_trajectories = critic_data.trajectories.size();
       mppi_scored_points = 0;
       mppi_finite_clearance_points = 0;
@@ -4064,9 +4871,20 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
       mppi_path_occupancy_ratio = critic_data.path_obstacle_occupancy_ratio;
       mppi_blocked_path_points = critic_data.blocked_path_points;
       mppi_diagnostic_path_ = critic_data.path;
-      mppi_lateral_profile = critic_data.blocked_path_points >= 3 ?
-        measureMppiLateralOccupancyForObstacleCloud(
-        critic_data.path, obstacle_snapshot) : MppiLateralOccupancyProfile{};
+      if(critic_data.blocked_path_points >= 3){
+        if(planar == nullptr){
+          mppi_lateral_profile = measureMppiLateralOccupancyForObstacleCloud(
+            critic_data.path, obstacle_snapshot);
+        }
+        else if(!planar_lateral_profile_ready){
+          mppi_lateral_profile = measureMppiLateralOccupancyForTiltedPlane(
+            critic_data.path, planar_scene);
+          planar_lateral_profile_ready = true;
+        }
+      }
+      else{
+        mppi_lateral_profile = MppiLateralOccupancyProfile{};
+      }
       mppi_preferred_bypass_side = preferredMppiBypassSide(mppi_lateral_profile);
       mppi_robot_path_offset = critic_data.robot_path_offset;
       mppi_robot_path_offset_valid = critic_data.robot_path_offset_valid;
@@ -4081,9 +4899,11 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
       mppi_clearance_node_checks += critic_data.obstacle_clearance_node_checks;
       mppi_clearance_candidate_checks += critic_data.obstacle_clearance_point_checks;
 
-      const double robot_x = trans_gbl2b_.transform.translation.x;
-      const double robot_y = trans_gbl2b_.transform.translation.y;
-      const double robot_yaw = getRobotYaw();
+      const double robot_x = planar != nullptr ? 0.0 :
+        trans_gbl2b_.transform.translation.x;
+      const double robot_y = planar != nullptr ? 0.0 :
+        trans_gbl2b_.transform.translation.y;
+      const double robot_yaw = planar != nullptr ? 0.0 : getRobotYaw();
       const double clearance_cap =
         std::max(0.0, mppi_critic_manager_.config().obstacles.inflation_radius);
       for(const auto & trajectory : critic_data.trajectories){
@@ -4183,6 +5003,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
   constexpr std::size_t max_optimization_attempts = 2;
   const MppiAvoidanceState entry_avoidance_state = mppi_controller_.avoidanceState();
   for(; optimization_attempts < max_optimization_attempts; ++optimization_attempts){
+    try{
     result = mppi_controller_.optimizeBatch(
       measured_speed,
       score_function,
@@ -4199,10 +5020,17 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
       },
       mppi_cycle_speed_cap,
       [&](bool) {
-        const auto metadata = buildMppiCriticData({}, obstacle_snapshot);
+        const auto metadata = buildMppiCriticData({}, obstacle_snapshot, planar);
         std::vector<int> directed_retreat_obstacle_ids;
         const MppiDirectedRetreat::PoseValidator validator =
           [&](MppiRetreatPose & pose) {
+            if(planar != nullptr){
+              // Unreachable: computeMppiDirectedRetreat replaces this
+              // validator with its own map-anchored grid query in
+              // tilted_plane_2d. Refuse instead of touching the deliberately
+              // empty legacy snapshot.
+              return false;
+            }
             geometry_msgs::msg::PoseStamped candidate;
             candidate.pose.position.x = pose.x;
             candidate.pose.position.y = pose.y;
@@ -4211,7 +5039,8 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
             q.setRPY(pose.roll, pose.pitch, pose.yaw);
             candidate.pose.orientation = tf2::toMsg(q);
             const auto collision = evaluateMppiObstacleCollisionForCuboid(
-              transformRobotCuboid(candidate), obstacle_snapshot,
+              transformRobotCuboid(candidate),
+              obstacle_snapshot,
               &directed_retreat_obstacle_ids);
             return collision.evaluated && !collision.in_collision;
           };
@@ -4219,8 +5048,49 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
         // environment identity; pass zero to force route revalidation.
         return computeMppiDirectedRetreat(
           measured_speed, metadata.path, context.current_allowed_max_linear_speed,
-          validator, 0);
+          validator, 0, planar);
       });
+    }
+    catch(const MppiCudaScoringError & error){
+      RCLCPP_ERROR(
+        this->get_logger().get_child(name_),
+        "MPPI CUDA scoring failed; stopping without CPU fallback: %s",
+        error.what());
+      if(mppi_directed_retreat_.active()){
+        invalidateMppiDirectedRetreat();
+      }
+      mppi_controller_.resetControlSequenceForRetry(
+        measured_speed, entry_avoidance_state);
+      if(cmd_vel != nullptr){
+        cmd_vel->linear.x = 0.0;
+        cmd_vel->linear.y = 0.0;
+        cmd_vel->linear.z = 0.0;
+        cmd_vel->angular.x = 0.0;
+        cmd_vel->angular.y = 0.0;
+        cmd_vel->angular.z = 0.0;
+      }
+      return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
+    }
+    if(!result.backend_error.empty()){
+      RCLCPP_ERROR(
+        this->get_logger().get_child(name_),
+        "MPPI CUDA backend failed; stopping without CPU fallback: %s",
+        result.backend_error.c_str());
+      if(mppi_directed_retreat_.active()){
+        invalidateMppiDirectedRetreat();
+      }
+      mppi_controller_.resetControlSequenceForRetry(
+        measured_speed, entry_avoidance_state);
+      if(cmd_vel != nullptr){
+        cmd_vel->linear.x = 0.0;
+        cmd_vel->linear.y = 0.0;
+        cmd_vel->linear.z = 0.0;
+        cmd_vel->angular.x = 0.0;
+        cmd_vel->angular.y = 0.0;
+        cmd_vel->angular.z = 0.0;
+      }
+      return dddmr_sys_core::ALL_TRAJECTORIES_FAIL;
+    }
     if(!result.has_valid_control){
       break;
     }
@@ -4228,7 +5098,8 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     const auto optimal_scored_trajectory = buildMppiScoredTrajectory(
       result.optimal_sequence,
       obstacle_snapshot,
-      true);
+      true,
+      planar);
     for(const auto & point : optimal_scored_trajectory.points){
       mppi_collision_node_checks += point.collision_node_checks;
       mppi_collision_candidate_checks += point.collision_point_checks;
@@ -4328,9 +5199,21 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
       mppi_noise_best_cost = std::min(mppi_noise_best_cost, score.cost);
     }
   }
+  // Device-side planar diagnostics. Legacy mode never uploads a planar grid,
+  // so its values stay at the -1/0 sentinels.
+  MppiCudaPlanarStats planar_stats;
+  if(planar != nullptr &&
+     mppi_controller_.config().compute_backend == MppiComputeBackend::Cuda &&
+     mppi_cuda_obstacles_)
+  {
+    planar_stats = mppi_cuda_obstacles_->lastPlanarStats();
+  }
   RCLCPP_INFO_THROTTLE(
     this->get_logger().get_child(name_), *clock_, 2000,
-    "MPPI debug: controller=%s, obstacle_points=%zu, scoring_ms=%.2f, trajectories=%zu, trajectory_points=%zu, %s, finite_clearances=%zu, min_clearance=%.3f, path_occupancy=%.3f, collision_trajectories=%zu, valid_scores=%zu, critic_fail=%d, rejected=%zu, best_cost=%.3f, best_vx=%.3f, best_wz=%.3f, prefilter_wz=%.3f, cmd_vx=%.3f, cmd_wz=%.3f, effective_samples=%.2f, weight_pos=%.3f, weight_neg=%.3f, weight_neutral=%.3f, structured=%zu, structured_weight=%.3f, selected_side=%s, best_side=%s, feasible_left=%zu, feasible_right=%zu, feasible_neutral=%zu, phase_compatible=%zu, side_failures=%zu, quality_advantage=%zu, best_left_cost=%.3f, best_right_cost=%.3f, avoidance_stage=%s, path_offset=%.3f, path_offset_valid=%d, preferred_side=%s, obstacle_offset=%.3f, lateral_profile_valid=%d, departure_offset=%.3f, best_sample=%zu, best_critic_cost=%.3f, best_energy=%.3f, optimal_valid=%d, attempts=%zu, allowed_max_speed=%.3f, lookahead_m=%.2f, end_along_max_m=%.2f, end_lat_spread_m=%.3f, clear_mean=%.3f, clear_capped=%zu/%zu, align_applied=%d, align_skip_blocked=%d, follow_applied=%d, follow_skip_blocked=%d, follow_target_m=%.2f, struct_free=%zu/%zu, struct_best_cost=%.2f, noise_best_cost=%.2f, guard_applied=%d, guard_removed=%zu, best_terms=obs:%.2f,align:%.2f,follow:%.2f,angle:%.2f,constr:%.2f,prefer:%.2f,goal:%.2f,term_sum:%.2f, probe_points=%zu, probe_block_m=%.2f",
+    "MPPI debug: controller=%s, obstacle_points=%zu, scoring_ms=%.2f, trajectories=%zu, trajectory_points=%zu, %s, finite_clearances=%zu, min_clearance=%.3f, path_occupancy=%.3f, collision_trajectories=%zu, valid_scores=%zu, critic_fail=%d, rejected=%zu, best_cost=%.3f, best_vx=%.3f, best_wz=%.3f, prefilter_wz=%.3f, cmd_vx=%.3f, cmd_wz=%.3f, effective_samples=%.2f, weight_pos=%.3f, weight_neg=%.3f, weight_neutral=%.3f, structured=%zu, structured_weight=%.3f, selected_side=%s, best_side=%s, feasible_left=%zu, feasible_right=%zu, feasible_neutral=%zu, phase_compatible=%zu, side_failures=%zu, quality_advantage=%zu, best_left_cost=%.3f, best_right_cost=%.3f, avoidance_stage=%s, path_offset=%.3f, path_offset_valid=%d, preferred_side=%s, obstacle_offset=%.3f, lateral_profile_valid=%d, departure_offset=%.3f, best_sample=%zu, best_critic_cost=%.3f, best_energy=%.3f, optimal_valid=%d, attempts=%zu, allowed_max_speed=%.3f, lookahead_m=%.2f, end_along_max_m=%.2f, end_lat_spread_m=%.3f, clear_mean=%.3f, clear_capped=%zu/%zu, align_applied=%d, align_skip_blocked=%d, follow_applied=%d, follow_skip_blocked=%d, follow_target_m=%.2f, struct_free=%zu/%zu, struct_best_cost=%.2f, noise_best_cost=%.2f, guard_applied=%d, guard_removed=%zu, best_terms=obs:%.2f,align:%.2f,follow:%.2f,angle:%.2f,constr:%.2f,prefer:%.2f,goal:%.2f,term_sum:%.2f, probe_points=%zu, probe_block_m=%.2f, planar_grid_points=%zu, plane_build_ms=%.2f, planar_upload_ms=%.2f, planar_rollout_ms=%.2f, planar_cuda_grid_points=%zu, planar_grid_cells=%zu, "
+    "planar_pose_kernel_ms=%.3f, planar_query_kernel_ms=%.3f, "
+    "planar_probe_kernel_ms=%.3f, planar_readback_ms=%.3f, "
+    "planar_distance_field_build_ms=%.3f, planar_distance_field_cells=%zu",
     controller_name.c_str(),
     mppi_obstacle_points,
     mppi_scoring_ms,
@@ -4408,14 +5291,26 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     mppi_best_terms.constraint + mppi_best_terms.prefer_forward +
     mppi_best_terms.goal + mppi_best_terms.goal_angle,
     mppi_probe_points,
-    std::isfinite(mppi_probe_block_m) ? mppi_probe_block_m : -1.0);
+    std::isfinite(mppi_probe_block_m) ? mppi_probe_block_m : -1.0,
+    mppi_planar_grid_points,
+    mppi_plane_build_ms,
+    planar_stats.upload_ms,
+    planar_stats.rollout_ms,
+    planar_stats.grid_points,
+    planar_stats.grid_cells,
+    planar_stats.pose_kernel_ms,
+    planar_stats.query_kernel_ms,
+    planar_stats.probe_kernel_ms,
+    planar_stats.readback_ms,
+    planar_scene.distance_field_build_ms,
+    planar_scene.grid.distance_field.distances.size());
 
   maybeLogMppiBlockedDiagnostics(
     obstacle_snapshot, result, best_sample_command, mppi_lateral_profile,
     mppi_robot_path_offset, mppi_robot_path_offset_valid,
     optimal_sequence_collision_free, has_optimal_collision_pose,
     optimal_collision_x, optimal_collision_y, optimal_collision_yaw,
-    mppi_blocked_path_points);
+    mppi_blocked_path_points, planar);
 
   if(result.reverse_recovery_active || result.reverse_candidates_generated ||
      result.reverse_budget_exhausted)
@@ -4484,7 +5379,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     if(mppi_directed_retreat_.active()){
       // Feed the final backend rollout rejection back into directed retreat:
       // the selected route is no longer executable, so clear it and brake.
-      mppi_directed_retreat_.invalidate();
+      invalidateMppiDirectedRetreat();
     }
     mppi_controller_.resetControlSequenceForRetry(
       measured_speed, entry_avoidance_state);
@@ -4509,7 +5404,8 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
     cmd_vel->angular.z = result.command.wz;
   }
 
-  auto best_traj = buildPredictedTrajectoryFromMppiControls(result.optimal_sequence);
+  auto best_traj = buildPredictedTrajectoryFromMppiControls(
+    result.optimal_sequence, planar);
   publishDebugPath(
     buildPathFromTrajectory(best_traj),
     pub_best_trajectory_path_,
@@ -4533,11 +5429,56 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
       pub_best_trajectory_probe_pose_->get_subscription_count() > 0;
     if(want_markers || want_probe){
       double first_block_m = -1.0;
+      // In tilted-plane mode the probe is expanded in the plane and converted
+      // point by point afterwards, so its position and orientation follow the
+      // frozen attitude exactly like the rollout itself.
+      geometry_msgs::msg::Pose terminal_pose;
+      double probe_z = 0.0;
+      if(planar){
+        // Same Ackermann integration the scorer used, so the drawn probe
+        // starts exactly where the drawn rollout ends.
+        const auto terminal = mppiPlanarRolloutTerminal(
+          result.optimal_sequence,
+          std::max(0.02, mppi_controller_.config().model_dt));
+        terminal_pose.position.x = terminal.x;
+        terminal_pose.position.y = terminal.y;
+        terminal_pose.position.z = 0.0;
+        tf2::Quaternion plane_q;
+        plane_q.setRPY(0.0, 0.0, terminal.yaw);
+        terminal_pose.orientation = tf2::toMsg(plane_q);
+      }
+      else{
+        terminal_pose = best_traj.getPoint(best_traj.getPointsSize() - 1).pose;
+        probe_z = terminal_pose.position.z;
+      }
       const auto probe = buildMppiDistanceProbe(
-        best_traj.getPoint(best_traj.getPointsSize() - 1).pose,
-        result.optimal_sequence.back(), obstacle_snapshot, &first_block_m);
-      const double probe_z = best_traj.getPoint(best_traj.getPointsSize() - 1)
-        .pose.position.z;
+        terminal_pose,
+        result.optimal_sequence.back(), obstacle_snapshot, &first_block_m,
+        planar);
+      const auto probePose = [&](const MppiTrajectoryPoint & point) {
+          geometry_msgs::msg::Pose pose;
+          if(planar){
+            const Eigen::Isometry3d plane_pose = mppiPlanarPoseToPlanner(
+              planar_scene.frame, point.x, point.y, point.yaw);
+            const Eigen::Quaterniond orientation(plane_pose.linear());
+            pose.position.x = plane_pose.translation().x();
+            pose.position.y = plane_pose.translation().y();
+            pose.position.z = plane_pose.translation().z();
+            pose.orientation.x = orientation.x();
+            pose.orientation.y = orientation.y();
+            pose.orientation.z = orientation.z();
+            pose.orientation.w = orientation.w();
+          }
+          else{
+            pose.position.x = point.x;
+            pose.position.y = point.y;
+            pose.position.z = probe_z;
+            tf2::Quaternion q;
+            q.setRPY(0.0, 0.0, point.yaw);
+            pose.orientation = tf2::toMsg(q);
+          }
+          return pose;
+        };
 
       if(want_probe){
         geometry_msgs::msg::PoseArray probe_arr;
@@ -4545,14 +5486,7 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
         probe_arr.header.stamp = clock_->now();
         probe_arr.poses.reserve(probe.size());
         for(const auto & probe_point : probe){
-          geometry_msgs::msg::Pose pose;
-          pose.position.x = probe_point.x;
-          pose.position.y = probe_point.y;
-          pose.position.z = probe_z;
-          tf2::Quaternion q;
-          q.setRPY(0.0, 0.0, probe_point.yaw);
-          pose.orientation = tf2::toMsg(q);
-          probe_arr.poses.push_back(pose);
+          probe_arr.poses.push_back(probePose(probe_point));
         }
         pub_best_trajectory_probe_pose_->publish(probe_arr);
       }
@@ -4594,10 +5528,11 @@ dddmr_sys_core::PlannerState Local_Planner::computeMppiControlCommand(
         probe_marker.points.clear();
         probe_marker.points.push_back(rollout_marker.points.back());
         for(const auto & probe_point : probe){
+          const auto pose = probePose(probe_point);
           geometry_msgs::msg::Point point;
-          point.x = probe_point.x;
-          point.y = probe_point.y;
-          point.z = probe_z;
+          point.x = pose.position.x;
+          point.y = pose.position.y;
+          point.z = pose.position.z;
           probe_marker.points.push_back(point);
         }
         markers.markers.push_back(probe_marker);

@@ -1139,6 +1139,286 @@ std::size_t TerrainModel::patchCellCount(int patch_id) const {
   return impl_->patches[static_cast<std::size_t>(patch_id)].candidates.size();
 }
 
+TerrainSnapshotExport TerrainModel::exportSnapshot() const {
+  TerrainSnapshotExport out;
+  const auto fail = [&out](std::string message) {
+    out = TerrainSnapshotExport{};
+    out.error = std::move(message);
+    return out;
+  };
+  if (!impl_ || !impl_->snapshot) {
+    return fail("snapshot is null");
+  }
+  if (!impl_->geometry_status.ok) {
+    return fail(impl_->geometry_status.error.empty()
+                    ? "vehicle geometry is invalid"
+                    : impl_->geometry_status.error);
+  }
+  if (!impl_->config_status.ok) {
+    return fail(impl_->config_status.error.empty()
+                    ? "terrain config is invalid"
+                    : impl_->config_status.error);
+  }
+  if (!impl_->build_status.ok) {
+    return fail(impl_->build_status.error.empty()
+                    ? "terrain model build failed"
+                    : impl_->build_status.error);
+  }
+  const auto& snapshot = *impl_->snapshot;
+  const auto& map_config = snapshot.config();
+  const auto origin = snapshot.originVoxel();
+  const auto dims = snapshot.windowDims();
+
+  if (dims.x() <= 0 || dims.y() <= 0 || dims.z() <= 0) {
+    return fail("snapshot dimensions are not positive");
+  }
+  if (map_config.window_x != dims.x() ||
+      map_config.window_y != dims.y() ||
+      map_config.window_z != dims.z()) {
+    return fail("snapshot dimensions disagree with map config");
+  }
+  if (!std::isfinite(map_config.voxel_size) || map_config.voxel_size <= 0.0) {
+    return fail("snapshot voxel size is invalid");
+  }
+  if (!std::isfinite(map_config.occupied_threshold) ||
+      !std::isfinite(map_config.free_threshold) ||
+      map_config.free_threshold >= map_config.occupied_threshold) {
+    return fail("snapshot occupancy thresholds are invalid");
+  }
+  // Reject origin/dims combinations whose absolute voxel bounds overflow the
+  // int64 address space used by the GPU lookup path.
+  for (int axis = 0; axis < 3; ++axis) {
+    const int64_t extent = static_cast<int64_t>(
+        axis == 0 ? dims.x() : (axis == 1 ? dims.y() : dims.z()));
+    if (origin[static_cast<std::size_t>(axis)] >
+        std::numeric_limits<int64_t>::max() - extent) {
+      return fail("snapshot origin plus dimensions overflow int64");
+    }
+  }
+  const uint64_t dx = static_cast<uint64_t>(dims.x());
+  const uint64_t dy = static_cast<uint64_t>(dims.y());
+  const uint64_t dz = static_cast<uint64_t>(dims.z());
+  const uint64_t max_size =
+      static_cast<uint64_t>(std::numeric_limits<std::size_t>::max());
+  if (dx > max_size / dy) {
+    return fail("column count overflows size_t");
+  }
+  const uint64_t columns64 = dx * dy;
+  if (columns64 > max_size / dz) {
+    return fail("voxel cell count overflows size_t");
+  }
+  const std::size_t columns = static_cast<std::size_t>(columns64);
+  const std::size_t cell_count = columns * static_cast<std::size_t>(dz);
+
+  out.frame = snapshot.frame();
+  out.snapshot_version = snapshot.version();
+  out.snapshot_stamp = snapshot.stamp();
+  out.voxel_size = map_config.voxel_size;
+  out.origin = origin;
+  out.dims = {{dims.x(), dims.y(), dims.z()}};
+  out.occupied_threshold = map_config.occupied_threshold;
+  out.free_threshold = map_config.free_threshold;
+
+  out.map_config.voxel_size = map_config.voxel_size;
+  out.map_config.window_x = map_config.window_x;
+  out.map_config.window_y = map_config.window_y;
+  out.map_config.window_z = map_config.window_z;
+  out.map_config.max_range = map_config.max_range;
+  out.map_config.hit_log_odds = map_config.hit_log_odds;
+  out.map_config.miss_log_odds = map_config.miss_log_odds;
+  out.map_config.occupied_threshold = map_config.occupied_threshold;
+  out.map_config.free_threshold = map_config.free_threshold;
+  out.map_config.min_log_odds = map_config.min_log_odds;
+  out.map_config.max_log_odds = map_config.max_log_odds;
+  out.map_config.inflation_radius = map_config.inflation_radius;
+  out.map_config.max_voxels =
+      static_cast<uint64_t>(map_config.max_voxels);
+
+  const auto& config = impl_->config;
+  out.terrain_config.contact_patch_radius = config.contact_patch_radius;
+  out.terrain_config.max_contact_search_z = config.max_contact_search_z;
+  out.terrain_config.max_drop = config.max_drop;
+  out.terrain_config.max_step = config.max_step;
+  out.terrain_config.max_slope_rad = config.max_slope_rad;
+  out.terrain_config.max_cross_slope_rad = config.max_cross_slope_rad;
+  out.terrain_config.max_warp = config.max_warp;
+  out.terrain_config.min_patch_coverage = config.min_patch_coverage;
+  out.terrain_config.min_plane_confidence = config.min_plane_confidence;
+  out.terrain_config.max_snapshot_age = config.max_snapshot_age;
+  out.terrain_config.max_observation_age = config.max_observation_age;
+  out.terrain_config.obstacle_search_margin = config.obstacle_search_margin;
+  out.terrain_config.cluster_max_dz = config.cluster_max_dz;
+  out.terrain_config.plane_inlier_tol = config.plane_inlier_tol;
+  out.terrain_config.max_patches =
+      static_cast<uint64_t>(config.max_patches);
+  out.terrain_config.unknown_body_policy =
+      static_cast<uint8_t>(config.unknown_body_policy);
+
+  const auto& geometry = impl_->geometry;
+  for (std::size_t wheel = 0; wheel < geometry.wheel_contacts_base.size();
+       ++wheel) {
+    for (int axis = 0; axis < 3; ++axis) {
+      out.geometry.wheel_contacts_base[wheel][axis] =
+          geometry.wheel_contacts_base[wheel][axis];
+    }
+  }
+  out.geometry.base_contact_height = geometry.base_contact_height;
+  for (int axis = 0; axis < 3; ++axis) {
+    out.geometry.body_min[axis] = geometry.body_min[axis];
+    out.geometry.body_max[axis] = geometry.body_max[axis];
+  }
+  out.geometry.body_clearance = geometry.body_clearance;
+
+  out.cells = snapshot.exportCells();
+  if (out.cells.size() != cell_count) {
+    return fail("snapshot cell count does not match origin/dims");
+  }
+
+  out.candidates.reserve(impl_->candidates.size());
+  for (std::size_t index = 0; index < impl_->candidates.size(); ++index) {
+    const auto& source = impl_->candidates[index];
+    if (source.ix < origin[0] || source.ix >= origin[0] + dims.x() ||
+        source.iy < origin[1] || source.iy >= origin[1] + dims.y() ||
+        source.iz < origin[2] || source.iz >= origin[2] + dims.z()) {
+      return fail("surface candidate is outside snapshot bounds");
+    }
+    if (!source.point.allFinite() ||
+        !source.local_coefficients.allFinite() ||
+        !std::isfinite(source.local_confidence) ||
+        !std::isfinite(source.local_residual) ||
+        !std::isfinite(source.last_hit_stamp)) {
+      return fail("surface candidate contains non-finite geometry or stamps");
+    }
+    if (source.patch_id < 0 ||
+        source.patch_id >= static_cast<int>(impl_->patches.size())) {
+      return fail("surface candidate has an invalid patch id");
+    }
+    TerrainCandidateExport candidate;
+    candidate.index = static_cast<uint64_t>(index);
+    candidate.ix = source.ix;
+    candidate.iy = source.iy;
+    candidate.iz = source.iz;
+    candidate.patch_id = source.patch_id;
+    for (int axis = 0; axis < 3; ++axis) {
+      candidate.point[axis] = source.point[axis];
+      candidate.local_coefficients[axis] =
+          source.local_coefficients[axis];
+    }
+    candidate.local_confidence = source.local_confidence;
+    candidate.local_residual = source.local_residual;
+    candidate.last_hit_stamp = source.last_hit_stamp;
+    candidate.last_miss_stamp = source.last_miss_stamp;
+    out.candidates.push_back(candidate);
+  }
+
+  out.patch_candidate_start.reserve(impl_->patches.size() + 1U);
+  out.patch_candidate_start.push_back(0U);
+  out.patches.reserve(impl_->patches.size());
+  for (std::size_t patch_index = 0; patch_index < impl_->patches.size();
+       ++patch_index) {
+    const auto& source = impl_->patches[patch_index];
+    if (!source.coefficients.allFinite() || !source.normal.allFinite() ||
+        !std::isfinite(source.rms) || !std::isfinite(source.confidence)) {
+      return fail("surface patch contains non-finite parameters");
+    }
+    TerrainPatchExport patch;
+    patch.patch_id = static_cast<int32_t>(patch_index);
+    patch.candidate_begin = out.patch_candidate_start.back();
+    for (int axis = 0; axis < 3; ++axis) {
+      patch.coefficients[axis] = source.coefficients[axis];
+      patch.normal[axis] = source.normal[axis];
+    }
+    patch.rms = source.rms;
+    patch.confidence = source.confidence;
+    for (const int candidate : source.candidates) {
+      if (candidate < 0 ||
+          static_cast<std::size_t>(candidate) >= impl_->candidates.size()) {
+        return fail("surface patch references an invalid candidate");
+      }
+      out.patch_candidate_indices.push_back(candidate);
+    }
+    patch.candidate_end = static_cast<uint64_t>(
+        out.patch_candidate_indices.size());
+    out.patch_candidate_start.push_back(patch.candidate_end);
+    out.patches.push_back(patch);
+  }
+
+  out.candidate_column_start.assign(impl_->candidate_column_start.begin(),
+                                    impl_->candidate_column_start.end());
+  out.candidate_column_indices.assign(impl_->candidate_column_indices.begin(),
+                                      impl_->candidate_column_indices.end());
+  out.obstacle_column_start.assign(impl_->obstacle_column_start.begin(),
+                                   impl_->obstacle_column_start.end());
+  out.obstacle_column_cells.assign(impl_->obstacle_column_cells.begin(),
+                                   impl_->obstacle_column_cells.end());
+  out.observed_column_bits = impl_->observed_column_bits;
+
+  // Cross-check every flat CSR against its payload. A malformed export must
+  // fail closed rather than let a later CUDA upload read out of bounds.
+  if (out.candidate_column_start.size() != columns + 1U ||
+      out.obstacle_column_start.size() != columns + 1U ||
+      out.observed_column_bits.size() != columns) {
+    return fail("column index arrays do not match snapshot dimensions");
+  }
+  const auto valid_csr = [](const std::vector<uint64_t>& start,
+                            std::size_t payload) {
+    if (start.empty() || start.back() != static_cast<uint64_t>(payload)) {
+      return false;
+    }
+    for (std::size_t i = 0; i + 1U < start.size(); ++i) {
+      if (start[i] > start[i + 1U] ||
+          start[i + 1U] > static_cast<uint64_t>(payload)) {
+        return false;
+      }
+    }
+    return true;
+  };
+  if (!valid_csr(out.candidate_column_start,
+                 out.candidate_column_indices.size()) ||
+      !valid_csr(out.obstacle_column_start,
+                 out.obstacle_column_cells.size())) {
+    return fail("column CSR payload is inconsistent");
+  }
+  for (const int candidate : out.candidate_column_indices) {
+    if (candidate < 0 ||
+        static_cast<std::size_t>(candidate) >= out.candidates.size()) {
+      return fail("candidate column CSR references an invalid candidate");
+    }
+  }
+  for (const int64_t z : out.obstacle_column_cells) {
+    if (z < origin[2] || z >= origin[2] + dims.z()) {
+      return fail("obstacle column CSR references an out-of-bounds voxel");
+    }
+  }
+  for (const uint8_t bit : out.observed_column_bits) {
+    if (bit > 1U) {
+      return fail("observed column bit is not 0 or 1");
+    }
+  }
+  if (out.patch_candidate_start.size() != out.patches.size() + 1U ||
+      !valid_csr(out.patch_candidate_start,
+                 out.patch_candidate_indices.size())) {
+    return fail("patch candidate CSR is inconsistent");
+  }
+  for (std::size_t patch_index = 0; patch_index < out.patches.size();
+       ++patch_index) {
+    for (uint64_t position = out.patch_candidate_start[patch_index];
+         position < out.patch_candidate_start[patch_index + 1U]; ++position) {
+      const auto candidate = out.patch_candidate_indices[
+          static_cast<std::size_t>(position)];
+      if (candidate < 0 ||
+          static_cast<std::size_t>(candidate) >= out.candidates.size() ||
+          out.candidates[static_cast<std::size_t>(candidate)].patch_id !=
+              static_cast<int32_t>(patch_index)) {
+        return fail("patch candidate CSR disagrees with candidate patch ids");
+      }
+    }
+  }
+
+  out.valid = true;
+  return out;
+}
+
 int TerrainModel::patchAtColumn(double x, double y, double near_z) const {
   if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(near_z) ||
       !impl_->snapshot) {

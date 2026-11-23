@@ -9,9 +9,9 @@
     map_topic: "mapcloud"
     ground_topic: "mapground"
     odom_topic: "/odom"                                                          # 底盘真实速度反馈；定位仍由 TF 提供
-    perception_window_size: 10.0                                                 # 共享预处理/感知窗口（m）
+    perception_window_size: 10.0                                                 # 共享预处理/感知圆半径（m）
     min_obstacle_height: -0.2                                                    # 共享障碍最低高度阈值（m）
-    marking_height: 2.0                                                          # 共享标记障碍高度上限（m）
+    marking_height: 0.6                                                          # 共享标记障碍高度上限（m）
     expected_sensor_time: 0.5                                                    # 共享传感器时间容忍（s）
 
     # 车体包络（碰撞检测）
@@ -27,7 +27,7 @@
 
 p2p_move_base:
   ros__parameters:
-    orchestrator_frequency: 20.0                                                 # 控制调度频率
+    orchestrator_frequency: 10.0                                                 # 控制调度频率（Hz），与局部控制同步
     route_request_patience: 90.0                                                 # 等待全局路径请求返回的最大时长（s）
     blocked_wait_patience: 2.0                                                   # blocked wait 状态最长持续时间（s），先给局部障碍清除窗口
     collision_confirm_cycles: 5                                                  # 连续碰撞确认周期，避免单帧点云误触发全局重规划
@@ -79,11 +79,10 @@ global_plan_manager:
 grid_global_planner:
   ros__parameters:
     enable_detail_log: true                                                      # 沿用原参数名；true 输出 INFO 日志，false 仅保留 WARN/ERROR。
-    raw_route_backend: graph_a_star                                              # 栅格后端：graph_a_star（默认）/ hybrid_a_star
+    raw_route_backend: graph_a_star                                              # 栅格后端 graph_a_star / hybrid_a_star
     ros:
       enable_perception_export: true                                             # 同进程感知快照导出；静态演示保持关闭。
 
-    # 仅保留已实现的图搜索预算；原 turning_weight、扩张半径和平滑参数不映射。
     graph_a_star:
       max_samples: 2000000                                                       # 单次搜索的采样预算。
       slope_penalty_weight: 0.0
@@ -119,7 +118,7 @@ grid_global_planner:
       global_cloud_mode: false                                                   # false 使用地面点云；true 使用完整点云重建。
       use_global_as_static_obstacles: false                                      # false=GlobalMap 仅参与来源校验、不注入静态障碍（与测试栅格一致）；true=恢复 GlobalMap 静态障碍。
       resolution_m: 0.2                                                          # 栅格分辨率（m）；同步为规划器通用细层分辨率。
-      max_step_height_m: 0.1                                                    # 相邻地面单元允许的最大台阶（m）。
+      max_step_height_m: 0.1                                                     # 相邻地面单元允许的最大台阶（m）。
       max_slope_rad: 0.6                                                         # 可通行地面坡度上限（rad）。
       layer_gap_threshold_m: 0.2                                                 # 点云按高度分层的间隔阈值（m）。
       max_normal_angle_rad: 0.35                                                 # 相邻地面法线夹角上限（rad）。
@@ -213,7 +212,7 @@ perception_3d_global:
       plugin: "perception_3d::MultiLayerSpinningLidar"                           # 多线雷达插件
       is_local_planner: false                                                    # 该雷达层用于全局规划
       input_preprocessed: true                                                   # 跳过重复裁剪/降采样/点云坐标变换
-      pub_gbl_marking_for_visualization: true                                    # 是否发布全局标记点用于可视化
+      pub_gbl_marking_for_visualization: false                                    # 是否发布全局标记点用于可视化
       vertical_FOV_top: 15.0                                                     # 垂直视场上限（deg）
       vertical_FOV_bottom: -15.0                                                 # 垂直视场下限（deg）
       scan_effective_positive_start: 0.0                                         # 正向扫描有效起始角（deg）
@@ -230,14 +229,14 @@ perception_3d_global:
 local_planner:
   ros__parameters:
     # 局部规划器公共参数
-    controller_frequency: 20.0                                                   # 控制循环频率（Hz）
+    controller_frequency: 10.0                                                   # 控制循环频率（Hz）
 
     # 局部规划器后端选择
     controller_backend: "mppi"                                                   # 控制后端 legacy_rollout / regulated_pure_pursuit / mppi
 
     # 局部规划器公共路径/目标参数
     local_reference:
-      forward_distance: 6.0                                                      # 前向参考窗口（m），覆盖 1.0 m/s 下 5 s 的预测行程
+      forward_distance: 10.0                                                     # 局部跟踪轨迹前向参考窗口（m）
       backward_distance: 1.0                                                     # 后向保留窗口长度（m）
 
     # 剪裁锚点
@@ -275,11 +274,13 @@ local_planner:
     # 局部控制后端参数: mppi
     mppi:
       prediction_horizon_sec: 5.0                                                # MPPI 预测时域（s），仅决定控制序列长度
-      evaluation_distance: 6.5                                                   # 距离通道长度（m）：按弧长外推的碰撞探测距离，与车速无关
+      evaluation_distance: 0.0                                                   # 距离通道长度（m）：按弧长外推的碰撞探测距离，与车速无关
       evaluation_step: 0.15                                                      # 距离通道采样间距（m）
       evaluation_max_points: 64                                                   # 距离通道单条候选的采样点上限
-      model_dt: 0.05                                                             # 与 20Hz controller_period 对齐以启用控制序列 shift
-      batch_size: 96                                                             # 采样批量；点云 KDTree 查询较重，优先保证实时预算
+      model_dt: 0.1                                                              # MPPI 模型步长（s）；与 10Hz controller_period 对齐以启用控制序列 shift
+      batch_size: 256                                                             # 采样批量；点云 KDTree 查询较重，优先保证实时预算
+      compute_backend: cuda
+      environment_backend: tilted_plane_2d                                       # 每轮冻结 base_link 姿态成平面，在平面内做二维预测/评分/避障；回退改 legacy_points
       structured_candidate_count: 8                                              # 成对连续圆弧/S弯候选，保证小批量中存在完整绕障控制形状
       structured_min_vx: 0.20                                                    # 结构化绕障模板最低目标速度，静止启动时仍可产生可分类的横向位移
       departure_lateral_offset: 0.42                                             # 绕障侧向脱离阈值（m）= 半车宽 0.32 + 碰撞裕度 0.10；越过后允许回舵
@@ -288,9 +289,9 @@ local_planner:
       gamma: 0.015                                                               # 控制能量项权重
       vx_std: 0.2                                                                # 线速度高斯噪声标准差
       wz_std: 0.08                                                               # Ackermann 可行域内角速度噪声，避免大量样本裁成正负满舵
-      vx_min: 0.05                                                               # Ackermann 平台默认只前进
-      vx_max: 1.0                                                                # 空旷直线路段速度上限（m/s），实际速度由轨迹优化决定
-      goal_slowdown_distance: 0.5                                                # 距终点该距离内线速度上限从 vx_max 线性降到 vx_min；0 关闭
+      vx_min: 0.0                                                               # Ackermann 平台默认只前进
+      vx_max: 1.5                                                                # 空旷直线路段速度上限（m/s），实际速度由轨迹优化决定
+      goal_slowdown_distance: 0.3                                                # 距终点该距离内线速度上限从 vx_max 线性降到 vx_min；0 关闭
       reverse_recovery_enabled: true                                             # 前进不可行时，按后退后能否完整绕障选择退让路线
       reverse_max_speed: 0.15                                                    # 倒车速度上限（m/s）
       wz_max: 0.526                                                              # 角速度硬上限，最终还会被 steering 几何约束裁剪
@@ -315,13 +316,13 @@ local_planner:
         collision_cost: 100000.0                                                 # 轨迹碰撞代价
         collision_margin_distance: 0.20                                          # 近碰撞边界（m）
         near_goal_distance: 0.5                                                  # 近目标时降低远离障碍偏好
-        inflation_radius: 2.2                                                    # 点云障碍排斥半径（m），用于提前选边
-        trajectory_point_step: 4                                                 # 障碍检测步长，降低每周期 KDTree 查询量
+        inflation_radius: 2.0                                                    # 点云障碍排斥半径（m），用于提前选边
+        trajectory_point_step: 2                                                 # 障碍净距代价采样，每 2 步≈0.2 s；碰撞仍每步检查
 
       GoalCritic:
         cost_weight: 5.0                                                         # 近目标位置收敛权重
         cost_power: 1
-        threshold_to_consider: 0.5                                               # 路径剩余长度小于该值时启用
+        threshold_to_consider: 0.3                                               # 路径剩余长度小于该值时启用
 
       GoalAngleCritic:
         cost_weight: 3.0                                                         # 近目标朝向收敛权重
@@ -335,7 +336,7 @@ local_planner:
         threshold_to_consider: 0.5
         max_path_occupancy_ratio: 0.07
         offset_from_furthest: 20
-        trajectory_point_step: 4
+        trajectory_point_step: 2                                                 # 路径对齐采样，每 2 步≈0.2 s
         use_path_orientations: false
 
       PathFollowCritic:

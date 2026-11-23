@@ -297,23 +297,9 @@ Validation MapConfig::validate() const {
   return Validation::success();
 }
 
-// One circular-buffer cell. Kept as a plain POD so a published snapshot can be
-// one contiguous copy while the mutable map updates it in place.
-struct VoxelCell {
-  double last_observed_stamp{kNaN};
-  double last_hit_stamp{kNaN};
-  double last_miss_stamp{kNaN};
-  float log_odds{0.0f};
-  // Compact latest-frame measured hit centroid. Kept as floats because this
-  // is a per-voxel surface sample, not an unbounded cloud history.
-  float hit_x{std::numeric_limits<float>::quiet_NaN()};
-  float hit_y{std::numeric_limits<float>::quiet_NaN()};
-  float hit_z{std::numeric_limits<float>::quiet_NaN()};
-  float hit_max_z{std::numeric_limits<float>::quiet_NaN()};
-  uint32_t inflation{0};
-  uint8_t observed{0};
-  uint8_t padding[3]{0, 0, 0};
-};
+// One circular-buffer cell is the public flat POD so a snapshot copy and a
+// caller-owned export share exactly one layout with no conversion.
+using VoxelCell = MapCellExport;
 
 struct VoxelMap::Impl {
   using Cell = VoxelCell;
@@ -717,6 +703,10 @@ Vec3 MapSnapshot::originWorld() const {
          impl_->config.voxel_size;
 }
 Vec3i MapSnapshot::windowDims() const { return impl_->dims; }
+
+std::vector<MapCellExport> MapSnapshot::exportCells() const {
+  return impl_->cells;
+}
 
 bool MapSnapshot::inBounds(const Vec3& point) const {
   if (!finite(point)) {

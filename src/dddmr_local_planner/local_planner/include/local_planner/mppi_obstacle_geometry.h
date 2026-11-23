@@ -2,6 +2,7 @@
 #define LOCAL_PLANNER_MPPI_OBSTACLE_GEOMETRY_H_
 
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
@@ -39,6 +40,33 @@ struct MppiObstacleSnapshot
   pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr kdtree;
   std::shared_ptr<const MppiObstacleSpatialIndex> obstacle_index;
 };
+
+// Lossless, POD, flat export of the immutable BVH built by
+// makeMppiObstacleSnapshot(). Leaf point ranges index point_indices; the cloud
+// itself is snapshot.cloud (already filtered to finite points). The export
+// copies the arrays so callers may keep it independently of the snapshot.
+struct MppiObstacleBvhNode
+{
+  double minimum[3] = {0.0, 0.0, 0.0};
+  double maximum[3] = {0.0, 0.0, 0.0};
+  std::uint32_t begin = 0;
+  std::uint32_t end = 0;
+  std::int32_t left = -1;
+  std::int32_t right = -1;
+
+  bool isLeaf() const {return left < 0;}
+};
+
+struct MppiObstacleBvhExport
+{
+  std::vector<MppiObstacleBvhNode> nodes;
+  std::vector<std::int32_t> point_indices;
+};
+
+bool exportMppiObstacleBvh(
+  const MppiObstacleSnapshot & snapshot,
+  MppiObstacleBvhExport * output,
+  std::string * error = nullptr);
 
 struct MppiObstacleScoringWork
 {

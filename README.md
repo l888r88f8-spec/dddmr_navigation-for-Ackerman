@@ -102,14 +102,62 @@ map
 src/dddmr_p2p_move_base/config/p2p_move_base_localization.yaml
 ```
 
-## 编译
+## 编译（Release + CUDA/CPU）
+
+在本仓库内构建独立 overlay。必须同时构建 `p2p_move_base`，否则新 overlay
+只会更新库，不会安装两份已设为 `compute_backend: cuda` 的 YAML，导航仍会
+沿用旧安装里的 CPU 默认配置。
 
 ```bash
-cd /home/robot/nav26_ws
+cd /home/robot/navigation_ws/src/dddmr_navigation-for-Ackerman
 source /opt/ros/humble/setup.bash
-colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
-source install/setup.bash
+source /home/robot/navigation_ws/install/setup.bash
+
+colcon --log-base "$PWD/log/mppi_cuda_integration/colcon" build \
+  --base-paths src/dddmr_local_map \
+               src/dddmr_local_planner/local_planner \
+               src/dddmr_p2p_move_base \
+  --build-base "$PWD/log/mppi_cuda_integration/build" \
+  --install-base "$PWD/log/mppi_cuda_integration/install" \
+  --packages-select dddmr_local_map local_planner p2p_move_base \
+  --parallel-workers 4 \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release \
+               -DBUILD_TESTING=OFF \
+               -DMPPI_ENABLE_CUDA=ON
+
+source log/mppi_cuda_integration/install/setup.bash
 ```
+
+CUDA 后端按 `CMAKE_CUDA_ARCHITECTURES` 编译（默认 87 / Orin），使用双精度、
+`--ftz=false`、精确 div/sqrt，不启用 fast math。两份配置
+`src/dddmr_p2p_move_base/config/p2p_move_base_localization.yaml` 与
+`p2p_move_base_grid_localization.yaml` 已经写入 `compute_backend: cuda`。
+
+后端参数在节点初始化时读取，修改后重启生效。在实际加载的 YAML 中将
+`compute_backend` 设为 `cpu` 即可使用 CPU，已有 CUDA 构建无需重编译。
+如果修改仓库内的源 YAML，请重新构建 `p2p_move_base` 以安装配置。
+
+以下是可选的 CPU-only 构建；启动时仍需显式加载 `compute_backend: cpu` 的配置：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/robot/navigation_ws/install/setup.bash
+source "$PWD/log/mppi_cuda_integration/install/setup.bash"
+
+colcon --log-base "$PWD/log/mppi_cuda_integration_cpu/colcon" build \
+  --base-paths src/dddmr_local_planner/local_planner \
+  --build-base "$PWD/log/mppi_cuda_integration_cpu/build" \
+  --install-base "$PWD/log/mppi_cuda_integration_cpu/install" \
+  --packages-select local_planner --parallel-workers 4 \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release \
+               -DBUILD_TESTING=OFF \
+               -DMPPI_ENABLE_CUDA=OFF
+
+source log/mppi_cuda_integration_cpu/install/setup.bash
+```
+
+CUDA 配置但设备/内核不可用时，`MppiCudaScoringError` 会显式报错、清零命令并
+终止本周期，不会静默回退 CPU。
 
 ## 启动方式
 

@@ -281,14 +281,15 @@ void MultiLayerSpinningLidar::cbSensor(const sensor_msgs::msg::PointCloud2::Shar
   trans_gbl2s_af3_ = trans_gbl2b_af3*trans_b2s_af3;
   trans_gbl2s_ = tf2::eigenToTransform (trans_gbl2s_af3_);
 
+  pcl_msg->erase(
+    std::remove_if(
+      pcl_msg->begin(), pcl_msg->end(),
+      [this](const pcl::PointXYZ & point) {
+        return !IsWithinXYRadius(point.x, point.y, perception_window_size_);
+      }),
+    pcl_msg->end());
+
   pcl::PassThrough<pcl::PointXYZ> pass;
-  pass.setInputCloud (pcl_msg);
-  pass.setFilterFieldName ("x");
-  pass.setFilterLimits (-perception_window_size_, perception_window_size_);
-  pass.filter (*pcl_msg);
-  pass.setInputCloud (pcl_msg);
-  pass.setFilterFieldName ("y");
-  pass.filter (*pcl_msg);
   pass.setInputCloud (pcl_msg);
   pass.setFilterFieldName ("z");
   pass.setFilterLimits (min_obstacle_height_, marking_height_);
@@ -548,6 +549,10 @@ void MultiLayerSpinningLidar::selfMark(){
   pcl::PointCloud<pcl::PointXYZI>::Ptr projected_cloud_clusters (new pcl::PointCloud<pcl::PointXYZI>);
   const auto done_mark_clustered = std::chrono::steady_clock::now();
   double add_ms = 0.0;
+  // One inverse per observation; the FOV and circular-window checks use the
+  // same acquisition-time map->body pose for every cluster.
+  const Eigen::Affine3d body_from_global_af3 =
+    tf2::transformToEigen(trans_gbl2b_).inverse();
   for (std::vector<pcl::PointIndices>::const_iterator it = cluster_indices_segmentation.begin (); it != cluster_indices_segmentation.end (); ++it)
   {
     if(it->indices.empty()){
@@ -667,7 +672,7 @@ void MultiLayerSpinningLidar::selfMark(){
       pcl_msg_gbl_->push_back(pt_centroid);
       cloud_cluster->push_back(centroid);
 
-      if(isinLidarObservation(voxelized_centroid)){
+      if(isinLidarObservation(voxelized_centroid, body_from_global_af3)){
           const auto add_started_at = std::chrono::steady_clock::now();
           pct_marking_->addPCPtr(centroid.x, centroid.y, centroid.z, cloud_cluster, coefficients);
           add_ms += std::chrono::duration<double, std::milli>(
@@ -794,8 +799,12 @@ void MultiLayerSpinningLidar::selfClear(){
   //@ This is very important!!!!!!!!
   std::vector<perception_3d::marking_voxel> current_observation_ptr;
   std::vector<perception_3d::per_marking*> markings_to_clear;
+  const Eigen::Affine3d body_from_global_af3 =
+    tf2::transformToEigen(trans_gbl2b_).inverse();
   
   //@ find robot location and base on perception window, we extract all nearby marked clusters
+  //@ The square bucket scan below is only a coarse search; the exact inclusive
+  //@ body-XY circle is enforced by isinLidarObservation() before mark/clear.
   int round_robot_base_x_min = ((trans_gbl2b_.transform.translation.x-perception_window_size_)/resolution_);
   int round_robot_base_x_max = ((trans_gbl2b_.transform.translation.x+perception_window_size_)/resolution_);
   int round_robot_base_y_min = ((trans_gbl2b_.transform.translation.y-perception_window_size_)/resolution_);
@@ -852,7 +861,7 @@ void MultiLayerSpinningLidar::selfClear(){
         pt.z = marking.pc_->back().z;
         pcl::PointCloud<pcl::PointXYZI> casting_check;
 
-        if(!isinLidarObservation(pt)){
+        if(!isinLidarObservation(pt, body_from_global_af3)){
   
           perception_3d::marking_voxel a_voxel;
           a_voxel.x = (*it_x).first;
@@ -1078,8 +1087,17 @@ void MultiLayerSpinningLidar::getCastingPointCloud(pcl::PointXYZ& cluster_center
   */
 }
 
-bool MultiLayerSpinningLidar::isinLidarObservation(pcl::PointXYZ& pc){
-  
+bool MultiLayerSpinningLidar::isinLidarObservation(
+  pcl::PointXYZ& pc, const Eigen::Affine3d & body_from_global)
+{
+  // The input cloud is in map coordinates. Reject points outside the inclusive
+  // body-XY observation circle before the sensor FOV/yaw checks, so cropped
+  // old corner markings cannot be cleared as if they were observed free space.
+  const Eigen::Vector3d pc_body =
+    body_from_global * Eigen::Vector3d(pc.x, pc.y, pc.z);
+  if(!IsWithinXYRadius(pc_body.x(), pc_body.y(), perception_window_size_)){
+    return false;
+  }
   
   //@ Solving vertical distance to sensor plan, so we can compute sin for vertical FOV check
   

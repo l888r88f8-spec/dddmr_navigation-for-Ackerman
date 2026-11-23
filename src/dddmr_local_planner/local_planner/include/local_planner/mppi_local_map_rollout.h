@@ -17,12 +17,19 @@
 namespace local_planner {
 
 // Environment source for the MPPI obstacle/traversability critic data. The
-// parameter name is mppi.environment_backend. Only these two exact spellings
-// are accepted; unknown values are rejected instead of silently selecting the
+// parameter name is mppi.environment_backend. Only these exact spellings are
+// accepted; unknown values are rejected instead of silently selecting the
 // legacy point cloud path.
+//
+// kTiltedPlane2D freezes the current base_link pose once per control cycle,
+// filters the map obstacle snapshot into the [-0.20, 0.60] m band measured in
+// that plane, flattens the accepted points to plane z=0, projects the tracking
+// reference into the same plane and runs the existing planar Ackermann MPPI
+// there. Output poses carry the full frozen attitude back into the map frame.
 enum class MppiEnvironmentBackend : std::uint8_t {
   kLegacyPoints = 0,
   kLocalMap = 1,
+  kTiltedPlane2D = 2,
 };
 
 const char* toString(MppiEnvironmentBackend value);

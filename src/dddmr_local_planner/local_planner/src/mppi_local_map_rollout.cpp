@@ -147,6 +147,8 @@ const char* toString(MppiEnvironmentBackend value) {
       return "legacy_points";
     case MppiEnvironmentBackend::kLocalMap:
       return "local_map";
+    case MppiEnvironmentBackend::kTiltedPlane2D:
+      return "tilted_plane_2d";
   }
   return "unknown";
 }
@@ -166,6 +168,10 @@ bool parseMppiEnvironmentBackend(const std::string& value,
   }
   if (value == "local_map") {
     *backend = MppiEnvironmentBackend::kLocalMap;
+    return true;
+  }
+  if (value == "tilted_plane_2d") {
+    *backend = MppiEnvironmentBackend::kTiltedPlane2D;
     return true;
   }
   return false;

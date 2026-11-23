@@ -42,10 +42,15 @@
 
 #include <local_planner/mppi_critic_manager.h>
 #include <local_planner/mppi_controller.h>
+#include <local_planner/mppi_cuda_critics.h>
+#include <local_planner/mppi_cuda_local_map_rollout.h>
+#include <local_planner/mppi_cuda_obstacles.h>
+#include <local_planner/mppi_cuda_terrain.h>
 #include <local_planner/mppi_directed_retreat.h>
 #include <local_planner/mppi_local_map_rollout.h>
 #include <local_planner/mppi_measured_travel.h>
 #include <local_planner/mppi_obstacle_geometry.h>
+#include <local_planner/mppi_tilted_plane.h>
 #include <local_planner/published_cloud_cache.h>
 #include <local_planner/debug_publish.h>
 
@@ -287,17 +292,22 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       double getMaxAckermannCurvature() const;
       pcl::PointCloud<pcl::PointXYZ> transformRobotCuboid(
         const geometry_msgs::msg::PoseStamped & pose) const;
+      pcl::PointCloud<pcl::PointXYZ> transformCuboidVertices(
+        const geometry_msgs::msg::PoseStamped & pose,
+        const std::vector<pcl::PointXYZ> & vertices) const;
       base_trajectory::cuboid_min_max_t computeCuboidMinMax(
         const pcl::PointCloud<pcl::PointXYZ> & cuboid) const;
       base_trajectory::Trajectory buildPredictedTrajectory(
         double linear_velocity,
         double angular_velocity) const;
       base_trajectory::Trajectory buildPredictedTrajectoryFromMppiControls(
-        const std::vector<local_planner::MppiControl> & controls) const;
+        const std::vector<local_planner::MppiControl> & controls,
+        const local_planner::MppiPlanarScene * planar_scene = nullptr) const;
       local_planner::MppiScoredTrajectory buildMppiScoredTrajectory(
         const std::vector<local_planner::MppiControl> & controls,
         const local_planner::MppiObstacleSnapshot & obstacle_snapshot,
-        bool check_every_obstacle_point = false) const;
+        bool collision_only = false,
+        const local_planner::MppiPlanarScene * planar_scene = nullptr) const;
       // Distance-parameterized continuation of one terminal control from the
       // given pose. Collision-only and stopped at first contact.
       // first_block_m receives the arc length of that contact, or -1.
@@ -305,10 +315,13 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
         const geometry_msgs::msg::Pose & terminal_pose,
         const local_planner::MppiControl & terminal,
         const local_planner::MppiObstacleSnapshot & obstacle_snapshot,
-        double * first_block_m) const;
+        double * first_block_m,
+        const local_planner::MppiPlanarScene * planar_scene = nullptr) const;
       local_planner::MppiCriticData buildMppiCriticData(
         const std::vector<local_planner::MppiCandidate> & candidates,
-        const local_planner::MppiObstacleSnapshot & obstacle_snapshot) const;
+        const local_planner::MppiObstacleSnapshot & obstacle_snapshot,
+        const local_planner::MppiPlanarScene * planar_scene = nullptr,
+        local_planner::MppiCudaTrajectoryBatchView * device_batch = nullptr) const;
       dddmr_sys_core::PlannerState computeRppControlCommand(
         const std::string & controller_name,
         geometry_msgs::msg::Twist * cmd_vel);
@@ -339,6 +352,17 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       };
 
       bool isMppiLocalMapBackendSelected() const;
+      // True only for mppi.environment_backend=tilted_plane_2d.
+      bool isMppiTiltedPlaneBackendSelected() const;
+      // Composes the one immutable plane cycle used by every candidate, the
+      // final check, the output conversion and the retreat validator: frozen
+      // map<-base_link transform, height-filtered/flattened obstacle grid,
+      // planar reference and planar body envelope. Returns false with a detail
+      // string when the transform or the inputs are unusable.
+      bool composeMppiTiltedPlaneScene(
+        const ControllerContext & context,
+        local_planner::MppiPlanarScene * scene,
+        std::string * reason) const;
       bool acquireMppiLocalMapCycle(
         MppiLocalMapCycle * cycle, std::string * reason);
       bool revalidateMppiLocalMapCycle(
@@ -355,6 +379,14 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       local_planner::MppiLateralOccupancyProfile measureMppiLateralOccupancyForObstacleCloud(
         const std::vector<local_planner::MppiPathPoint> & path,
         const local_planner::MppiObstacleSnapshot & obstacle_snapshot) const;
+      // Tilted-plane counterpart: probes the 2-D grid instead of a 3-D
+      // snapshot. Each probe tests the whole oriented body rectangle against
+      // the projected obstacle points, so the predicate is footprint
+      // clearance and is stricter than the legacy 3-D point-radius probe. The
+      // grid covers only the upstream perception window.
+      local_planner::MppiLateralOccupancyProfile measureMppiLateralOccupancyForTiltedPlane(
+        const std::vector<local_planner::MppiPathPoint> & path,
+        const local_planner::MppiPlanarScene & planar_scene) const;
       local_planner::MppiBypassSide preferredMppiBypassSide(
         const local_planner::MppiLateralOccupancyProfile & profile) const;
       // Effective forward speed cap for the MPPI backends: the external
@@ -387,12 +419,25 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       local_planner::MppiDirectedRetreat mppi_directed_retreat_;
       std::size_t mppi_retreat_route_version_{std::numeric_limits<std::size_t>::max()};
       std::size_t mppi_retreat_goal_seq_{std::numeric_limits<std::size_t>::max()};
+      // Stable map-anchored frame for the directed retreat in tilted-plane
+      // mode. Frozen when a search starts and held until the route finishes,
+      // so small cycle-to-cycle attitude changes cannot reset the search.
+      Eigen::Isometry3d mppi_retreat_anchor_to_planner_{Eigen::Isometry3d::Identity()};
+      bool mppi_retreat_anchor_valid_{false};
+      // External invalidation of the directed retreat. MppiDirectedRetreat::
+      // invalidate() deliberately leaves the retreat active (braking), so
+      // computeMppiDirectedRetreat() never reaches its "inactive" branch to
+      // clear the anchor. Dropping the anchor here forces the next planar
+      // search to re-anchor to the current cycle's plane instead of reusing a
+      // frozen frame that no longer corresponds to it.
+      void invalidateMppiDirectedRetreat();
       local_planner::MppiResult computeMppiDirectedRetreat(
         const local_planner::MppiControl & measured,
         const std::vector<local_planner::MppiPathPoint> & path,
         double runtime_speed_limit,
         const local_planner::MppiDirectedRetreat::PoseValidator & validator,
-        std::uint64_t environment_id);
+        std::uint64_t environment_id,
+        const local_planner::MppiPlanarScene * planar_scene = nullptr);
 
       // Diagnostic-only blocked-corridor trace. It never feeds a control
       // decision; it records why the controller saw (or lost) a passable side.
@@ -411,7 +456,8 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
         double optimal_collision_x,
         double optimal_collision_y,
         double optimal_collision_yaw,
-        std::size_t blocked_path_points);
+        std::size_t blocked_path_points,
+        const local_planner::MppiPlanarScene * planar_scene);
       std::vector<local_planner::MppiPathPoint> mppi_diagnostic_path_;
       std::string mppi_blocked_diagnostics_state_;
       std::chrono::steady_clock::time_point mppi_blocked_diagnostics_last_{};
@@ -419,8 +465,38 @@ class Local_Planner : public rclcpp::Node, public dddmr_sys_core::RouteTrackingC
       double mppi_debug_blocked_diagnostics_period_{0.1};
 
       local_planner::MppiCriticManager mppi_critic_manager_;
+      // Reusable CUDA objects. The const scoring helpers upload scene data
+      // once per pinned cycle and reuse these instances for every candidate
+      // batch/attempt; the caches hold the owning shared_ptr, not a bare
+      // address, so allocator reuse cannot masquerade as the same scene.
+      mutable std::unique_ptr<local_planner::MppiCudaCritics> mppi_cuda_critics_;
+      mutable std::unique_ptr<local_planner::MppiCudaObstacles> mppi_cuda_obstacles_;
+      mutable std::unique_ptr<local_planner::MppiCudaTerrain> mppi_cuda_terrain_;
+      mutable std::unique_ptr<local_planner::MppiCudaLocalMapRollout>
+        mppi_cuda_local_map_rollout_;
+      mutable pcl::PointCloud<pcl::PointXYZI>::Ptr
+        mppi_cuda_obstacle_scene_cloud_;
+      mutable std::shared_ptr<const local_planner::MppiObstacleSpatialIndex>
+        mppi_cuda_obstacle_scene_index_;
+      mutable std::shared_ptr<const dddmr_local_map::MapSnapshot>
+        mppi_cuda_local_map_scene_snapshot_;
+      mutable std::shared_ptr<const dddmr_local_map::TerrainModel>
+        mppi_cuda_local_map_scene_terrain_;
+      mutable std::uint64_t mppi_cuda_local_map_scene_generation_{0};
+      mutable std::uint64_t mppi_cuda_local_map_scene_version_{0};
+      // Tilted-plane CUDA scene cache: every successful composition receives a
+      // fresh monotonic identity, and the device 2-D grid is re-uploaded only
+      // when that identity differs from the last one uploaded.
+      mutable std::uint64_t mppi_tilted_plane_scene_sequence_{0};
+      mutable std::uint64_t mppi_cuda_planar_scene_identity_{0};
       local_planner::MppiControl mppi_last_command_;
       bool mppi_use_perception_blocked_preemption_;
+      // Simple MPPI 2-D avoidance: freeze the current base_link attitude for
+      // the tick, filter/flatten obstacles in that plane, and run the existing
+      // planar Ackermann model locally. Selected only through
+      // mppi.environment_backend=tilted_plane_2d so legacy points and the
+      // optional local_map backend retain their current semantics.
+      std::string mppi_tilted_plane_init_error_;
       // Autoware-style geometric bypass side selection. When disabled the
       // controller keeps its previous cost-based side comparison.
       bool mppi_bypass_geometry_enabled_{true};

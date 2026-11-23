@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <string>
+
+#include "local_planner/mppi_batch_math.h"
+#include "local_planner/mppi_cuda_backend.h"
 
 namespace local_planner
 {
@@ -18,6 +22,25 @@ const char * toString(const MppiBypassSide side)
       return "neutral";
   }
   return "neutral";
+}
+
+const char * toString(const MppiComputeBackend backend)
+{
+  return backend == MppiComputeBackend::Cuda ? "cuda" : "cpu";
+}
+
+bool parseMppiComputeBackend(
+  const std::string & value, MppiComputeBackend & backend)
+{
+  if(value == "cpu"){
+    backend = MppiComputeBackend::Cpu;
+    return true;
+  }
+  if(value == "cuda"){
+    backend = MppiComputeBackend::Cuda;
+    return true;
+  }
+  return false;
 }
 
 const char * toString(const MppiAvoidanceStage stage)
@@ -114,11 +137,14 @@ MppiController::MppiController(const MppiConfig & config)
   setConfig(config);
 }
 
+MppiController::~MppiController() = default;
+
 void MppiController::setConfig(const MppiConfig & config)
 {
   config_ = config;
   normalizeConfig();
   generator_.seed(config_.seed);
+  cuda_noise_generation_ = 0;
   use_debug_noise_for_test_ = false;
   control_sequence_.assign(config_.time_steps, MppiControl{0.0, 0.0});
   reverse_control_sequence_.assign(config_.time_steps, MppiControl{0.0, 0.0});
@@ -334,6 +360,29 @@ MppiResult MppiController::optimizeBatch(
     return result;
   }
 
+  if(config_.compute_backend == MppiComputeBackend::Cuda){
+    if(!cuda_backend_){
+      cuda_backend_ = makeMppiCudaBackend();
+      cuda_backend_ready_ = false;
+    }
+    std::string reason;
+    if(!cuda_backend_ || !cuda_backend_->available(&reason)){
+      cuda_backend_unavailable_reason_ = reason.empty() ?
+        "CUDA backend reported unavailable" : reason;
+      result.backend_error =
+        "CUDA backend unavailable: " + cuda_backend_unavailable_reason_;
+      result.rejected_samples = config_.batch_size;
+      result.optimal_sequence = control_sequence_;
+      result.avoidance_stage = avoidance_stage_;
+      result.reverse_recovery_active = reverse_recovery_active_;
+      result.reverse_motion_active = reverse_motion_active_;
+      result.reverse_distance_used = reverse_distance_used_;
+      result.reverse_distance_remaining = reverseDistanceRemaining();
+      return result;
+    }
+    cuda_backend_ready_ = true;
+  }
+
   const double reverse_ceiling = reverseSpeedCeiling(runtime_speed_limit);
 
   const auto entry_control_sequence = control_sequence_;
@@ -396,13 +445,99 @@ MppiResult MppiController::optimizeBatch(
 
     std::vector<SampledSequence> sampled_sequences;
     std::vector<MppiCandidate> candidates;
-    const auto generate_candidates = [&]() {
+    const auto generate_candidates = [&]() -> bool {
         result.structured_candidates = use_debug_noise_for_test_ ? 0 :
           activeStructuredCandidateCount(generation_bypass_side);
         sampled_sequences.clear();
         candidates.clear();
         sampled_sequences.reserve(config_.batch_size);
         candidates.reserve(config_.batch_size);
+        if(config_.compute_backend == MppiComputeBackend::Cuda){
+          MppiGenerationRequest request;
+          auto & params = request.params;
+          params.batch_size = config_.batch_size;
+          params.time_steps = config_.time_steps;
+          params.structured_candidate_count = result.structured_candidates;
+          params.model_dt = config_.model_dt;
+          params.controller_period = config_.controller_period;
+          params.gamma = config_.gamma;
+          params.vx_std = config_.vx_std;
+          params.wz_std = config_.wz_std;
+          params.vx_min = config_.vx_min;
+          params.vx_max = config_.vx_max;
+          params.wz_max = config_.wz_max;
+          params.max_steer = config_.max_steer;
+          params.wheelbase = config_.wheelbase;
+          params.ax_min = config_.ax_min;
+          params.ax_max = config_.ax_max;
+          params.az_max = config_.az_max;
+          params.structured_min_vx = config_.structured_min_vx;
+          params.shift_control_sequence = config_.shift_control_sequence;
+          params.use_debug_noise = use_debug_noise_for_test_;
+          params.bypass_side = generation_bypass_side;
+          params.avoidance_stage = generation_avoidance_stage;
+          params.seed = config_.seed;
+          params.noise_generation = cuda_noise_generation_;
+          params.use_device_noise = !use_debug_noise_for_test_;
+          request.measured_speed = measured_speed;
+          request.control_sequence = control_sequence_;
+          if(use_debug_noise_for_test_){
+            std::size_t noise_total = 0;
+            if(!mppi_math::checkedMulSize(
+                noise_.size(), config_.time_steps, noise_total))
+            {
+              result.backend_error = "CUDA debug noise batch size overflow";
+              result.rejected_samples = config_.batch_size;
+              result.has_valid_control = false;
+              control_sequence_ = entry_control_sequence;
+              result.optimal_sequence = control_sequence_;
+              return false;
+            }
+            request.noise_batch_size = noise_.size();
+            request.noise.reserve(noise_total);
+            for(const auto & row : noise_){
+              request.noise.insert(request.noise.end(), row.begin(), row.end());
+            }
+          }
+          MppiCandidateBatch batch;
+          std::string error;
+          if(!cuda_backend_ || !cuda_backend_->generateCandidates(request, batch, error)){
+            result.backend_error = error.empty() ?
+              "CUDA candidate generation failed" : error;
+            result.rejected_samples = config_.batch_size;
+            result.has_valid_control = false;
+            control_sequence_ = entry_control_sequence;
+            result.optimal_sequence = control_sequence_;
+            return false;
+          }
+          std::size_t expected_total = 0;
+          if(!mppi_math::checkedMulSize(
+              config_.batch_size, config_.time_steps, expected_total) ||
+            batch.batch_size != config_.batch_size ||
+            batch.time_steps != config_.time_steps ||
+            batch.controls.size() != expected_total ||
+            batch.control_energy.size() != config_.batch_size ||
+            batch.structured.size() != config_.batch_size)
+          {
+            result.backend_error = "CUDA candidate generation returned inconsistent dimensions";
+            result.rejected_samples = config_.batch_size;
+            result.has_valid_control = false;
+            control_sequence_ = entry_control_sequence;
+            result.optimal_sequence = control_sequence_;
+            return false;
+          }
+          for(std::size_t sample = 0; sample < config_.batch_size; ++sample){
+            SampledSequence sampled;
+            sampled.controls.assign(
+              batch.controls.begin() + sample * config_.time_steps,
+              batch.controls.begin() + (sample + 1) * config_.time_steps);
+            sampled.control_energy = batch.control_energy[sample];
+            sampled.structured = batch.structured[sample] != 0u;
+            sampled_sequences.push_back(std::move(sampled));
+            candidates.push_back(MppiCandidate{sampled_sequences.back().controls});
+          }
+          return true;
+        }
         for(std::size_t sample = 0; sample < config_.batch_size; ++sample){
           sampled_sequences.push_back(buildNoisedSequence(
               measured_speed,
@@ -411,8 +546,11 @@ MppiResult MppiController::optimizeBatch(
               generation_avoidance_stage));
           candidates.push_back(MppiCandidate{sampled_sequences.back().controls});
         }
+        return true;
       };
-    generate_candidates();
+    if(!generate_candidates()){
+      return result;
+    }
     auto scores = score_function(candidates);
 
     const auto valid_soft_score = [](const MppiCandidateScore & score) {
@@ -489,6 +627,13 @@ MppiResult MppiController::optimizeBatch(
           reverse_selected = true;
           break;
         }
+        if(!result.backend_error.empty()){
+          control_sequence_ = entry_control_sequence;
+          result.has_valid_control = false;
+          result.optimal_sequence = control_sequence_;
+          set_reverse_diagnostics();
+          return result;
+        }
         reverse_budget_exhausted_this_cycle =
           reverseDistanceRemaining() <= kReverseDistanceEpsilon;
         // Keep retreating even though this batch contains a usable forward
@@ -518,6 +663,13 @@ MppiResult MppiController::optimizeBatch(
           reverse_selected = true;
           break;
         }
+        if(!result.backend_error.empty()){
+          control_sequence_ = entry_control_sequence;
+          result.has_valid_control = false;
+          result.optimal_sequence = control_sequence_;
+          set_reverse_diagnostics();
+          return result;
+        }
       }
       else{
         reverse_budget_exhausted_this_cycle =
@@ -543,7 +695,9 @@ MppiResult MppiController::optimizeBatch(
         if(generation_bypass_side != MppiBypassSide::Neutral){
           generation_bypass_side = MppiBypassSide::Neutral;
           generation_avoidance_stage = MppiAvoidanceStage::Neutral;
-          generate_candidates();
+          if(!generate_candidates()){
+            return result;
+          }
           scores = score_function(candidates);
         }
       }
@@ -605,6 +759,7 @@ MppiResult MppiController::optimizeBatch(
     const std::size_t quality_cycles_before_update =
       provisional_quality_advantage_cycles;
     const bool side_state_was_settled = side_state_settled;
+    std::string update_backend_error;
     const auto statistics = applySoftmaxUpdate(
       valid_sequences,
       valid_costs,
@@ -618,7 +773,8 @@ MppiResult MppiController::optimizeBatch(
       provisional_infeasible_cycles,
       provisional_quality_advantage_cycles,
       provisional_avoidance_stage,
-      iteration == 0);
+      iteration == 0,
+      update_backend_error);
     if(side_state_was_settled){
       provisional_bypass_side = settled_bypass_side;
       provisional_infeasible_cycles = settled_infeasible_cycles;
@@ -644,6 +800,18 @@ MppiResult MppiController::optimizeBatch(
     result.phase_compatible_candidates = statistics.phase_compatible_candidates;
     result.bypass_guard_applied = statistics.bypass_guard_applied;
     result.bypass_guard_removed = statistics.bypass_guard_removed;
+    if(!update_backend_error.empty()){
+      result.backend_error = update_backend_error;
+      result.has_valid_control = false;
+      control_sequence_ = entry_control_sequence;
+      result.optimal_sequence = control_sequence_;
+      result.selected_bypass_side = provisional_bypass_side;
+      result.side_infeasible_cycles = provisional_infeasible_cycles;
+      result.side_quality_advantage_cycles = provisional_quality_advantage_cycles;
+      result.avoidance_stage = provisional_avoidance_stage;
+      set_reverse_diagnostics();
+      return result;
+    }
     result.selected_bypass_side = provisional_bypass_side;
     result.side_infeasible_cycles = provisional_infeasible_cycles;
     result.side_quality_advantage_cycles = provisional_quality_advantage_cycles;
@@ -659,6 +827,13 @@ MppiResult MppiController::optimizeBatch(
           {
             reverse_selected = true;
             break;
+          }
+          if(!result.backend_error.empty()){
+            control_sequence_ = entry_control_sequence;
+            result.has_valid_control = false;
+            result.optimal_sequence = control_sequence_;
+            set_reverse_diagnostics();
+            return result;
           }
         }
         else{
@@ -768,6 +943,15 @@ void MppiController::normalizeConfig()
 
 void MppiController::regenerateNoise()
 {
+  if(config_.compute_backend == MppiComputeBackend::Cuda &&
+    !use_debug_noise_for_test_)
+  {
+    // The CUDA normal path samples on device from (seed, generation). Only the
+    // counter advances here; no host batch is generated or uploaded.
+    ++cuda_noise_generation_;
+    noise_.clear();
+    return;
+  }
   std::normal_distribution<double> vx_dist(0.0, config_.vx_std);
   std::normal_distribution<double> wz_dist(0.0, config_.wz_std);
 
@@ -932,10 +1116,94 @@ bool MppiController::tryReverseFallback(
   std::vector<MppiCandidate> candidates;
   sampled_sequences.reserve(config_.batch_size);
   candidates.reserve(config_.batch_size);
-  for(std::size_t sample = 0; sample < config_.batch_size; ++sample){
-    sampled_sequences.push_back(buildReverseSequence(
-        measured_speed, sample, reverse_speed_ceiling));
-    candidates.push_back(MppiCandidate{sampled_sequences.back().controls});
+  if(config_.compute_backend == MppiComputeBackend::Cuda){
+    MppiGenerationRequest request;
+    auto & params = request.params;
+    params.batch_size = config_.batch_size;
+    params.time_steps = config_.time_steps;
+    params.structured_candidate_count = result.structured_candidates;
+    params.model_dt = config_.model_dt;
+    params.controller_period = config_.controller_period;
+    params.gamma = config_.gamma;
+    params.vx_std = config_.vx_std;
+    params.wz_std = config_.wz_std;
+    params.vx_min = config_.vx_min;
+    params.vx_max = config_.vx_max;
+    params.wz_max = config_.wz_max;
+    params.max_steer = config_.max_steer;
+    params.wheelbase = config_.wheelbase;
+    params.ax_min = config_.ax_min;
+    params.ax_max = config_.ax_max;
+    params.az_max = config_.az_max;
+    params.structured_min_vx = config_.structured_min_vx;
+    params.shift_control_sequence = config_.shift_control_sequence;
+    params.use_debug_noise = use_debug_noise_for_test_;
+    params.use_device_noise = !use_debug_noise_for_test_;
+    params.seed = config_.seed;
+    params.noise_generation = cuda_noise_generation_;
+    params.reverse_mode = true;
+    params.reverse_speed_ceiling = reverse_speed_ceiling;
+    params.bypass_side = MppiBypassSide::Neutral;
+    params.avoidance_stage = MppiAvoidanceStage::Neutral;
+    request.measured_speed = measured_speed;
+    request.control_sequence = control_sequence_;
+    if(use_debug_noise_for_test_){
+      std::size_t noise_total = 0;
+      if(!mppi_math::checkedMulSize(
+          noise_.size(), config_.time_steps, noise_total))
+      {
+        result.backend_error = "CUDA reverse debug noise batch size overflow";
+        result.rejected_samples = config_.batch_size;
+        result.has_valid_control = false;
+        return false;
+      }
+      request.noise_batch_size = noise_.size();
+      request.noise.reserve(noise_total);
+      for(const auto & row : noise_){
+        request.noise.insert(request.noise.end(), row.begin(), row.end());
+      }
+    }
+    MppiCandidateBatch batch;
+    std::string error;
+    if(!cuda_backend_ || !cuda_backend_->generateCandidates(request, batch, error)){
+      result.backend_error = error.empty() ?
+        "CUDA reverse candidate generation failed" : error;
+      result.rejected_samples = config_.batch_size;
+      result.has_valid_control = false;
+      return false;
+    }
+    std::size_t expected_total = 0;
+    if(!mppi_math::checkedMulSize(
+        config_.batch_size, config_.time_steps, expected_total) ||
+      batch.batch_size != config_.batch_size ||
+      batch.time_steps != config_.time_steps ||
+      batch.controls.size() != expected_total ||
+      batch.control_energy.size() != config_.batch_size ||
+      batch.structured.size() != config_.batch_size)
+    {
+      result.backend_error =
+        "CUDA reverse candidate generation returned inconsistent dimensions";
+      result.rejected_samples = config_.batch_size;
+      result.has_valid_control = false;
+      return false;
+    }
+    for(std::size_t sample = 0; sample < config_.batch_size; ++sample){
+      SampledSequence sampled;
+      sampled.controls.assign(
+        batch.controls.begin() + sample * config_.time_steps,
+        batch.controls.begin() + (sample + 1) * config_.time_steps);
+      sampled.control_energy = batch.control_energy[sample];
+      sampled.structured = batch.structured[sample] != 0u;
+      sampled_sequences.push_back(std::move(sampled));
+      candidates.push_back(MppiCandidate{sampled_sequences.back().controls});
+    }
+  }
+  else{
+    for(std::size_t sample = 0; sample < config_.batch_size; ++sample){
+      sampled_sequences.push_back(buildReverseSequence(
+          measured_speed, sample, reverse_speed_ceiling));
+      candidates.push_back(MppiCandidate{sampled_sequences.back().controls});
+    }
   }
 
   result.reverse_candidates_generated = true;
@@ -1293,7 +1561,8 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
   std::size_t & side_infeasible_cycles,
   std::size_t & side_quality_advantage_cycles,
   MppiAvoidanceStage & avoidance_stage,
-  const bool allow_side_transition)
+  const bool allow_side_transition,
+  std::string & backend_error)
 {
   UpdateStatistics statistics;
   if(!select_directional_mode){
@@ -1332,7 +1601,6 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
     return statistics;
   }
 
-  std::vector<MppiControl> updated(config_.time_steps);
   const std::size_t command_index =
     config_.shift_control_sequence && config_.time_steps > 1 ? 1 : 0;
   double squared_weight_sum = 0.0;
@@ -1619,39 +1887,56 @@ MppiController::UpdateStatistics MppiController::applySoftmaxUpdate(
     }
   }
 
-  double selected_min_cost = std::numeric_limits<double>::infinity();
-  for(std::size_t sample = 0; sample < valid_sequences.size(); ++sample){
-    if(selected[sample]){
-      selected_min_cost = std::min(selected_min_cost, selection_costs[sample]);
-    }
+  MppiWeightedUpdateRequest update_request;
+  update_request.batch_size = valid_sequences.size();
+  update_request.time_steps = config_.time_steps;
+  update_request.command_index = command_index;
+  update_request.temperature = config_.temperature;
+  update_request.sequences.reserve(valid_sequences.size() * config_.time_steps);
+  for(const auto & sequence : valid_sequences){
+    update_request.sequences.insert(
+      update_request.sequences.end(), sequence.begin(), sequence.end());
   }
-  std::vector<double> selected_weights(valid_sequences.size(), 0.0);
-  double selected_weight_sum = 0.0;
-  for(std::size_t sample = 0; sample < valid_sequences.size(); ++sample){
-    if(selected[sample]){
-      selected_weights[sample] =
-        std::exp(-(selection_costs[sample] - selected_min_cost) / config_.temperature);
-      selected_weight_sum += selected_weights[sample];
-    }
+  update_request.costs = selection_costs;
+  // Diagnostics (ESS and directional masses) must stay on the raw valid costs;
+  // the Depart soft penalty above only biases the selected control update.
+  update_request.diagnostic_costs = valid_costs;
+  update_request.selected.resize(selected.size());
+  for(std::size_t sample = 0; sample < selected.size(); ++sample){
+    update_request.selected[sample] = selected[sample] ? 1u : 0u;
   }
-  if(selected_weight_sum <= 1e-12 || !std::isfinite(selected_weight_sum)){
-    return statistics;
+  update_request.structured.resize(valid_structured.size());
+  for(std::size_t sample = 0; sample < valid_structured.size(); ++sample){
+    update_request.structured[sample] = valid_structured[sample] ? 1u : 0u;
   }
 
-  for(std::size_t sample = 0; sample < valid_sequences.size(); ++sample){
-    const double normalized_weight =
-      selected_weights[sample] / selected_weight_sum;
-    if(valid_structured[sample]){
-      statistics.structured_weight_mass += normalized_weight;
+  MppiWeightedUpdateResult update_result;
+  std::string error;
+  bool updated_ok = false;
+  if(config_.compute_backend == MppiComputeBackend::Cuda){
+    if(!cuda_backend_ || !cuda_backend_->weightedUpdate(
+        update_request, update_result, error))
+    {
+      backend_error = error.empty() ?
+        "CUDA weighted update failed" : error;
+      return statistics;
     }
-    for(std::size_t step = 0; step < config_.time_steps; ++step){
-      updated[step].vx += normalized_weight * valid_sequences[sample][step].vx;
-      updated[step].wz += normalized_weight * valid_sequences[sample][step].wz;
-    }
+    updated_ok = true;
   }
-  control_sequence_ = updated;
+  else{
+    updated_ok = mppiWeightedUpdateCpu(update_request, update_result, error);
+  }
+  if(!updated_ok || update_result.control_sequence.size() != config_.time_steps){
+    return statistics;
+  }
+  control_sequence_ = update_result.control_sequence;
   statistics.valid = true;
-  statistics.prefilter_command = updated[command_index];
+  statistics.prefilter_command = control_sequence_[command_index];
+  statistics.effective_sample_size = update_result.effective_sample_size;
+  statistics.positive_weight_mass = update_result.positive_weight_mass;
+  statistics.negative_weight_mass = update_result.negative_weight_mass;
+  statistics.neutral_weight_mass = update_result.neutral_weight_mass;
+  statistics.structured_weight_mass = update_result.structured_weight_mass;
   return statistics;
 }
 

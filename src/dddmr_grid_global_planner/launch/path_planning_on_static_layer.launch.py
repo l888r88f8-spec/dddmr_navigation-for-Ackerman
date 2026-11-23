@@ -1,7 +1,5 @@
 import os
-
 import yaml
-
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
@@ -39,7 +37,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'map_path',
-            default_value='/home/robot/map/hesai_outdoor_wuyuehua2',
+            default_value='/home/robot/map/hesai_indoor',
             description='Directory containing GlobalMap.pcd and GroundMap.pcd.',
         ),
         DeclareLaunchArgument(

@@ -94,7 +94,7 @@ install(TARGETS local_map_node local_map_shadow local_map_demo_scene
 ament_export_targets(dddmr_local_map_rosTargets HAS_LIBRARY_TARGET)
 ament_export_dependencies(rclcpp sensor_msgs tf2 tf2_ros geometry_msgs)
 
-if(BUILD_TESTING)
+if(BUILD_TESTING AND IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/test")
   find_package(ament_cmake_gtest REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
 
@@ -103,6 +103,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_terrain test/test_terrain.cpp)
   target_link_libraries(test_terrain dddmr_local_map_core)
+
+  ament_add_gtest(test_terrain_export test/test_terrain_export.cpp)
+  target_link_libraries(test_terrain_export dddmr_local_map_core)
 
   ament_add_gtest(test_ros_adapter test/test_ros_adapter.cpp)
   target_link_libraries(test_ros_adapter dddmr_local_map_ros)

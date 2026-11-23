@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "dddmr_local_map/snapshot_export.hpp"
 #include "dddmr_local_map/types.hpp"
 
 namespace dddmr_local_map {
@@ -60,6 +61,12 @@ class MapSnapshot {
   Vec3 originWorld() const;
   Vec3i windowDims() const;
   bool inBounds(const Vec3& point) const;
+
+  // Deep copy of the raw circular-buffer cells in their exact storage order.
+  // The returned vector is owned by the caller and stays unchanged when newer
+  // snapshots are published. Use originVoxel(), windowDims() and voxel_size to
+  // reproduce MapSnapshot::lookupVoxel without approximation.
+  std::vector<MapCellExport> exportCells() const;
 
   MapLookup lookup(const Vec3& point, bool include_inflation = true) const;
   MapLookup lookupVoxel(int64_t x, int64_t y, int64_t z,
